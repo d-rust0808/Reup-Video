@@ -54,6 +54,12 @@ export function UrlExtractor({ onMediaExtracted, onSelectForWorkbench }) {
     try {
       const result = await extractUrls([inputUrl.trim()]);
       const items = result.items || [];
+      if (items.length === 0) {
+        setError(
+          'Không tìm thấy hoặc không tải được video từ đường link này. Hệ thống hiện hỗ trợ bóc tách Douyin, Kuaishou, Xiaohongshu hoặc bạn có thể bấm "Tải File Từ Máy" để nạp video trực tiếp.'
+        );
+        return;
+      }
       setExtractedList(items);
       onMediaExtracted?.(items);
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { fetchOutputs, getDownloadUrl, downloadBatchZip, deleteOutput } from '../services/api';
+import { fetchOutputs, getDownloadUrl, downloadBatchZip, deleteOutput, deleteBatchOutputs, clearAllOutputs } from '../services/api';
 import { ConfirmModal } from './ConfirmModal';
 import { Toast } from './Toast';
 import { VideoModal } from './VideoModal';
@@ -11,6 +11,8 @@ export function OutputGallery() {
   const [selectedIds, setSelectedIds] = useState([]);
   const [zipping, setZipping] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null); // jobId to delete
+  const [batchDeleteTarget, setBatchDeleteTarget] = useState(false);
+  const [clearAllTarget, setClearAllTarget] = useState(false);
   const [toast, setToast] = useState(null); // { type, title, message }
   const [previewVideo, setPreviewVideo] = useState(null);
 
@@ -19,6 +21,8 @@ export function OutputGallery() {
       const data = await fetchOutputs();
       const list = Array.isArray(data) ? data : (data.outputs || data.items || []);
       setOutputs(list);
+      // Clean selectedIds that no longer exist
+      setSelectedIds((prev) => prev.filter((id) => list.some((item) => (item.job_id || item.filename) === id)));
     } catch (e) {
       console.error('Failed to load output files:', e);
       setOutputs([]);
@@ -93,11 +97,52 @@ export function OutputGallery() {
     }
   };
 
+  const confirmBatchDelete = async () => {
+    if (selectedIds.length === 0) return;
+    setBatchDeleteTarget(false);
+    try {
+      const res = await deleteBatchOutputs(selectedIds);
+      setToast({
+        type: 'success',
+        title: 'Đã Xóa Video Đã Chọn',
+        message: res.message || `Đã xóa ${selectedIds.length} video khỏi kho lưu trữ.`,
+      });
+      setSelectedIds([]);
+      loadOutputs();
+    } catch (err) {
+      setToast({
+        type: 'error',
+        title: 'Xóa Hàng Loạt Thất Bại',
+        message: err.message || 'Không thể xóa các video đã chọn',
+      });
+    }
+  };
+
+  const confirmClearAll = async () => {
+    setClearAllTarget(false);
+    try {
+      const res = await clearAllOutputs();
+      setToast({
+        type: 'success',
+        title: 'Đã Dọn Dẹp Kho Video',
+        message: res.message || 'Đã dọn dẹp toàn bộ video thành phẩm.',
+      });
+      setSelectedIds([]);
+      loadOutputs();
+    } catch (err) {
+      setToast({
+        type: 'error',
+        title: 'Dọn Dẹp Thất Bại',
+        message: err.message || 'Không thể xóa toàn bộ kho video',
+      });
+    }
+  };
+
   const outputList = Array.isArray(outputs) ? outputs : [];
 
   return (
     <div className="clean-panel rounded-3xl p-6 sm:p-8 shadow-xs space-y-6">
-      {/* Custom Confirmation Modal */}
+      {/* Custom Confirmation Modal for Single Video */}
       <ConfirmModal
         isOpen={!!deleteTarget}
         title="Xóa Video Thành Phẩm"
@@ -105,6 +150,28 @@ export function OutputGallery() {
         onConfirm={confirmDelete}
         onCancel={() => setDeleteTarget(null)}
         confirmText="Xác Nhận Xóa"
+        cancelText="Hủy Bỏ"
+      />
+
+      {/* Custom Confirmation Modal for Batch Delete Selected */}
+      <ConfirmModal
+        isOpen={batchDeleteTarget}
+        title="Xóa Các Video Đã Chọn"
+        message={`Bạn có chắc chắn muốn xóa ${selectedIds.length} video đã chọn khỏi kho lưu trữ không?`}
+        onConfirm={confirmBatchDelete}
+        onCancel={() => setBatchDeleteTarget(false)}
+        confirmText="Xác Nhận Xóa Hàng Loạt"
+        cancelText="Hủy Bỏ"
+      />
+
+      {/* Custom Confirmation Modal for Clear All */}
+      <ConfirmModal
+        isOpen={clearAllTarget}
+        title="Xóa Toàn Bộ Kho Video"
+        message="Bạn có chắc chắn muốn xóa tất cả video thành phẩm khỏi kho lưu trữ không? Thao tác này không thể hoàn tác."
+        onConfirm={confirmClearAll}
+        onCancel={() => setClearAllTarget(false)}
+        confirmText="Xác Nhận Xóa Toàn Bộ"
         cancelText="Hủy Bỏ"
       />
 
@@ -122,7 +189,7 @@ export function OutputGallery() {
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2 flex-wrap">
           <button
             onClick={loadOutputs}
             className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold p-2.5 rounded-xl border border-slate-200 transition cursor-pointer shadow-xs"
@@ -141,6 +208,26 @@ export function OutputGallery() {
               <Square className="w-4 h-4 text-slate-400" />
             )}
             <span>Chọn Tất Cả ({outputList.length})</span>
+          </button>
+
+          <button
+            onClick={() => setBatchDeleteTarget(true)}
+            disabled={selectedIds.length === 0}
+            className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-bold px-3.5 py-2.5 rounded-xl transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+            title="Xóa các video đã được chọn"
+          >
+            <Trash2 className="w-4 h-4 text-rose-600" />
+            <span>Xóa Đã Chọn ({selectedIds.length})</span>
+          </button>
+
+          <button
+            onClick={() => setClearAllTarget(true)}
+            disabled={outputList.length === 0}
+            className="bg-slate-100 hover:bg-rose-50 hover:text-rose-700 hover:border-rose-200 disabled:opacity-40 disabled:cursor-not-allowed text-slate-700 text-xs font-bold px-3 py-2.5 rounded-xl transition flex items-center gap-1.5 border border-slate-200 cursor-pointer shadow-xs"
+            title="Xóa toàn bộ kho video thành phẩm"
+          >
+            <Trash2 className="w-4 h-4 text-rose-600" />
+            <span>Xóa Tất Cả</span>
           </button>
 
           <button

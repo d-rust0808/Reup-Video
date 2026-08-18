@@ -117,6 +117,8 @@ class PyVideoTransService:
                     count += 1
             if os.path.exists(srt_path) and os.path.getsize(srt_path) > 0 and count > 1:
                 return {"status": "success", "srt_path": srt_path, "detected_language": info.language}
+            elif os.path.exists(srt_path):
+                os.remove(srt_path)
         except Exception as e:
             logger.warning(f"Native faster_whisper failed: {e}. Trying CLI / fallback...")
 

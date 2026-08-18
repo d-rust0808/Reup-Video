@@ -70,6 +70,42 @@ export async function cancelJob(jobId) {
   return res.json();
 }
 
+export async function deleteJob(jobId) {
+  const res = await fetch(`${API_BASE}/jobs/${jobId}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Failed to delete job');
+  }
+  return res.json();
+}
+
+export async function clearJobs(status = null) {
+  const query = status ? `?status=${encodeURIComponent(status)}` : '?all=true';
+  const res = await fetch(`${API_BASE}/jobs${query}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Failed to clear jobs');
+  }
+  return res.json();
+}
+
+export async function deleteBatchJobs(jobIds) {
+  const res = await fetch(`${API_BASE}/jobs/delete-batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ job_ids: jobIds }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Failed to delete batch jobs');
+  }
+  return res.json();
+}
+
 export async function fetchOutputs() {
   const res = await fetch(`${API_BASE}/outputs`);
   if (!res.ok) throw new Error('Failed to fetch output files');
@@ -105,6 +141,30 @@ export async function deleteOutput(jobId) {
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));
     throw new Error(errorData.detail || 'Failed to delete output file');
+  }
+  return res.json();
+}
+
+export async function deleteBatchOutputs(jobIds) {
+  const res = await fetch(`${API_BASE}/outputs/delete-batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ job_ids: jobIds }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Failed to delete selected outputs');
+  }
+  return res.json();
+}
+
+export async function clearAllOutputs() {
+  const res = await fetch(`${API_BASE}/outputs`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Failed to clear all outputs');
   }
   return res.json();
 }

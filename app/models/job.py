@@ -96,6 +96,10 @@ class ReupConfig(BaseModel):
         except (ValueError, TypeError):
             return 0.02
     color_adjust: bool = Field(default=True, description="Enables or disables color equalization filter pass")
+    film_grain: float = Field(default=0.0, ge=0.0, le=20.0, description="FFmpeg noise filter amount for visual hash disruption")
+    dynamic_motion: bool = Field(default=False, description="Enables dynamic micro-zoom/pan to disrupt temporal match kernels (TMK)")
+    meta_compliance_mode: bool = Field(default=False, description="Enables Meta Facebook strict anti-fingerprint compliance preset")
+    youtube_compliance_mode: bool = Field(default=False, description="Enables YouTube Content ID and YPP strict compliance preset")
     enable_vocal_mute: bool = Field(default=True, description="Enables original vocal extraction and muting pass")
     vocal_mute_strategy: str = Field(default="auto", description="Strategy for vocal muting: 'auto', 'demucs', 'ffmpeg_filter', 'mute_all'")
     preserve_bgm: bool = Field(default=True, description="Preserves background audio/music after vocal muting")
@@ -105,6 +109,46 @@ class ReupConfig(BaseModel):
     target_lang: str = Field(default="vi", description="Target language code for TTS dubbing")
     tts_engine: str = Field(default="edge-tts", description="TTS engine name ('edge-tts', 'gtts', 'coqui-tts')")
     source_lang: str = Field(default="auto", description="Source language code for STT/translation")
+
+    @model_validator(mode="after")
+    def _apply_platform_presets(self) -> "ReupConfig":
+        if self.youtube_compliance_mode:
+            self.hflip = True
+            if self.speed_factor == 1.03 or self.speed_factor == 1.0:
+                self.speed_factor = 1.045
+            self.pitch_shift = True
+            if self.crop_percent == 0.02:
+                self.crop_percent = 0.03
+            if self.contrast == 1.02:
+                self.contrast = 1.04
+            if self.saturation == 1.03:
+                self.saturation = 1.05
+            if self.brightness == 0.01 or self.brightness == 0.0:
+                self.brightness = 0.015
+            if self.film_grain == 0.0:
+                self.film_grain = 4.0
+            self.dynamic_motion = True
+            self.sharpen = True
+            if self.unsharp_amount == 0.5:
+                self.unsharp_amount = 0.6
+            self.modify_md5 = True
+            self.enable_vocal_mute = True
+        elif self.meta_compliance_mode:
+            self.hflip = True
+            if self.speed_factor == 1.03 or self.speed_factor == 1.0:
+                self.speed_factor = 1.035
+            self.pitch_shift = True
+            if self.crop_percent == 0.02:
+                self.crop_percent = 0.025
+            if self.contrast == 1.02:
+                self.contrast = 1.035
+            if self.saturation == 1.03:
+                self.saturation = 1.04
+            if self.film_grain == 0.0:
+                self.film_grain = 3.0
+            self.dynamic_motion = True
+            self.modify_md5 = True
+        return self
 
     @property
     def speed_ratio(self) -> float:

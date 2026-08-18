@@ -11,12 +11,38 @@ from typing import List, Union
 from pydantic import BaseModel, Field
 
 
+def _load_env_file():
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if env_path.exists():
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    if k.strip() not in os.environ:
+                        os.environ[k.strip()] = v.strip()
+
+_load_env_file()
+
+
 class Settings(BaseModel):
     """System-wide configuration settings with environment variable fallbacks."""
 
     BASE_DIR: Path = Field(
         default_factory=lambda: Path(__file__).resolve().parent.parent,
         description="Project root directory path"
+    )
+    DEEPSEEK_API_KEY: str = Field(
+        default_factory=lambda: os.getenv("DEEPSEEK_API_KEY", ""),
+        description="DeepSeek LLM API Key"
+    )
+    DEEPSEEK_BASE_URL: str = Field(
+        default_factory=lambda: os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        description="DeepSeek Base URL"
+    )
+    DEEPSEEK_MODEL: str = Field(
+        default_factory=lambda: os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        description="DeepSeek Model Name"
     )
     RAW_INPUT_DIR: str = Field(
         default_factory=lambda: os.getenv("RAW_INPUT_DIR", "data/input/raw"),

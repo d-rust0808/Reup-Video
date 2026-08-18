@@ -1521,3 +1521,219 @@ Traceback (most recent call last):
 videotrans.configure.excepts.VideoTransError: No transcription results returned. Please check the original audio/video or model and try again.
 info=TranscriptionInfo(language='en', language_probability=0.5572595596313477, duration=5.0155, duration_after_vad=0.0, all_language_probs=[('en', 0.5572595596313477), ('nn', 0.11665721982717514), ('ja', 0.04771434888243675), ('cy', 0.042815472930669785), ('ko', 0.025397706776857376), ('es', 0.025265995413064957), ('ru', 0.019448451697826385), ('la', 0.014939087443053722), ('zh', 0.014665795490145683), ('de', 0.009581325575709343), ('pt', 0.0087575139477849), ('jw', 0.008646971546113491), ('hi', 0.008228099904954433), ('fr', 0.00790533609688282), ('pl', 0.007536744698882103), ('it', 0.007086750585585833), ('haw', 0.007002323400229216), ('tr', 0.005490115378051996), ('nl', 0.005057509522885084), ('km', 0.00472248625010252), ('ms', 0.0035715254489332438), ('ro', 0.00296480068936944), ('ar', 0.002959766425192356), ('th', 0.002796134678646922), ('te', 0.0026314265560358763), ('el', 0.0024615067522972822), ('br', 0.002431180328130722), ('vi', 0.002331432653591037), ('sn', 0.002283545210957527), ('si', 0.001986149698495865), ('cs', 0.001934359665028751), ('id', 0.001882526557892561), ('sv', 0.0017701152246445417), ('tl', 0.001766011118888855), ('fi', 0.0016111626755446196), ('sa', 0.0013221919070929289), ('ur', 0.0012923863250762224), ('ta', 0.0012662041699513793), ('hu', 0.001095284940674901), ('uk', 0.0010113745229318738), ('mi', 0.0010047928662970662), ('ml', 0.0009216322214342654), ('fa', 0.00091547827469185), ('he', 0.0009126922232098877), ('sl', 0.0008991783251985908), ('bg', 0.0008807830745354295), ('hr', 0.0007113594328984618), ('no', 0.0006904101464897394), ('da', 0.0006767510785721242), ('sk', 0.0006450919318012893), ('bn', 0.0005380577058531344), ('yo', 0.0004783959884662181), ('gl', 0.0004494281602092087), ('my', 0.00039397479849867523), ('ca', 0.0003907642385456711), ('mn', 0.000366330670658499), ('eu', 0.0003509239468257874), ('sw', 0.00024194501747842878), ('bs', 0.00023110235633794218), ('bo', 0.00022719929984305054), ('oc', 0.00018640585767570883), ('yi', 0.00017719619791023433), ('be', 0.00017568015027791262), ('lv', 0.00017383538943249732), ('fo', 0.00015766636352054775), ('hy', 0.00014592549996450543), ('af', 0.00013107612903695554), ('is', 0.00011781600187532604), ('ne', 0.000117416464490816), ('ht', 0.00011437897774158046), ('sr', 0.00010569018922979012), ('az', 9.875094110611826e-05), ('ka', 9.24491832847707e-05), ('lo', 9.160298213828355e-05), ('lt', 7.470451237168163e-05), ('sq', 6.669280992355198e-05), ('et', 6.58057106193155e-05), ('ps', 6.103563646320254e-05), ('sd', 5.7564338931115344e-05), ('mt', 5.271289046504535e-05), ('kn', 4.648547837859951e-05), ('mr', 4.635139339370653e-05), ('kk', 4.591267861542292e-05), ('pa', 3.876550545101054e-05), ('mk', 2.416430288576521e-05), ('as', 1.6855990907060914e-05), ('am', 1.46499214679352e-05), ('gu', 1.2836062524002045e-05), ('ln', 8.611357770860195e-06), ('so', 2.9221930617495673e-06), ('tg', 1.1491712257338804e-06), ('tt', 9.179282187687932e-07), ('su', 6.774467919967719e-07), ('lb', 6.073011036278331e-07), ('ha', 2.2592040238578193e-07), ('uz', 7.321003892002409e-08), ('tk', 4.489080751568508e-08), ('ba', 4.484972748741711e-08), ('mg', 3.460328557025605e-08)], transcription_options=TranscriptionOptions(beam_size=5, best_of=5, patience=1, length_penalty=1, repetition_penalty=1.0, no_repeat_ngram_size=0, log_prob_threshold=-1.0, no_speech_threshold=0.6, compression_ratio_threshold=2.4, condition_on_previous_text=False, prompt_reset_on_temperature=0.5, temperatures=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0], initial_prompt=None, prefix=None, suppress_blank=True, suppress_tokens=(1, 2, 7, 8, 9, 10, 14, 25, 26, 27, 28, 29, 31, 58, 59, 60, 61, 62, 63, 90, 91, 92, 93, 359, 503, 522, 542, 873, 893, 902, 918, 922, 931, 1350, 1853, 1982, 2460, 2627, 3246, 3253, 3268, 3536, 3846, 3961, 4183, 4667, 6585, 6647, 7273, 9061, 9383, 10428, 10929, 11938, 12033, 12331, 12562, 13793, 14157, 14635, 15265, 15618, 16553, 16604, 18362, 18956, 20075, 21675, 22520, 26130, 26161, 26435, 28279, 29464, 31650, 32302, 32470, 36865, 42863, 47425, 49870, 50254, 50258, 50358, 50359, 50360, 50361, 50362), without_timestamps=False, max_initial_timestamp=1.0, word_timestamps=True, prepend_punctuations='"\'“¿([{-', append_punctuations='"\'.。,，!！?？:：”)]}、', multilingual=False, max_new_tokens=None, clip_timestamps=[0.0], hallucination_silence_threshold=None, hotwords=''), vad_options=VadOptions(threshold=0.5, neg_threshold=None, min_speech_duration_ms=0, max_speech_duration_s=inf, min_silence_duration_ms=140, speech_pad_ms=400))
 [DEBUG] [新进程任务 结束:title='Model: base']，耗时9.063662052154541s
+[DEBUG] [SpeechToText]语音转录: self.out_format='srt',self.copysrt_rawvideo=False,self.spk_insert=True
+[TaskCfgSTT]
+原始输入文件名: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-24/test_stt_fallback_stub0/sample_input.mp4, 
+输出结果保存到文件夹: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-24/test_stt_fallback_stub0,
+临时文件夹: /Volumes/DATA/Reup-Video/app/modules/tmp/33943/109641d1a9
+未启用CUDA加速
+未选 降噪
+STT Service:faster-whisper(Built-in), base  断句方式:默认断句
+发音语言:自动检测
+未选 降噪
+[ERROR] FFmpeg 命令执行失败 (force_cpu=True)。
+命令: ffmpeg -hide_banner -nostdin -ignore_unknown -threads 0 -y -i /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-24/test_stt_fallback_stub0/sample_input.mp4 -ac 1 -ar 16000 -c:a pcm_s16le /Volumes/DATA/Reup-Video/app/modules/tmp/33943/109641d1a9/sample_input-1787030453.70777.wav
+错误: [in#0 @ 0x7d9028000] Format mov,mp4,m4a,3gp,3g2,mj2 detected only with low score of 1, misdetection possible!
+[in#0 @ 0x7d9028000] moov atom not found
+[in#0 @ 0x7d9020000] Error opening input: Invalid data found when processing input
+Error opening input file /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-24/test_stt_fallback_stub0/sample_input.mp4.
+Error opening input files: Invalid data found when processing input
+ 
+[DEBUG] [SpeechToText]语音转录: self.out_format='srt',self.copysrt_rawvideo=False,self.spk_insert=True
+[TaskCfgSTT]
+原始输入文件名: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-25/test_stt_fallback_stub0/sample_input.mp4, 
+输出结果保存到文件夹: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-25/test_stt_fallback_stub0,
+临时文件夹: /Volumes/DATA/Reup-Video/app/modules/tmp/34108/c1e6ff7ec3
+未启用CUDA加速
+未选 降噪
+STT Service:faster-whisper(Built-in), base  断句方式:默认断句
+发音语言:自动检测
+未选 降噪
+[ERROR] FFmpeg 命令执行失败 (force_cpu=True)。
+命令: ffmpeg -hide_banner -nostdin -ignore_unknown -threads 0 -y -i /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-25/test_stt_fallback_stub0/sample_input.mp4 -ac 1 -ar 16000 -c:a pcm_s16le /Volumes/DATA/Reup-Video/app/modules/tmp/34108/c1e6ff7ec3/sample_input-1787030502.8506508.wav
+错误: [in#0 @ 0xb03024000] Format mov,mp4,m4a,3gp,3g2,mj2 detected only with low score of 1, misdetection possible!
+[in#0 @ 0xb03024000] moov atom not found
+[in#0 @ 0xb03020000] Error opening input: Invalid data found when processing input
+Error opening input file /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-25/test_stt_fallback_stub0/sample_input.mp4.
+Error opening input files: Invalid data found when processing input
+ 
+[DEBUG] [SpeechToText]语音转录: self.out_format='srt',self.copysrt_rawvideo=False,self.spk_insert=True
+[TaskCfgSTT]
+原始输入文件名: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-26/test_stt_fallback_stub0/sample_input.mp4, 
+输出结果保存到文件夹: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-26/test_stt_fallback_stub0,
+临时文件夹: /Volumes/DATA/Reup-Video/app/modules/tmp/38290/5bd2dbd30c
+未启用CUDA加速
+未选 降噪
+STT Service:faster-whisper(Built-in), base  断句方式:默认断句
+发音语言:自动检测
+未选 降噪
+[ERROR] FFmpeg 命令执行失败 (force_cpu=True)。
+命令: ffmpeg -hide_banner -nostdin -ignore_unknown -threads 0 -y -i /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-26/test_stt_fallback_stub0/sample_input.mp4 -ac 1 -ar 16000 -c:a pcm_s16le /Volumes/DATA/Reup-Video/app/modules/tmp/38290/5bd2dbd30c/sample_input-1787032306.31409.wav
+错误: [in#0 @ 0xb0901c000] Format mov,mp4,m4a,3gp,3g2,mj2 detected only with low score of 1, misdetection possible!
+[in#0 @ 0xb0901c000] moov atom not found
+[in#0 @ 0xb08c14000] Error opening input: Invalid data found when processing input
+Error opening input file /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-26/test_stt_fallback_stub0/sample_input.mp4.
+Error opening input files: Invalid data found when processing input
+ 
+[DEBUG] [SpeechToText]语音转录: self.out_format='srt',self.copysrt_rawvideo=False,self.spk_insert=True
+[TaskCfgSTT]
+原始输入文件名: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-0/test_stt_fallback_stub0/sample_input.mp4, 
+输出结果保存到文件夹: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-0/test_stt_fallback_stub0,
+临时文件夹: /Volumes/DATA/Reup-Video/app/modules/tmp/1755/68caa4a217
+未启用CUDA加速
+未选 降噪
+STT Service:faster-whisper(Built-in), base  断句方式:默认断句
+发音语言:自动检测
+未选 降噪
+[ERROR] FFmpeg 命令执行失败 (force_cpu=True)。
+命令: ffmpeg -hide_banner -nostdin -ignore_unknown -threads 0 -y -i /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-0/test_stt_fallback_stub0/sample_input.mp4 -ac 1 -ar 16000 -c:a pcm_s16le /Volumes/DATA/Reup-Video/app/modules/tmp/1755/68caa4a217/sample_input-1787038851.911196.wav
+错误: [in#0 @ 0xac1010000] Format mov,mp4,m4a,3gp,3g2,mj2 detected only with low score of 1, misdetection possible!
+[in#0 @ 0xac1010000] moov atom not found
+[in#0 @ 0xac0c24000] Error opening input: Invalid data found when processing input
+Error opening input file /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-0/test_stt_fallback_stub0/sample_input.mp4.
+Error opening input files: Invalid data found when processing input
+ 
+[DEBUG] [SpeechToText]语音转录: self.out_format='srt',self.copysrt_rawvideo=False,self.spk_insert=True
+[TaskCfgSTT]
+原始输入文件名: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-1/test_stt_fallback_stub0/sample_input.mp4, 
+输出结果保存到文件夹: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-1/test_stt_fallback_stub0,
+临时文件夹: /Volumes/DATA/Reup-Video/app/modules/tmp/3206/c93c4d64bf
+未启用CUDA加速
+未选 降噪
+STT Service:faster-whisper(Built-in), base  断句方式:默认断句
+发音语言:自动检测
+未选 降噪
+[ERROR] FFmpeg 命令执行失败 (force_cpu=True)。
+命令: ffmpeg -hide_banner -nostdin -ignore_unknown -threads 0 -y -i /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-1/test_stt_fallback_stub0/sample_input.mp4 -ac 1 -ar 16000 -c:a pcm_s16le /Volumes/DATA/Reup-Video/app/modules/tmp/3206/c93c4d64bf/sample_input-1787039600.036382.wav
+错误: [in#0 @ 0xb83014000] Format mov,mp4,m4a,3gp,3g2,mj2 detected only with low score of 1, misdetection possible!
+[in#0 @ 0xb83014000] moov atom not found
+[in#0 @ 0xb82c24000] Error opening input: Invalid data found when processing input
+Error opening input file /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-1/test_stt_fallback_stub0/sample_input.mp4.
+Error opening input files: Invalid data found when processing input
+ 
+[DEBUG] [SpeechToText]语音转录: self.out_format='srt',self.copysrt_rawvideo=False,self.spk_insert=True
+[TaskCfgSTT]
+原始输入文件名: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-2/test_stt_fallback_stub0/sample_input.mp4, 
+输出结果保存到文件夹: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-2/test_stt_fallback_stub0,
+临时文件夹: /Volumes/DATA/Reup-Video/app/modules/tmp/3340/fe8f7890f6
+未启用CUDA加速
+未选 降噪
+STT Service:faster-whisper(Built-in), base  断句方式:默认断句
+发音语言:自动检测
+未选 降噪
+[ERROR] FFmpeg 命令执行失败 (force_cpu=True)。
+命令: ffmpeg -hide_banner -nostdin -ignore_unknown -threads 0 -y -i /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-2/test_stt_fallback_stub0/sample_input.mp4 -ac 1 -ar 16000 -c:a pcm_s16le /Volumes/DATA/Reup-Video/app/modules/tmp/3340/fe8f7890f6/sample_input-1787039646.4065769.wav
+错误: [in#0 @ 0xa7b010000] Format mov,mp4,m4a,3gp,3g2,mj2 detected only with low score of 1, misdetection possible!
+[in#0 @ 0xa7b010000] moov atom not found
+[in#0 @ 0xa7ac24000] Error opening input: Invalid data found when processing input
+Error opening input file /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-2/test_stt_fallback_stub0/sample_input.mp4.
+Error opening input files: Invalid data found when processing input
+ 
+[DEBUG] [SpeechToText]语音转录: self.out_format='srt',self.copysrt_rawvideo=False,self.spk_insert=True
+[TaskCfgSTT]
+原始输入文件名: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-3/test_stt_fallback_stub0/sample_input.mp4, 
+输出结果保存到文件夹: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-3/test_stt_fallback_stub0,
+临时文件夹: /Volumes/DATA/Reup-Video/app/modules/tmp/3467/132bce47a6
+未启用CUDA加速
+未选 降噪
+STT Service:faster-whisper(Built-in), base  断句方式:默认断句
+发音语言:自动检测
+未选 降噪
+[ERROR] FFmpeg 命令执行失败 (force_cpu=True)。
+命令: ffmpeg -hide_banner -nostdin -ignore_unknown -threads 0 -y -i /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-3/test_stt_fallback_stub0/sample_input.mp4 -ac 1 -ar 16000 -c:a pcm_s16le /Volumes/DATA/Reup-Video/app/modules/tmp/3467/132bce47a6/sample_input-1787039687.598018.wav
+错误: [in#0 @ 0x9d3010000] Format mov,mp4,m4a,3gp,3g2,mj2 detected only with low score of 1, misdetection possible!
+[in#0 @ 0x9d3010000] moov atom not found
+[in#0 @ 0x9d2c24000] Error opening input: Invalid data found when processing input
+Error opening input file /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-3/test_stt_fallback_stub0/sample_input.mp4.
+Error opening input files: Invalid data found when processing input
+ 
+[DEBUG] [SpeechToText]语音转录: self.out_format='srt',self.copysrt_rawvideo=False,self.spk_insert=True
+[TaskCfgSTT]
+原始输入文件名: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-4/test_stt_fallback_stub0/sample_input.mp4, 
+输出结果保存到文件夹: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-4/test_stt_fallback_stub0,
+临时文件夹: /Volumes/DATA/Reup-Video/app/modules/tmp/4295/67147eb793
+未启用CUDA加速
+未选 降噪
+STT Service:faster-whisper(Built-in), base  断句方式:默认断句
+发音语言:自动检测
+未选 降噪
+[ERROR] FFmpeg 命令执行失败 (force_cpu=True)。
+命令: ffmpeg -hide_banner -nostdin -ignore_unknown -threads 0 -y -i /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-4/test_stt_fallback_stub0/sample_input.mp4 -ac 1 -ar 16000 -c:a pcm_s16le /Volumes/DATA/Reup-Video/app/modules/tmp/4295/67147eb793/sample_input-1787040051.152628.wav
+错误: [in#0 @ 0xc5f014000] Format mov,mp4,m4a,3gp,3g2,mj2 detected only with low score of 1, misdetection possible!
+[in#0 @ 0xc5f014000] moov atom not found
+[in#0 @ 0xc5ec24000] Error opening input: Invalid data found when processing input
+Error opening input file /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-4/test_stt_fallback_stub0/sample_input.mp4.
+Error opening input files: Invalid data found when processing input
+ 
+[DEBUG] [SpeechToText]语音转录: self.out_format='srt',self.copysrt_rawvideo=False,self.spk_insert=True
+[TaskCfgSTT]
+原始输入文件名: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-0/test_stt_fallback_stub0/sample_input.mp4, 
+输出结果保存到文件夹: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-0/test_stt_fallback_stub0,
+临时文件夹: /Volumes/DATA/Reup-Video/app/modules/tmp/1613/745b4eb975
+未启用CUDA加速
+未选 降噪
+STT Service:faster-whisper(Built-in), base  断句方式:默认断句
+发音语言:自动检测
+未选 降噪
+[ERROR] FFmpeg 命令执行失败 (force_cpu=True)。
+命令: ffmpeg -hide_banner -nostdin -ignore_unknown -threads 0 -y -i /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-0/test_stt_fallback_stub0/sample_input.mp4 -ac 1 -ar 16000 -c:a pcm_s16le /Volumes/DATA/Reup-Video/app/modules/tmp/1613/745b4eb975/sample_input-1787041522.6071098.wav
+错误: [in#0 @ 0x727020000] Format mov,mp4,m4a,3gp,3g2,mj2 detected only with low score of 1, misdetection possible!
+[in#0 @ 0x727020000] moov atom not found
+[in#0 @ 0x72701c000] Error opening input: Invalid data found when processing input
+Error opening input file /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-0/test_stt_fallback_stub0/sample_input.mp4.
+Error opening input files: Invalid data found when processing input
+ 
+[DEBUG] [SpeechToText]语音转录: self.out_format='srt',self.copysrt_rawvideo=False,self.spk_insert=True
+[TaskCfgSTT]
+原始输入文件名: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-0/test_stt_fallback_stub0/sample_input.mp4, 
+输出结果保存到文件夹: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-0/test_stt_fallback_stub0,
+临时文件夹: /Volumes/DATA/Reup-Video/app/modules/tmp/1569/70dd29ab57
+未启用CUDA加速
+未选 降噪
+STT Service:faster-whisper(Built-in), base  断句方式:默认断句
+发音语言:自动检测
+未选 降噪
+[ERROR] FFmpeg 命令执行失败 (force_cpu=True)。
+命令: ffmpeg -hide_banner -nostdin -ignore_unknown -threads 0 -y -i /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-0/test_stt_fallback_stub0/sample_input.mp4 -ac 1 -ar 16000 -c:a pcm_s16le /Volumes/DATA/Reup-Video/app/modules/tmp/1569/70dd29ab57/sample_input-1787043402.1438022.wav
+错误: [in#0 @ 0xab9024000] Format mov,mp4,m4a,3gp,3g2,mj2 detected only with low score of 1, misdetection possible!
+[in#0 @ 0xab9024000] moov atom not found
+[in#0 @ 0xab901c000] Error opening input: Invalid data found when processing input
+Error opening input file /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-0/test_stt_fallback_stub0/sample_input.mp4.
+Error opening input files: Invalid data found when processing input
+ 
+[DEBUG] [SpeechToText]语音转录: self.out_format='srt',self.copysrt_rawvideo=False,self.spk_insert=True
+[TaskCfgSTT]
+原始输入文件名: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-1/test_stt_fallback_stub0/sample_input.mp4, 
+输出结果保存到文件夹: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-1/test_stt_fallback_stub0,
+临时文件夹: /Volumes/DATA/Reup-Video/app/modules/tmp/3308/5b3fc21f20
+未启用CUDA加速
+未选 降噪
+STT Service:faster-whisper(Built-in), base  断句方式:默认断句
+发音语言:自动检测
+未选 降噪
+[ERROR] FFmpeg 命令执行失败 (force_cpu=True)。
+命令: ffmpeg -hide_banner -nostdin -ignore_unknown -threads 0 -y -i /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-1/test_stt_fallback_stub0/sample_input.mp4 -ac 1 -ar 16000 -c:a pcm_s16le /Volumes/DATA/Reup-Video/app/modules/tmp/3308/5b3fc21f20/sample_input-1787044102.5960069.wav
+错误: [in#0 @ 0xa7301c000] Format mov,mp4,m4a,3gp,3g2,mj2 detected only with low score of 1, misdetection possible!
+[in#0 @ 0xa7301c000] moov atom not found
+[in#0 @ 0xa72c14000] Error opening input: Invalid data found when processing input
+Error opening input file /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-1/test_stt_fallback_stub0/sample_input.mp4.
+Error opening input files: Invalid data found when processing input
+ 
+[DEBUG] [SpeechToText]语音转录: self.out_format='srt',self.copysrt_rawvideo=False,self.spk_insert=True
+[TaskCfgSTT]
+原始输入文件名: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-2/test_stt_fallback_stub0/sample_input.mp4, 
+输出结果保存到文件夹: /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-2/test_stt_fallback_stub0,
+临时文件夹: /Volumes/DATA/Reup-Video/app/modules/tmp/3766/31e472a90c
+未启用CUDA加速
+未选 降噪
+STT Service:faster-whisper(Built-in), base  断句方式:默认断句
+发音语言:自动检测
+未选 降噪
+[ERROR] FFmpeg 命令执行失败 (force_cpu=True)。
+命令: ffmpeg -hide_banner -nostdin -ignore_unknown -threads 0 -y -i /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-2/test_stt_fallback_stub0/sample_input.mp4 -ac 1 -ar 16000 -c:a pcm_s16le /Volumes/DATA/Reup-Video/app/modules/tmp/3766/31e472a90c/sample_input-1787044421.22388.wav
+错误: [in#0 @ 0x813018000] Format mov,mp4,m4a,3gp,3g2,mj2 detected only with low score of 1, misdetection possible!
+[in#0 @ 0x813018000] moov atom not found
+[in#0 @ 0x813014000] Error opening input: Invalid data found when processing input
+Error opening input file /private/var/folders/lc/n2qw20v561d0ksp24x2691qm0000gn/T/pytest-of-macmac/pytest-2/test_stt_fallback_stub0/sample_input.mp4.
+Error opening input files: Invalid data found when processing input
+ 

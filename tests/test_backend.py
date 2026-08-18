@@ -116,3 +116,19 @@ def test_database_and_queue_crud(tmp_path):
     assert job_completed["status"] == "COMPLETED"
     assert job_completed["progress_percent"] == 100.0
 
+    # Test delete_job
+    deleted = qm.delete_job(job_id)
+    assert deleted is True
+    assert qm.get_job(job_id) is None
+
+    # Test batch operations
+    job_1 = qm.enqueue_job(input_file, str(tmp_path / "out1.mp4"))
+    job_2 = qm.enqueue_job(input_file, str(tmp_path / "out2.mp4"))
+    qm.update_job_status(job_1, "COMPLETED", progress=100)
+    qm.update_job_status(job_2, "COMPLETED", progress=100)
+
+    cleared = qm.clear_jobs(status_filter="COMPLETED")
+    assert cleared == 2
+    assert qm.get_job(job_1) is None
+    assert qm.get_job(job_2) is None
+

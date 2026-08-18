@@ -4,8 +4,9 @@ REST API Router for Job Tracking, Status Querying, Cancellation, and Retry.
 Target Path: app/api/jobs.py
 """
 
-from typing import Optional
+from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
 
 from app.config import settings
 from app.services.queue_manager import BatchQueueManager
@@ -147,4 +148,64 @@ async def retry_job(job_id: str, request: Request):
         "job_id": job_id,
         "status": "PENDING",
         "message": "Job re-enqueued for processing"
+    }
+
+
+class BatchDeleteJobsRequest(BaseModel):
+    job_ids: List[str]
+
+
+@router.delete("/jobs/{job_id}")
+async def delete_single_job(job_id: str, request: Request):
+    """
+    Deletes a single job record and its output files if present.
+    """
+    qm = _get_queue_manager(request)
+    job = qm.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job ID {job_id} not found")
+
+    cur_status = job.get("status", "").upper()
+    if cur_status in ("PROCESSING", "DOWNLOADING", "WATERMARK_REMOVAL", "REUP_TRANSFORM"):
+        qm.cancel_job(job_id)
+
+    deleted = qm.delete_job(job_id)
+    if not deleted:
+        raise HTTPException(status_code=400, detail="Failed to delete job")
+
+    return {
+        "job_id": job_id,
+        "deleted": True,
+        "message": f"Job {job_id} deleted successfully"
+    }
+
+
+@router.delete("/jobs")
+async def clear_all_jobs(
+    request: Request,
+    status: Optional[str] = Query(None, description="Optional status filter: COMPLETED, FAILED, CANCELLED"),
+    all: bool = Query(False, description="Clear all terminal state jobs")
+):
+    """
+    Clears jobs by status (e.g. COMPLETED, FAILED, CANCELLED) or clears all terminal state jobs.
+    """
+    qm = _get_queue_manager(request)
+    status_filter = None if (all or not status or status.upper() == "ALL") else status
+    deleted_count = qm.clear_jobs(status_filter=status_filter)
+    return {
+        "deleted_count": deleted_count,
+        "message": f"Successfully cleared {deleted_count} jobs"
+    }
+
+
+@router.post("/jobs/delete-batch")
+async def delete_jobs_batch(req: BatchDeleteJobsRequest, request: Request):
+    """
+    Deletes a list of job IDs and their associated output files.
+    """
+    qm = _get_queue_manager(request)
+    deleted_count = qm.delete_jobs_batch(req.job_ids)
+    return {
+        "deleted_count": deleted_count,
+        "message": f"Successfully deleted {deleted_count} jobs"
     }

@@ -469,6 +469,47 @@ class BatchQueueManager:
             conn.commit()
         return True
 
+    def delete_jobs_batch(self, job_ids: List[str]) -> int:
+        """Deletes multiple jobs and their associated output files."""
+        deleted_count = 0
+        for jid in job_ids:
+            if self.delete_job(jid):
+                deleted_count += 1
+        return deleted_count
+
+    def clear_jobs(self, status_filter: Optional[str] = None) -> int:
+        """
+        Clears jobs by status (e.g. 'COMPLETED', 'FAILED', 'CANCELLED') or all terminal jobs if None.
+        """
+        with self._get_conn() as conn:
+            if status_filter:
+                cursor = conn.execute(
+                    "SELECT job_id, output_file_path FROM jobs WHERE UPPER(status) = UPPER(?)",
+                    (status_filter,)
+                )
+            else:
+                cursor = conn.execute(
+                    "SELECT job_id, output_file_path FROM jobs WHERE UPPER(status) IN ('COMPLETED', 'FAILED', 'CANCELLED')"
+                )
+            rows = cursor.fetchall()
+
+            job_ids_to_del = []
+            for r in rows:
+                jid = r["job_id"]
+                job_ids_to_del.append(jid)
+                out_p = r["output_file_path"]
+                if out_p and os.path.exists(out_p):
+                    try:
+                        os.remove(out_p)
+                    except OSError as e:
+                        logger.warning(f"Could not delete output file {out_p}: {e}")
+
+            if job_ids_to_del:
+                placeholders = ",".join("?" * len(job_ids_to_del))
+                conn.execute(f"DELETE FROM jobs WHERE job_id IN ({placeholders})", job_ids_to_del)
+                conn.commit()
+            return len(job_ids_to_del)
+
     def _run_pipeline_stages(self, job_id: str) -> Dict[str, Any]:
         """
         Executes full 4-stage job processing pipeline synchronously:

@@ -255,13 +255,13 @@ def mix_audio_tracks(
     bgm_path: str,
     voiceover_path: str,
     output_path: str,
-    bgm_volume: float = 0.5,
-    voice_volume: float = 1.0,
-    audio_ducking: bool = False
+    bgm_volume: float = 0.28,
+    voice_volume: float = 1.35,
+    audio_ducking: bool = True
 ) -> bool:
     """
     Mixes preserved background audio (BGM) with new TTS/voiceover audio track.
-    Supports optional sidechain audio ducking.
+    Supports dynamic sidechain audio ducking and loudness normalization.
     """
     ffmpeg_bin = find_ffmpeg_binary()
     if not ffmpeg_bin:
@@ -274,14 +274,14 @@ def mix_audio_tracks(
         filter_complex = (
             f"[0:a]volume={bgm_volume:.2f}[bgm];"
             f"[1:a]volume={voice_volume:.2f}[vox];"
-            f"[bgm][vox]sidechaincompress=threshold=0.1:ratio=4:attack=20:release=300[ducked];"
-            f"[ducked][vox]amix=inputs=2:duration=first:dropout_transition=2[a_out]"
+            f"[bgm][vox]sidechaincompress=threshold=0.08:ratio=4:attack=15:release=350[ducked];"
+            f"[ducked][vox]amix=inputs=2:duration=first:dropout_transition=2,loudnorm=I=-14:LRA=7:TP=-1.0[a_out]"
         )
     else:
         filter_complex = (
             f"[0:a]volume={bgm_volume:.2f}[bgm];"
             f"[1:a]volume={voice_volume:.2f}[vox];"
-            f"[bgm][vox]amix=inputs=2:duration=first:dropout_transition=2[a_out]"
+            f"[bgm][vox]amix=inputs=2:duration=first:dropout_transition=2,loudnorm=I=-14:LRA=7:TP=-1.0[a_out]"
         )
 
     cmd = [

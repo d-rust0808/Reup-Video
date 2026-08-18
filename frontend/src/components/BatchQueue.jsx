@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { fetchJobs, fetchJobLogs, cancelJob, getDownloadUrl } from '../services/api';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
+import { fetchJobs, cancelJob, getDownloadUrl, deleteJob, clearJobs } from '../services/api';
 import { Toast } from './Toast';
 import { ConfirmModal } from './ConfirmModal';
 import { VideoModal } from './VideoModal';
@@ -28,6 +28,8 @@ export function BatchQueue({ wsUpdates }) {
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
   const [cancelTarget, setCancelTarget] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [clearTarget, setClearTarget] = useState(null); // 'completed' | 'all'
   const [previewVideo, setPreviewVideo] = useState(null);
 
   // Live Terminal Log Console States
@@ -36,15 +38,19 @@ export function BatchQueue({ wsUpdates }) {
   const [autoScroll, setAutoScroll] = useState(true);
   const logContainerRef = useRef(null);
 
-  const loadJobs = async () => {
+  const loadJobs = useCallback(async () => {
     try {
       const data = await fetchJobs();
       const jobList = Array.isArray(data) ? data : (data.jobs || data.items || []);
       setJobs(jobList);
-      if (jobList.length > 0 && !selectedJobId) {
-        // Default to active running job, otherwise first job
-        const runningJob = jobList.find((j) => !['COMPLETED', 'FAILED', 'CANCELLED'].includes(j.status?.toUpperCase()));
-        setSelectedJobId(runningJob ? runningJob.job_id : jobList[0].job_id);
+      if (jobList.length > 0) {
+        setSelectedJobId((prev) => {
+          if (prev && jobList.some((j) => j.job_id === prev)) return prev;
+          const runningJob = jobList.find((j) => !['COMPLETED', 'FAILED', 'CANCELLED'].includes(j.status?.toUpperCase()));
+          return runningJob ? runningJob.job_id : jobList[0].job_id;
+        });
+      } else {
+        setSelectedJobId(null);
       }
     } catch (e) {
       console.error('Failed to load jobs:', e);
@@ -52,11 +58,11 @@ export function BatchQueue({ wsUpdates }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadJobs();
-  }, []);
+  }, [loadJobs]);
 
   // Handle incoming WebSocket broadcast updates
   useEffect(() => {
@@ -81,8 +87,8 @@ export function BatchQueue({ wsUpdates }) {
     });
 
     // Auto-focus selected job if none is selected yet
-    if (!selectedJobId && wsUpdates.job_id) {
-      setSelectedJobId(wsUpdates.job_id);
+    if (wsUpdates.job_id) {
+      setSelectedJobId((prev) => prev || wsUpdates.job_id);
     }
   }, [wsUpdates]);
 
@@ -110,6 +116,49 @@ export function BatchQueue({ wsUpdates }) {
         type: 'error',
         title: 'Hủy Job Thất Bại',
         message: e.message || 'Không thể hủy job',
+      });
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    const jobId = deleteTarget;
+    setDeleteTarget(null);
+    try {
+      await deleteJob(jobId);
+      setToast({
+        type: 'success',
+        title: 'Đã Xóa Job',
+        message: `Đã xóa Job "${jobId}" khỏi hàng chờ.`,
+      });
+      loadJobs();
+    } catch (e) {
+      setToast({
+        type: 'error',
+        title: 'Xóa Job Thất Bại',
+        message: e.message || 'Không thể xóa job',
+      });
+    }
+  };
+
+  const confirmClear = async () => {
+    if (!clearTarget) return;
+    const targetType = clearTarget;
+    setClearTarget(null);
+    try {
+      const statusParam = targetType === 'completed' ? 'COMPLETED' : null;
+      const res = await clearJobs(statusParam);
+      setToast({
+        type: 'success',
+        title: 'Đã Dọn Dẹp Hàng Chờ',
+        message: res.message || `Đã dọn dẹp ${res.deleted_count || 0} job.`,
+      });
+      loadJobs();
+    } catch (e) {
+      setToast({
+        type: 'error',
+        title: 'Dọn Dẹp Thất Bại',
+        message: e.message || 'Không thể dọn dẹp hàng chờ',
       });
     }
   };
@@ -173,22 +222,48 @@ export function BatchQueue({ wsUpdates }) {
 
   return (
     <div className="clean-panel rounded-3xl p-6 sm:p-8 shadow-xs space-y-6">
-      {/* Custom Confirmation Modal */}
+      {/* Custom Cancel Confirmation Modal */}
       <ConfirmModal
         isOpen={!!cancelTarget}
         title="Hủy Tiến Trình Job"
-        message={`Bạn có chắc chắn muốn hủy bỏ tiến trình xử lý của Job "${cancelTarget}" không?`}
+        message={`Bạn có chắc chắn muốn dừng tiến trình xử lý của Job "${cancelTarget}" không?`}
         onConfirm={confirmCancel}
         onCancel={() => setCancelTarget(null)}
         confirmText="Xác Nhận Hủy"
         cancelText="Giữ Lại"
       />
 
+      {/* Custom Delete Confirmation Modal */}
+      <ConfirmModal
+        isOpen={!!deleteTarget}
+        title="Xóa Job Khỏi Hàng Chờ"
+        message={`Bạn có chắc chắn muốn xóa Job "${deleteTarget}" và file video liên quan khỏi hệ thống không?`}
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteTarget(null)}
+        confirmText="Xác Nhận Xóa"
+        cancelText="Hủy Bỏ"
+      />
+
+      {/* Custom Batch Clear Confirmation Modal */}
+      <ConfirmModal
+        isOpen={!!clearTarget}
+        title={clearTarget === 'completed' ? 'Dọn Dẹp Job Hoàn Tất' : 'Xóa Toàn Bộ Hàng Chờ'}
+        message={
+          clearTarget === 'completed'
+            ? 'Bạn có chắc chắn muốn xóa tất cả các Job đã hoàn thành khỏi hàng chờ và kho lưu trữ?'
+            : 'Bạn có chắc chắn muốn dọn dẹp toàn bộ danh sách Job khỏi hàng chờ?'
+        }
+        onConfirm={confirmClear}
+        onCancel={() => setClearTarget(null)}
+        confirmText="Xác Nhận Dọn Dẹp"
+        cancelText="Hủy Bỏ"
+      />
+
       {/* Custom In-App Toast */}
       <Toast toast={toast} onClose={() => setToast(null)} />
 
       {/* Queue Header */}
-      <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
         <div>
           <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
             <Layers className="w-5 h-5 text-blue-600" />
@@ -196,12 +271,30 @@ export function BatchQueue({ wsUpdates }) {
           </h3>
           <p className="text-xs text-slate-500 mt-1 font-medium">Giám sát tiến độ 4 giai đoạn xử lý video realtime qua WebSocket.</p>
         </div>
-        <button
-          onClick={loadJobs}
-          className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition flex items-center gap-1.5 border border-slate-200 cursor-pointer shadow-xs"
-        >
-          <RefreshCw className="w-3.5 h-3.5 text-blue-600" /> Cập Nhật
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={() => setClearTarget('completed')}
+            disabled={!jobs.some((j) => j.status?.toUpperCase() === 'COMPLETED')}
+            className="px-3 py-2 bg-slate-100 hover:bg-rose-50 hover:text-rose-700 hover:border-rose-200 disabled:opacity-40 disabled:cursor-not-allowed text-slate-700 text-xs font-bold rounded-xl transition flex items-center gap-1.5 border border-slate-200 cursor-pointer shadow-xs"
+            title="Xóa tất cả các job đã hoàn thành"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-rose-500" /> Xóa Đã Xong
+          </button>
+          <button
+            onClick={() => setClearTarget('all')}
+            disabled={jobs.length === 0}
+            className="px-3 py-2 bg-slate-100 hover:bg-rose-50 hover:text-rose-700 hover:border-rose-200 disabled:opacity-40 disabled:cursor-not-allowed text-slate-700 text-xs font-bold rounded-xl transition flex items-center gap-1.5 border border-slate-200 cursor-pointer shadow-xs"
+            title="Xóa toàn bộ các job trong hàng chờ"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-rose-600" /> Xóa Tất Cả
+          </button>
+          <button
+            onClick={loadJobs}
+            className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition flex items-center gap-1.5 border border-slate-200 cursor-pointer shadow-xs"
+          >
+            <RefreshCw className="w-3.5 h-3.5 text-blue-600" /> Cập Nhật
+          </button>
+        </div>
       </div>
 
       {/* Jobs Table */}
@@ -236,6 +329,8 @@ export function BatchQueue({ wsUpdates }) {
             ) : (
               jobs.map((job) => {
                 const isCompleted = job.status?.toUpperCase() === 'COMPLETED';
+                const isFailed = job.status?.toUpperCase() === 'FAILED';
+                const isCancelled = job.status?.toUpperCase() === 'CANCELLED';
                 const isSelected = job.job_id === selectedJobId;
                 const progressPct = isCompleted
                   ? 100
@@ -278,31 +373,49 @@ export function BatchQueue({ wsUpdates }) {
                     </td>
                     <td className="px-4 py-3.5" onClick={(e) => e.stopPropagation()}>
                       {isCompleted ? (
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-1.5">
                           <button
                             type="button"
                             onClick={() => setPreviewVideo(job)}
-                            className="px-3 py-1.5 text-[11px] font-bold bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-xl border border-blue-200 transition inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
+                            className="px-2.5 py-1.5 text-[11px] font-bold bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-xl border border-blue-200 transition inline-flex items-center gap-1 cursor-pointer shadow-xs"
                           >
                             <Play className="w-3.5 h-3.5 text-blue-600 fill-blue-600" /> Xem Video
                           </button>
                           <a
                             href={getDownloadUrl(job.job_id)}
                             download
-                            className="px-3 py-1.5 text-[11px] font-bold bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-xl border border-emerald-200 transition inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
+                            className="px-2.5 py-1.5 text-[11px] font-bold bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-xl border border-emerald-200 transition inline-flex items-center gap-1 cursor-pointer shadow-xs"
                           >
                             <Download className="w-3.5 h-3.5 text-emerald-600" /> Tải Xuống
                           </a>
+                          <button
+                            type="button"
+                            onClick={() => setDeleteTarget(job.job_id)}
+                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl border border-transparent hover:border-rose-200 transition cursor-pointer"
+                            title="Xóa job này"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
                         </div>
-                      ) : job.status?.toUpperCase() === 'FAILED' ? (
-                        <button
-                          onClick={() => setSelectedJobId(job.job_id)}
-                          className="px-3 py-1.5 text-[11px] font-bold bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-xl border border-rose-200 transition inline-flex items-center gap-1.5 cursor-pointer"
-                        >
-                          Xem Chi Tiết Lỗi
-                        </button>
+                      ) : isFailed || isCancelled ? (
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => setSelectedJobId(job.job_id)}
+                            className="px-2.5 py-1.5 text-[11px] font-bold bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-xl border border-rose-200 transition inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            Chi Tiết Lỗi
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDeleteTarget(job.job_id)}
+                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl border border-transparent hover:border-rose-200 transition cursor-pointer"
+                            title="Xóa job này"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       ) : (
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-1.5">
                           <button
                             onClick={() => setSelectedJobId(job.job_id)}
                             className="px-2.5 py-1.5 text-[11px] font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl border border-slate-200 transition inline-flex items-center gap-1 cursor-pointer"

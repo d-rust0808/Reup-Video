@@ -310,14 +310,16 @@ class TTSService:
 
         if target_engine == "gtts":
             try:
-                return self.generate_speech_gtts(text, lang=lang, output_path=output_path)
+                provider = get_tts_provider("gtts")
+                return await provider.generate(text=text, lang=lang, output_path=output_path)
             except Exception as e:
                 logger.warning(f"gTTS failed ({e}), attempting Coqui TTS")
                 target_engine = "coqui-tts"
 
         if target_engine == "coqui-tts":
             try:
-                return self.generate_speech_coqui(text, output_path=output_path)
+                provider = get_tts_provider("coqui-tts")
+                return await provider.generate(text=text, output_path=output_path)
             except Exception as e:
                 logger.warning(f"Coqui TTS failed ({e}), creating silent fallback WAV")
 
@@ -326,7 +328,7 @@ class TTSService:
         return _create_silent_wav(output_path, duration_sec=1.5)
 
     def _assemble_synchronized_audio(self, clips: List[Dict[str, Any]], total_duration: float, output_path: str) -> bool:
-        """Assembles timed audio clips using FFmpeg adelay filter or concatenation and pads to total_duration."""
+        """Assembles timed audio clips using FFmpeg adelay, amix, and EBU R128 loudnorm volume mastering."""
         from app.services.audio_service import find_ffmpeg_binary
         ffmpeg_bin = find_ffmpeg_binary()
         if not ffmpeg_bin or not clips:
@@ -345,7 +347,8 @@ class TTSService:
             filter_nodes.append(f"[{idx}:a]adelay={start_ms}|{start_ms}[{label}]")
             map_labels.append(f"[{label}]")
 
-        mix_filter = "".join(map_labels) + f"amix=inputs={len(clips)}:dropout_transition=0:normalize=0,apad[aout]"
+        # amix + EBU R128 broadcast loudnorm (-14 LUFS) to ensure punchy, audible, professional voice volume
+        mix_filter = "".join(map_labels) + f"amix=inputs={len(clips)}:dropout_transition=0:normalize=0,loudnorm=I=-14:LRA=7:TP=-1.0:measured_I=-20,volume=1.5,apad[aout]"
         filter_complex = ";".join(filter_nodes + [mix_filter])
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -376,13 +379,24 @@ class TTSService:
         engine: Optional[str] = None,
         total_duration: Optional[float] = None
     ) -> Dict[str, Any]:
-        """Synthesizes synchronized TTS audio for each segment in SRT file."""
+        """Synthesizes synchronized TTS audio with DeepSeek AI dialogue localization and emotion prosody."""
         if not os.path.exists(srt_path):
             raise FileNotFoundError(f"SRT file not found: {srt_path}")
 
-        segments = parse_srt_segments(srt_path)
-        if not segments:
+        raw_segments = parse_srt_segments(srt_path)
+        if not raw_segments:
             raise TTSServiceError(f"No valid subtitle segments found in SRT file: {srt_path}")
+
+        # 1. Localize script with DeepSeek AI Scriptwriter
+        from app.services.ai_scriptwriter_service import ai_scriptwriter_service
+        if ai_scriptwriter_service.is_available():
+            try:
+                segments = ai_scriptwriter_service.localize_script(raw_segments, target_lang=lang)
+            except Exception as e:
+                logger.warning(f"AI scriptwriter error: {e}. Using raw segments.")
+                segments = raw_segments
+        else:
+            segments = raw_segments
 
         temp_dir = tempfile.mkdtemp(prefix="tts_sync_")
         processed_clips = []
@@ -398,13 +412,31 @@ class TTSService:
                 raw_clip_path = os.path.join(temp_dir, f"seg_{seg['index']}_raw.mp3")
                 scaled_clip_path = os.path.join(temp_dir, f"seg_{seg['index']}_scaled.wav")
 
+                text_to_speak = seg.get("translated_text") or seg.get("text", "")
+                emotion = seg.get("emotion", "neutral")
+
+                # Dynamic emotion prosody mapping for expressive voice
+                rate_val = "+0%"
+                pitch_val = "+0Hz"
+                if emotion in ("angry", "terrified", "dramatic"):
+                    rate_val = "+5%"
+                    pitch_val = "+4Hz"
+                elif emotion in ("gentle", "reassuring", "sad"):
+                    rate_val = "-3%"
+                    pitch_val = "+1Hz"
+                elif emotion in ("surprised", "excited"):
+                    rate_val = "+6%"
+                    pitch_val = "+6Hz"
+
                 try:
                     await self.generate_speech(
-                        text=seg["text"],
+                        text=text_to_speak,
                         lang=lang,
                         voice=voice,
                         engine=engine,
-                        output_path=raw_clip_path
+                        output_path=raw_clip_path,
+                        rate=rate_val,
+                        pitch=pitch_val
                     )
                 except Exception as e:
                     logger.warning(f"TTS synthesis failed for segment {seg['index']}: {e}")
@@ -421,8 +453,11 @@ class TTSService:
                 else:
                     speed_factor = 1.0
 
-                if abs(speed_factor - 1.0) > 0.05:
-                    success = scale_audio_speed_ffmpeg(raw_clip_path, scaled_clip_path, speed_factor)
+                # Cap speed factor within [0.85, 1.30] to maintain natural human timbre
+                clamped_speed = max(0.85, min(1.30, speed_factor))
+
+                if abs(clamped_speed - 1.0) > 0.05:
+                    success = scale_audio_speed_ffmpeg(raw_clip_path, scaled_clip_path, clamped_speed)
                     clip_to_use = scaled_clip_path if success else raw_clip_path
                 else:
                     clip_to_use = raw_clip_path
@@ -433,7 +468,7 @@ class TTSService:
                     "clip_path": clip_to_use,
                     "audio_dur": audio_dur,
                     "target_dur": srt_dur,
-                    "speed_factor": speed_factor,
+                    "speed_factor": clamped_speed,
                     "final_dur": final_clip_dur
                 })
 

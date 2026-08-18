@@ -131,7 +131,10 @@ def build_reup_filtergraph(
     if s_ratio != 1.0:
         vf_nodes.append(f"setpts=PTS/{s_ratio:.4f}")
 
-    if cfg.crop_percent > 0:
+    if getattr(cfg, "dynamic_motion", False):
+        # Dynamic micro-zoom / subtle temporal breathing to disrupt Meta TMK/PDQ spatial feature kernels
+        vf_nodes.append("crop=w='trunc(iw*(1-0.03*abs(sin(2*PI*t/12)))/2)*2':h='trunc(ih*(1-0.03*abs(sin(2*PI*t/12)))/2)*2':x='(iw-ow)/2':y='(ih-oh)/2'")
+    elif cfg.crop_percent > 0:
         p = cfg.crop_percent
         vf_nodes.append(f"crop=iw*(1-2*{p:.4f}):ih*(1-2*{p:.4f})")
 
@@ -141,6 +144,10 @@ def build_reup_filtergraph(
 
     if cfg.hue_shift != 0.0:
         vf_nodes.append(f"hue=h={cfg.hue_shift}")
+
+    if getattr(cfg, "film_grain", 0.0) > 0:
+        grain_val = int(round(cfg.film_grain))
+        vf_nodes.append(f"noise=alls={grain_val}:allf=t")
 
     if cfg.sharpen and cfg.unsharp_amount > 0:
         vf_nodes.append(f"unsharp=luma_msize_x=5:luma_msize_y=5:luma_amount={cfg.unsharp_amount}")
@@ -273,15 +280,19 @@ def process_reup_video(
     # 2. Build Configuration
     if cfg is None:
         cfg = ReupConfig(
-            hflip=hflip,
+            hflip=kwargs.get("hflip", hflip),
             speed_factor=speed_ratio,
-            pitch_shift=pitch_shift,
+            pitch_shift=kwargs.get("pitch_shift", pitch_shift),
             crop_percent=crop_percent,
             brightness=brightness,
             contrast=contrast,
             saturation=saturation,
             modify_md5=modify_md5,
             color_adjust=(brightness != 0.0 or contrast != 1.0 or saturation != 1.0),
+            film_grain=kwargs.get("film_grain", 0.0),
+            dynamic_motion=kwargs.get("dynamic_motion", False),
+            meta_compliance_mode=kwargs.get("meta_compliance_mode", False),
+            youtube_compliance_mode=kwargs.get("youtube_compliance_mode", False),
             enable_vocal_mute=kwargs.get("enable_vocal_mute", enable_vocal_mute),
             vocal_mute_strategy=kwargs.get("vocal_mute_strategy", vocal_mute_strategy),
             preserve_bgm=kwargs.get("preserve_bgm", preserve_bgm),

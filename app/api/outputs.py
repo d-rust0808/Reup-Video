@@ -7,9 +7,10 @@ Target Path: app/api/outputs.py
 import os
 import io
 import zipfile
-from typing import Optional
+from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from app.config import settings
 from app.services.queue_manager import BatchQueueManager
@@ -152,4 +153,43 @@ async def delete_output(job_id: str, request: Request):
         "job_id": job_id,
         "deleted": True,
         "message": "Output file and job record deleted successfully"
+    }
+
+
+class BatchDeleteOutputsRequest(BaseModel):
+    job_ids: List[str]
+
+
+@router.delete("/outputs")
+async def clear_all_outputs(request: Request):
+    """
+    Deletes all completed output video files from disk and removes completed job records from DB.
+    """
+    qm = _get_queue_manager(request)
+    completed = qm.list_jobs(status_filter="COMPLETED")
+    deleted_count = 0
+    for j in completed:
+        if qm.delete_job(j["job_id"]):
+            deleted_count += 1
+
+    return {
+        "deleted_count": deleted_count,
+        "message": f"Successfully deleted {deleted_count} completed output files"
+    }
+
+
+@router.post("/outputs/delete-batch")
+async def delete_batch_outputs(req: BatchDeleteOutputsRequest, request: Request):
+    """
+    Deletes a list of output video files from disk and purges their job records from DB.
+    """
+    qm = _get_queue_manager(request)
+    deleted_count = 0
+    for jid in req.job_ids:
+        if qm.delete_job(jid):
+            deleted_count += 1
+
+    return {
+        "deleted_count": deleted_count,
+        "message": f"Successfully deleted {deleted_count} output files"
     }
