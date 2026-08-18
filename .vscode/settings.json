@@ -1,0 +1,6 @@
+{
+  "python.analysis.extraPaths": [
+    "./tts_repos/coqui_tts_repo",
+    "./pyvideotrans_repo"
+  ]
+}

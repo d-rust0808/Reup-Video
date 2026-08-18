@@ -1,0 +1,150 @@
+"""
+REST API Router for Job Tracking, Status Querying, Cancellation, and Retry.
+=============================================================================
+Target Path: app/api/jobs.py
+"""
+
+from typing import Optional
+from fastapi import APIRouter, HTTPException, Query, Request
+
+from app.config import settings
+from app.services.queue_manager import BatchQueueManager
+
+router = APIRouter()
+
+
+def _get_queue_manager(request: Request) -> BatchQueueManager:
+    """Helper retrieving BatchQueueManager instance from app state."""
+    qm = getattr(request.app.state, "queue_manager", None)
+    if qm is None:
+        from app.core.ws_manager import ws_manager
+        qm = BatchQueueManager(db_path=settings.DB_PATH, max_concurrent_jobs=settings.MAX_CONCURRENT_JOBS)
+        qm.register_callback(ws_manager.on_queue_update)
+        request.app.state.queue_manager = qm
+    return qm
+
+
+@router.get("/jobs")
+async def list_jobs(
+    request: Request,
+    status: Optional[str] = Query(None, description="Optional status filter"),
+    limit: int = Query(50, ge=1, le=100, description="Page size limit"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+):
+    """
+    Lists processing jobs with optional status filter and offset/limit pagination.
+    """
+    qm = _get_queue_manager(request)
+    jobs, total = qm.list_jobs_paginated(status_filter=status, limit=limit, offset=offset)
+    return {
+        "jobs": jobs,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@router.get("/jobs/{job_id}")
+async def get_job_details(job_id: str, request: Request):
+    """
+    Fetches status details and progress metrics for a specific job.
+    """
+    qm = _get_queue_manager(request)
+    job = qm.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job ID {job_id} not found")
+    return job
+
+
+@router.get("/jobs/{job_id}/logs")
+async def get_job_logs(job_id: str, request: Request):
+    """
+    Fetches real-time terminal logs and stage history for a specific job.
+    """
+    qm = _get_queue_manager(request)
+    job = qm.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job ID {job_id} not found")
+    return {
+        "job_id": job_id,
+        "status": job.get("status", "PENDING"),
+        "stage": job.get("stage", "PENDING"),
+        "progress": job.get("progress", 0.0),
+        "progress_percent": job.get("progress_percent", 0.0),
+        "message": job.get("message", ""),
+        "logs": job.get("logs", []),
+    }
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str, request: Request):
+    """
+    Cancels an active or pending job and removes partial rendering artifacts.
+    """
+    qm = _get_queue_manager(request)
+    job = qm.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job ID {job_id} not found")
+
+    cur_status = job.get("status", "").upper()
+    if cur_status in ("COMPLETED", "FAILED", "CANCELLED"):
+        raise HTTPException(status_code=400, detail="Job cannot be cancelled in its terminal state")
+
+    cancelled = qm.cancel_job(job_id)
+    if not cancelled:
+        raise HTTPException(status_code=400, detail="Failed to cancel job")
+
+    # Broadcast WebSocket notification
+    ws_mgr = getattr(request.app.state, "ws_manager", None)
+    if ws_mgr:
+        await ws_mgr.broadcast({
+            "event": "job_progress",
+            "job_id": job_id,
+            "status": "CANCELLED",
+            "stage": "CANCELLED",
+            "progress": job.get("progress", 0.0),
+            "message": "Job cancelled by user request"
+        })
+
+    return {
+        "job_id": job_id,
+        "status": "CANCELLED",
+        "message": "Job cancelled successfully"
+    }
+
+
+@router.post("/jobs/{job_id}/retry")
+async def retry_job(job_id: str, request: Request):
+    """
+    Retries a failed or cancelled processing task.
+    """
+    qm = _get_queue_manager(request)
+    job = qm.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job ID {job_id} not found")
+
+    cur_status = job.get("status", "").upper()
+    if cur_status not in ("FAILED", "CANCELLED"):
+        raise HTTPException(status_code=400, detail="Only FAILED or CANCELLED jobs can be retried")
+
+    success = await qm.retry_job(job_id)
+    if not success:
+        raise HTTPException(status_code=400, detail="Failed to retry job")
+
+    # Broadcast WebSocket notification
+    ws_mgr = getattr(request.app.state, "ws_manager", None)
+    if ws_mgr:
+        await ws_mgr.broadcast({
+            "event": "job_progress",
+            "job_id": job_id,
+            "status": "PENDING",
+            "stage": "QUEUED",
+            "progress": 0.0,
+            "message": "Job re-enqueued for processing"
+        })
+
+    return {
+        "job_id": job_id,
+        "status": "PENDING",
+        "message": "Job re-enqueued for processing"
+    }

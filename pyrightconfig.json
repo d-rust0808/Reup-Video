@@ -1,0 +1,14 @@
+{
+  "include": [
+    "app"
+  ],
+  "extraPaths": [
+    ".",
+    "./app",
+    "./app/modules/tts",
+    "./app/modules/tts/coqui",
+    "./app/modules/tts/melo",
+    "./app/modules/videotrans"
+  ]
+}
+
