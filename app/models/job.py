@@ -8,7 +8,8 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Optional, Literal, Dict, Any, Union
+from typing import Optional, Literal, Dict, Any, Union, List
+
 
 from pydantic import (
     BaseModel,
