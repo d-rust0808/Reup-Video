@@ -47,15 +47,59 @@ except Exception:
     Vision = None
     NSData = None
     VNImageRequestHandler = None
-    VNRecognizeTextRequest = None
-    HAS_APPLE_VISION = False
+def detect_faces_neural(frame: np.ndarray, padding: int = 15) -> List[Tuple[int, int, int, int]]:
+    """
+    Hardware-accelerated Neural Face Detector using Apple Vision Framework.
+    Detects all human faces in a video frame to construct a Zero-Mask Face Shield
+    preventing any inpainting, blur, or erasure from touching human subjects.
+    """
+    if (
+        not HAS_APPLE_VISION
+        or NSData is None
+        or VNImageRequestHandler is None
+        or frame is None
+        or frame.size == 0
+    ):
+        return []
+
+    h, w = frame.shape[:2]
+    try:
+        _, buf = cv2.imencode('.png', frame)
+        ns_data = NSData.dataWithBytes_length_(buf.tobytes(), len(buf))
+        handler = VNImageRequestHandler.alloc().initWithData_options_(ns_data, {})
+        req = Vision.VNDetectFaceRectanglesRequest.alloc().init()
+        handler.performRequests_error_([req], None)
+
+        faces = []
+        if req.results():
+            for face in req.results():
+                bbox = face.boundingBox()
+                fx = int(bbox.origin.x * w)
+                fw = int(bbox.size.width * w)
+                fh = int(bbox.size.height * h)
+                fy = int((1.0 - bbox.origin.y - bbox.size.height) * h)
+
+                x1 = max(0, fx - padding)
+                y1 = max(0, fy - padding)
+                x2 = min(w, fx + fw + padding)
+                y2 = min(h, fy + fh + padding)
+                faces.append((x1, y1, x2 - x1, y2 - y1))
+        return faces
+    except Exception as e:
+        logger.debug(f"Apple Vision face detection exception: {e}")
+        return []
 
 
-def detect_text_boxes_neural(frame: np.ndarray, padding: int = 6) -> List[Tuple[int, int, int, int]]:
+def detect_text_boxes_neural(
+    frame: np.ndarray,
+    min_confidence: float = 0.3,
+    padding: int = 4
+) -> List[Tuple[int, int, int, int]]:
     """
     Hardware-accelerated Neural Text & Subtitle Region Detector.
     Uses Apple Vision Framework (Apple Neural Engine) on macOS to detect all text, Chinese characters,
     brackets, labels, and subtitles with pixel-level bounding boxes.
+    Strictly filters out non-text imagery to prevent false-positive blurring on scenery or objects.
     """
     if (
         not HAS_APPLE_VISION
@@ -78,11 +122,26 @@ def detect_text_boxes_neural(frame: np.ndarray, padding: int = 6) -> List[Tuple[
         def on_complete(req, err):
             if not err and req.results():
                 for obs in req.results():
+                    cands = obs.topCandidates_(1)
+                    if not cands:
+                        continue
+                    cand = cands[0]
+                    text_str = cand.string()
+                    conf = cand.confidence() if hasattr(cand, "confidence") else 1.0
+
+                    # Strictly ignore non-text/empty patterns or low-confidence noise
+                    if not text_str or not text_str.strip() or conf < min_confidence:
+                        continue
+
                     bbox = obs.boundingBox()
                     bx = int(bbox.origin.x * w)
                     bw = int(bbox.size.width * w)
                     bh = int(bbox.size.height * h)
                     by = int((1.0 - bbox.origin.y - bbox.size.height) * h)
+
+                    # Discard oversized background regions (anything taller than 35% frame height is scenery/person)
+                    if bh > int(h * 0.35) or bw > int(w * 0.98):
+                        continue
 
                     x1 = max(0, bx - padding)
                     y1 = max(0, by - padding)
@@ -99,6 +158,7 @@ def detect_text_boxes_neural(frame: np.ndarray, padding: int = 6) -> List[Tuple[
     except Exception as e:
         logger.warning(f"Apple Vision text detection exception: {e}")
         return []
+
 
 
 
