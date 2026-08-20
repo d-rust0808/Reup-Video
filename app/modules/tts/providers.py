@@ -204,6 +204,66 @@ class MeloTTSProvider(BaseTTSProvider):
         return output_path
 
 
+class KokoroTTSProvider(BaseTTSProvider):
+    """
+    Kokoro-82M Next-Gen Open-Source Neural TTS Provider.
+    Lightweight 82M parameter model delivering high-fidelity 24kHz audio synthesis.
+    """
+    _pipeline = None
+
+    async def generate(
+        self,
+        text: str,
+        lang: str = "vi",
+        voice: Optional[str] = None,
+        output_path: Optional[str] = None,
+        speed: float = 1.0,
+        **kwargs
+    ) -> str:
+        try:
+            from kokoro import KPipeline
+            import soundfile as sf
+        except ImportError as e:
+            logger.warning(f"Kokoro package not available ({e}). Falling back to Edge-TTS.")
+            edge_prov = EdgeTTSProvider()
+            return await edge_prov.generate(text=text, lang="vi", voice="vi-VN-HoaiMyNeural", output_path=output_path)
+
+        if not output_path:
+            filename = f"kokoro_{hash(text) & 0xffffffff:08x}.wav"
+            output_path = os.path.join("data/outputs/tts", filename)
+
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+        try:
+            if KokoroTTSProvider._pipeline is None:
+                KokoroTTSProvider._pipeline = KPipeline(lang_code='a')
+
+            pipeline = KokoroTTSProvider._pipeline
+            kokoro_voice = voice or "af_heart"
+            if kokoro_voice.startswith("kokoro-") or kokoro_voice.startswith("vi-"):
+                kokoro_voice = "af_heart"
+
+            generator = pipeline(text, voice=kokoro_voice, speed=speed, split_pattern=r'\n+')
+            audio_segments = []
+            for _, _, audio in generator:
+                if audio is not None and len(audio) > 0:
+                    audio_segments.append(audio)
+
+            if audio_segments:
+                import numpy as np
+                full_audio = np.concatenate(audio_segments)
+                sf.write(output_path, full_audio, 24000)
+            else:
+                raise RuntimeError("Kokoro produced empty audio stream")
+
+        except Exception as e:
+            logger.warning(f"Kokoro-82M synthesis error ({e}). Falling back to Edge-TTS.")
+            edge_prov = EdgeTTSProvider()
+            return await edge_prov.generate(text=text, lang="vi", voice="vi-VN-HoaiMyNeural", output_path=output_path)
+
+        return output_path
+
+
 class TTSProviderManager:
     """Manager for retrieving and ordering TTS engine providers."""
 
@@ -211,6 +271,9 @@ class TTSProviderManager:
         self.providers: Dict[str, BaseTTSProvider] = {
             "edge-tts": EdgeTTSProvider(),
             "gtts": GTTSProvider(),
+            "kokoro": KokoroTTSProvider(),
+            "kokoro-tts": KokoroTTSProvider(),
+            "kokoro-82m": KokoroTTSProvider(),
             "coqui-tts": CoquiTTSProvider(),
             "melo-tts": MeloTTSProvider(),
             "melo": MeloTTSProvider(),
@@ -218,9 +281,9 @@ class TTSProviderManager:
 
     def get_provider(self, engine_name: str) -> BaseTTSProvider:
         key = engine_name.lower()
-        if key not in self.providers:
-            raise ValueError(f"Unsupported TTS engine: {engine_name}")
-        return self.providers[key]
+        if key in self.providers:
+            return self.providers[key]
+        raise ValueError(f"Unsupported TTS engine: {engine_name}")
 
 
 _provider_manager = TTSProviderManager()

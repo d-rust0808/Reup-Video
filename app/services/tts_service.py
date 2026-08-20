@@ -17,7 +17,8 @@ from app.modules.tts.providers import get_tts_provider
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_ENGINES = ["edge-tts", "gtts", "coqui-tts", "melo-tts", "melo"]
+SUPPORTED_ENGINES = ["edge-tts", "kokoro", "kokoro-tts", "kokoro-82m", "gtts", "coqui-tts", "melo-tts", "melo"]
+
 
 DEFAULT_VOICES = {
     "vi": {"female": "vi-VN-HoaiMyNeural", "male": "vi-VN-NamMinhNeural"},

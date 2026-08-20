@@ -329,11 +329,15 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                     <option value="vi-VN-NamMinh-Fast">⚡ Nam Nam Minh - Tốc Độ Cao (Tóm tắt phim kịch tính, tin tức nóng)</option>
                     <option value="vi-VN-NamMinh-Deep">🌙 Nam Nam Minh - Trầm Sâu (Kể chuyện đêm khuya, truyện ma, bí ẩn)</option>
                   </optgroup>
+                  <optgroup label="🚀 Kokoro-82M AI Thế Hệ Mới (24kHz Studio)">
+                    <option value="kokoro-af_heart">💎 Kokoro-82M Neural (Âm thanh 24kHz trong trẻo, tự nhiên)</option>
+                  </optgroup>
                   <optgroup label="🤖 Giọng Phổ Thông & Meme">
                     <option value="gtts-vi">🤖 Chị Google (Giọng chuẩn meme, review hài hước viral)</option>
                   </optgroup>
                 </select>
               </div>
+
 
               <div className="bg-purple-100/60 p-2.5 rounded-xl border border-purple-200/60 flex items-start gap-2">
                 <Sparkles className="w-3.5 h-3.5 text-purple-600 shrink-0 mt-0.5" />
