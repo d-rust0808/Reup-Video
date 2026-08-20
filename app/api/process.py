@@ -177,11 +177,19 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
 
     reup_bright = req.reup.brightness if req.reup and req.reup.brightness is not None else req.brightness
     reup_contrast = req.reup.contrast if req.reup and req.reup.contrast is not None else req.contrast
+    reup_sat = req.reup.saturation if req.reup and req.reup.saturation is not None else req.saturation
+    reup_md5 = req.reup.modify_md5 if req.reup and req.reup.modify_md5 is not None else req.modify_md5
+    reup_vocal_mute = req.reup.enable_vocal_mute if req.reup and req.reup.enable_vocal_mute is not None else req.enable_vocal_mute
+    reup_tts = req.reup.enable_tts if req.reup and req.reup.enable_tts is not None else req.enable_tts
+    reup_tts_voice = (req.reup.tts_voice if req.reup and req.reup.tts_voice else req.tts_voice) or "vi-VN-HoaiMyNeural"
+    reup_target_lang = (req.reup.target_lang if req.reup and req.reup.target_lang else req.target_lang) or "vi"
+
     reup_chan_id = req.reup.channel_id if req.reup and req.reup.channel_id else req.channel_id
     reup_post_title = req.reup.post_title if req.reup and req.reup.post_title else req.post_title
     reup_post_caption = req.reup.post_caption if req.reup and req.reup.post_caption else req.post_caption
     reup_post_tags = (req.reup.post_tags if req.reup and req.reup.post_tags is not None else req.post_tags) or []
     reup_pub_status = (req.reup.publish_status if req.reup and req.reup.publish_status else req.publish_status) or "READY"
+
 
     reup_cfg = ReupConfig(
         hflip=reup_hflip if reup_hflip is not None else True,
