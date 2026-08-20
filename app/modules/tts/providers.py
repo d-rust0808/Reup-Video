@@ -92,14 +92,20 @@ class EdgeTTSProvider(BaseTTSProvider):
             output_path = os.path.join("data/outputs/tts", filename)
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        communicate = edge_tts.Communicate(text=text, voice=actual_voice, rate=actual_rate, pitch=actual_pitch, volume=volume)
-        await communicate.save(output_path)
 
+        try:
+            communicate = edge_tts.Communicate(text=text, voice=actual_voice, rate=actual_rate, pitch=actual_pitch, volume=volume)
+            await communicate.save(output_path)
+        except Exception:
+            # Fallback to pure standard voice if custom pitch/rate encounters rate limiting or formatting mismatch
+            communicate = edge_tts.Communicate(text=text, voice=actual_voice, rate="+0%", pitch="+0Hz", volume="+0%")
+            await communicate.save(output_path)
 
         if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
             raise RuntimeError(f"EdgeTTS failed to generate audio output file: {output_path}")
 
         return output_path
+
 
 
 class GTTSProvider(BaseTTSProvider):
