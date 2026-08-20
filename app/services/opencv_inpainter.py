@@ -395,7 +395,8 @@ def inpaint_video_opencv(
 
                         sub_frame = frame[py1:py2, px1:px2]
                         roi_slice = sub_frame[y1 - py1 : y2 - py1, x1 - px1 : x2 - px1]
-                        text_mask = extract_adaptive_text_mask(roi_slice)
+                        run_ocr = (frames_processed % 5 == 0)
+                        text_mask = extract_dynamic_subtitle_mask(roi_slice, tracker=tracker, run_ocr=run_ocr)
 
                         if cv2.countNonZero(text_mask) > 0:
                             sub_mask = np.zeros((py2 - py1, px2 - px1), dtype=np.uint8)
@@ -403,6 +404,7 @@ def inpaint_video_opencv(
                             inpaint_r = max(1, min(radius, 2))
                             inpainted_sub = cv2.inpaint(sub_frame, sub_mask, inpaintRadius=inpaint_r, flags=flag)
                             frame[py1:py2, px1:px2] = inpainted_sub
+
 
                 if encoder_proc.stdin:
                     encoder_proc.stdin.write(frame.tobytes())
@@ -484,7 +486,7 @@ def inpaint_video_opencv(
 
                     sub_frame = frame[py1:py2, px1:px2]
                     roi_slice = sub_frame[y1 - py1 : y2 - py1, x1 - px1 : x2 - px1]
-                    text_mask = extract_adaptive_text_mask(roi_slice)
+                    text_mask = extract_dynamic_subtitle_mask(roi_slice, tracker=tracker_b)
 
                     if cv2.countNonZero(text_mask) > 0:
                         sub_mask = np.zeros((py2 - py1, px2 - px1), dtype=np.uint8)
@@ -492,6 +494,7 @@ def inpaint_video_opencv(
                         inpaint_r = max(1, min(radius, 2))
                         inpainted_sub = cv2.inpaint(sub_frame, sub_mask, inpaintRadius=inpaint_r, flags=flag)
                         frame[py1:py2, px1:px2] = inpainted_sub
+
 
 
             writer.write(frame)

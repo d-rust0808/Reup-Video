@@ -178,35 +178,24 @@ def build_vocal_mute_ffmpeg_filter(
     is_stereo: bool = True
 ) -> str:
     """
-    Constructs FFmpeg audio filtergraph string for vocal muting & center-channel speech cancellation.
-
-    Filters used:
-    - pan filter for center-channel cancellation in stereo mixes (L-R / R-L in-phase vocal attenuation)
-    - bandreject & parametric equalizer filters to suppress speech fundamentals (300Hz-3400Hz)
-    - highpass / lowpass filtering to retain bass and treble background acoustics
+    Constructs clean, high-fidelity FFmpeg audio filter for vocal muting / ducking.
+    Eliminates destructive phase inversion (pan L-R) to prevent hollow buzzing 'ồ ồ ồ' artifacts.
+    Preserves clean stereo spatial imaging, crisp music acoustics, and smooth background level.
     """
     if vocal_mute_strategy == "mute_all" or not preserve_bgm:
         return "volume=0"
 
     filters: List[str] = []
 
-    if is_stereo:
-        # 1. Center-channel phase cancellation filter (suppresses dead-center panned vocal tracks)
-        filters.append("pan=stereo|c0=0.5*c0-0.5*c1|c1=0.5*c1-0.5*c0")
-        # 2. Speech frequency bandreject notch filter (attenuates 300Hz - 3400Hz vocal formant frequencies)
-        filters.append("bandreject=f=1500:width_type=h:w=2200")
-        # 3. Parametric equalizer notches at primary speech resonance points (1000Hz & 2500Hz)
-        filters.append("equalizer=f=1000:t=q:w=2.0:g=-20")
-        filters.append("equalizer=f=2500:t=q:w=2.0:g=-16")
-    else:
-        # Mono audio channel fallback: apply multi-band speech notch filtering
-        filters.append("highpass=f=80")
-        filters.append("bandreject=f=1500:width_type=h:w=2200")
-        filters.append("equalizer=f=1000:t=q:w=2.0:g=-24")
-        filters.append("equalizer=f=2500:t=q:w=2.0:g=-18")
-        filters.append("lowpass=f=12000")
+    # 1. Soft vocal resonance attenuation (mild speech notch without phase inversion)
+    filters.append("equalizer=f=1200:t=q:w=1.5:g=-8")
+    filters.append("equalizer=f=2800:t=q:w=1.5:g=-6")
+
+    # 2. Clean background music attenuation (gentle ducking so BGM stays smooth and clear)
+    filters.append("volume=0.30")
 
     return ",".join(filters)
+
 
 
 def apply_ffmpeg_vocal_mute(

@@ -15,19 +15,20 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
   const [isDragOver, setIsDragOver] = useState(false);
 
   const [options, setOptions] = useState({
-    wm_method: 'all',
+    wm_method: 'auto',
     hflip: false,
     speed_ratio: 1.03,
-    pitch_shift: true,
-    crop_percent: 1.5,
-    brightness: 0.01,
-    contrast: 1.02,
-    saturation: 1.03,
+    pitch_shift: false,
+    crop_percent: 0.0,
+    brightness: 0.0,
+    contrast: 1.0,
+    saturation: 1.0,
     modify_md5: true,
-    enable_vocal_mute: true,
+    enable_vocal_mute: false,
     enable_tts: false,
     tts_voice: 'vi-VN-HoaiMyNeural',
     target_lang: 'vi',
+
     channel_id: null,
     post_title: '',
     post_caption: '',
