@@ -62,13 +62,39 @@ class EdgeTTSProvider(BaseTTSProvider):
         if not voice:
             voice = "vi-VN-HoaiMyNeural" if lang == "vi" else "en-US-AvaNeural"
 
+        # Voice style presets mapping for Vietnamese
+        actual_voice = voice
+        actual_rate = rate
+        actual_pitch = pitch
+
+        if actual_voice == "gtts-vi":
+            gtts_prov = GTTSProvider()
+            return await gtts_prov.generate(text=text, lang="vi", output_path=output_path)
+        elif actual_voice == "vi-VN-HoaiMy-Fast":
+            actual_voice = "vi-VN-HoaiMyNeural"
+            actual_rate = "+15%"
+            actual_pitch = "+1Hz"
+        elif actual_voice == "vi-VN-HoaiMy-Warm":
+            actual_voice = "vi-VN-HoaiMyNeural"
+            actual_rate = "-5%"
+            actual_pitch = "-1Hz"
+        elif actual_voice == "vi-VN-NamMinh-Fast":
+            actual_voice = "vi-VN-NamMinhNeural"
+            actual_rate = "+14%"
+            actual_pitch = "+1Hz"
+        elif actual_voice == "vi-VN-NamMinh-Deep":
+            actual_voice = "vi-VN-NamMinhNeural"
+            actual_rate = "-8%"
+            actual_pitch = "-2Hz"
+
         if not output_path:
             filename = f"edge_{hash(text) & 0xffffffff:08x}.mp3"
             output_path = os.path.join("data/outputs/tts", filename)
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch, volume=volume)
+        communicate = edge_tts.Communicate(text=text, voice=actual_voice, rate=actual_rate, pitch=actual_pitch, volume=volume)
         await communicate.save(output_path)
+
 
         if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
             raise RuntimeError(f"EdgeTTS failed to generate audio output file: {output_path}")

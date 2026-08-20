@@ -8,7 +8,6 @@ import {
   Zap,
   VolumeX,
   Mic,
-  Languages,
   Tv,
   Tag,
   CheckCircle2,
@@ -16,6 +15,7 @@ import {
   Sparkles,
   Loader2
 } from 'lucide-react';
+
 import { fetchChannels } from '../services/api';
 
 export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
@@ -279,17 +279,17 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
           />
         </div>
 
-        {/* TTS Dubbing Control - VIP Pro Universe */}
-        <div className="p-4 bg-purple-50/70 border border-purple-200 rounded-2xl space-y-3.5">
+        {/* TTS Dubbing Control - Unified Vietnamese Voice Hub */}
+        <div className="p-4 bg-gradient-to-br from-purple-50/80 via-indigo-50/50 to-slate-50 border border-purple-200/90 rounded-2xl space-y-3.5 shadow-2xs">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2.5">
               <Mic className="w-4 h-4 text-purple-600 shrink-0" />
               <div>
-                <label className="text-xs font-bold text-purple-900 cursor-pointer block" htmlFor="tts-toggle">
-                  Lồng Tiếng AI Đa Ngôn Ngữ (VIP Pro Neural Dubbing)
+                <label className="text-xs font-extrabold text-purple-950 cursor-pointer block" htmlFor="tts-toggle">
+                  Lồng Tiếng AI Tiếng Việt (Neural Dubbing Studio)
                 </label>
-                <span className="text-[10px] text-purple-600 block">
-                  Whisper STT &rarr; Dịch Thuật Đa Ngữ &rarr; Lồng Giọng Đọc AI Cao Cấp
+                <span className="text-[10px] text-purple-700 font-medium block">
+                  Tự động dịch sang Tiếng Việt chuẩn & Lồng giọng đọc AI cảm xúc
                 </span>
               </div>
             </div>
@@ -303,130 +303,48 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
           </div>
 
           {options.enable_tts && (
-            <div className="space-y-3 pt-2.5 border-t border-purple-200/80">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
-                {/* Target Language Selector */}
-                <div>
-                  <span className="text-[10px] font-bold text-purple-900 block mb-1 flex items-center gap-1">
-                    <Languages className="w-3 h-3 text-purple-600" /> Ngôn Ngữ Thuyết Minh
+            <div className="space-y-3 pt-2.5 border-t border-purple-200/70 animate-fadeIn">
+              <div>
+                <label className="block text-[11px] font-bold text-purple-900 mb-1.5 flex items-center justify-between">
+                  <span>Chọn Giọng Đọc Thuyết Minh Tiếng Việt:</span>
+                  <span className="text-[10px] bg-purple-100 text-purple-800 px-2 py-0.5 rounded-full font-bold">
+                    100% Tiếng Việt
                   </span>
-                  <select
-                    value={options.target_lang || 'vi'}
-                    onChange={(e) => {
-                      const newLang = e.target.value;
-                      let defaultVoice = 'vi-VN-HoaiMyNeural';
-                      if (newLang === 'en') defaultVoice = 'en-US-GuyNeural';
-                      else if (newLang === 'zh') defaultVoice = 'zh-CN-YunxiNeural';
-                      else if (newLang === 'ja') defaultVoice = 'ja-JP-NanamiNeural';
-                      else if (newLang === 'ko') defaultVoice = 'ko-KR-SunHiNeural';
-                      else if (newLang === 'th') defaultVoice = 'th-TH-PremwadeeNeural';
-                      else if (newLang === 'fr') defaultVoice = 'fr-FR-DeniseNeural';
-                      else if (newLang === 'es') defaultVoice = 'es-ES-ElviraNeural';
-                      else if (newLang === 'de') defaultVoice = 'de-DE-KatjaNeural';
-                      else if (newLang === 'ru') defaultVoice = 'ru-RU-DmitryNeural';
-                      else if (newLang === 'id') defaultVoice = 'id-ID-GadisNeural';
-                      onChange({ ...options, target_lang: newLang, tts_voice: defaultVoice });
-                    }}
-                    className="w-full bg-white border border-purple-200 rounded-xl p-2 text-xs text-slate-800 font-bold outline-none focus:ring-2 focus:ring-purple-400 cursor-pointer"
-                  >
-                    <option value="vi">🇻🇳 Tiếng Việt (Việt Nam)</option>
-                    <option value="en">🇺🇸 Tiếng Anh (English Global)</option>
-                    <option value="zh">🇨🇳 Tiếng Trung (Douyin Trends)</option>
-                    <option value="ja">🇯🇵 Tiếng Nhật (Anime & Manga)</option>
-                    <option value="ko">🇰🇷 Tiếng Hàn (K-Drama & K-Pop)</option>
-                    <option value="th">🇹🇭 Tiếng Thái (Thai Drama)</option>
-                    <option value="fr">🇫🇷 Tiếng Pháp (French)</option>
-                    <option value="es">🇪🇸 Tiếng Tây Ban Nha (Spanish)</option>
-                    <option value="de">🇩🇪 Tiếng Đức (German)</option>
-                    <option value="ru">🇷🇺 Tiếng Nga (Russian)</option>
-                    <option value="id">🇮🇩 Tiếng Indonesia</option>
-                  </select>
-                </div>
+                </label>
+                <select
+                  value={options.tts_voice || 'vi-VN-HoaiMyNeural'}
+                  onChange={(e) => {
+                    handleChange('tts_voice', e.target.value);
+                    handleChange('target_lang', 'vi');
+                  }}
+                  className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2.5 text-xs text-slate-900 font-bold outline-none focus:ring-2 focus:ring-purple-400 cursor-pointer shadow-2xs"
+                >
+                  <optgroup label="🌟 Giọng Đọc Nữ Tiếng Việt (Truyền Cảm & Tự Nhiên)">
+                    <option value="vi-VN-HoaiMyNeural">🎙️ Nữ Hoài My (Ngọt ngào, truyền cảm, tâm sự, review ẩm thực)</option>
+                    <option value="vi-VN-HoaiMy-Fast">⚡ Nữ Hoài My - Tiết Tấu Nhanh (Review TikTok/Shorts cuốn hút, sôi nổi)</option>
+                    <option value="vi-VN-HoaiMy-Warm">🍵 Nữ Hoài My - Trầm Ấm (Đọc truyện, vlog đời sống, chữa lành)</option>
+                  </optgroup>
+                  <optgroup label="🔥 Giọng Đọc Nam Tiếng Việt (Cuốn Hút & Chuẩn Phóng Sự)">
+                    <option value="vi-VN-NamMinhNeural">🎙️ Nam Nam Minh (Trầm ấm, lịch lãm, review phim, tài liệu chuẩn VTV)</option>
+                    <option value="vi-VN-NamMinh-Fast">⚡ Nam Nam Minh - Tốc Độ Cao (Tóm tắt phim kịch tính, tin tức nóng)</option>
+                    <option value="vi-VN-NamMinh-Deep">🌙 Nam Nam Minh - Trầm Sâu (Kể chuyện đêm khuya, truyện ma, bí ẩn)</option>
+                  </optgroup>
+                  <optgroup label="🤖 Giọng Phổ Thông & Meme">
+                    <option value="gtts-vi">🤖 Chị Google (Giọng chuẩn meme, review hài hước viral)</option>
+                  </optgroup>
+                </select>
+              </div>
 
-                {/* Voice Model Selector */}
-                <div>
-                  <span className="text-[10px] font-bold text-purple-900 block mb-1">
-                    Giọng Đọc VIP Pro
-                  </span>
-                  <select
-                    value={options.tts_voice || 'vi-VN-HoaiMyNeural'}
-                    onChange={(e) => handleChange('tts_voice', e.target.value)}
-                    className="w-full bg-white border border-purple-200 rounded-xl p-2 text-xs text-slate-800 font-bold outline-none focus:ring-2 focus:ring-purple-400 cursor-pointer"
-                  >
-                    {/* Vietnamese */}
-                    {(options.target_lang === 'vi' || !options.target_lang) && (
-                      <>
-                        <option value="vi-VN-HoaiMyNeural">🎙️ Nữ Bắc: Hoài My (Ngọt ngào, đọc truyện, kể chuyện)</option>
-                        <option value="vi-VN-NamMinhNeural">🎙️ Nam Bắc: Nam Minh (Trầm ấm, review phim, tin tức)</option>
-                        <option value="gtts-vi">🎙️ Nữ Phổ Thông: Google Neural Vi (Tự nhiên, rõ chữ)</option>
-                      </>
-                    )}
-
-                    {/* English */}
-                    {options.target_lang === 'en' && (
-                      <>
-                        <option value="en-US-GuyNeural">🎙️ Nam US: Guy (Viral Shorts, cuốn hút, TikTok trend)</option>
-                        <option value="en-US-JennyNeural">🎙️ Nữ US: Jenny (Tươi vui, lifestyle, vlog)</option>
-                        <option value="en-US-AriaNeural">🎙️ Nữ US: Aria (Kể chuyện kịch tính, tài liệu)</option>
-                        <option value="en-GB-RyanNeural">🎙️ Nam UK: Ryan (Quý tộc Anh, tin tức sang trọng)</option>
-                      </>
-                    )}
-
-                    {/* Chinese */}
-                    {options.target_lang === 'zh' && (
-                      <>
-                        <option value="zh-CN-YunxiNeural">🎙️ Nam Douyin: Yunxi (Review phim 'Chú ý xem...')</option>
-                        <option value="zh-CN-XiaoxiaoNeural">🎙️ Nữ Douyin: Xiaoxiao (Dịu dàng, ẩm thực & du lịch)</option>
-                        <option value="zh-CN-YunjianNeural">🎙️ Nam Kiếm Hiệp: Yunjian (Hùng tráng, cổ trang)</option>
-                      </>
-                    )}
-
-                    {/* Japanese */}
-                    {options.target_lang === 'ja' && (
-                      <>
-                        <option value="ja-JP-NanamiNeural">🎙️ Nữ: Nanami (Giọng Anime ngọt ngào, tươi sáng)</option>
-                        <option value="ja-JP-KeitaNeural">🎙️ Nam: Keita (Giọng Manga trầm, lịch lãm)</option>
-                      </>
-                    )}
-
-                    {/* Korean */}
-                    {options.target_lang === 'ko' && (
-                      <>
-                        <option value="ko-KR-SunHiNeural">🎙️ Nữ: Sun-Hi (Nữ chính K-Drama thanh lịch)</option>
-                        <option value="ko-KR-InJoonNeural">🎙️ Nam: InJoon (Nam thần K-Drama trầm ấm)</option>
-                      </>
-                    )}
-
-                    {/* Thai */}
-                    {options.target_lang === 'th' && (
-                      <>
-                        <option value="th-TH-PremwadeeNeural">🎙️ Nữ: Premwadee (Phim truyền hình Thái)</option>
-                        <option value="th-TH-NiwatNeural">🎙️ Nam: Niwat (Nam tính, kịch tính)</option>
-                      </>
-                    )}
-
-                    {/* French, Spanish, German, Russian, Indonesian */}
-                    {options.target_lang === 'fr' && (
-                      <option value="fr-FR-DeniseNeural">🎙️ Nữ Pháp: Denise (Quyến rũ, chuẩn Paris)</option>
-                    )}
-                    {options.target_lang === 'es' && (
-                      <option value="es-ES-ElviraNeural">🎙️ Nữ TBN: Elvira (Sôi động, phóng khoáng)</option>
-                    )}
-                    {options.target_lang === 'de' && (
-                      <option value="de-DE-KatjaNeural">🎙️ Nữ Đức: Katja (Chuẩn mực, công nghệ)</option>
-                    )}
-                    {options.target_lang === 'ru' && (
-                      <option value="ru-RU-DmitryNeural">🎙️ Nam Nga: Dmitry (Trầm mạnh mẽ)</option>
-                    )}
-                    {options.target_lang === 'id' && (
-                      <option value="id-ID-GadisNeural">🎙️ Nữ Indo: Gadis (Tự nhiên Đông Nam Á)</option>
-                    )}
-                  </select>
-                </div>
+              <div className="bg-purple-100/60 p-2.5 rounded-xl border border-purple-200/60 flex items-start gap-2">
+                <Sparkles className="w-3.5 h-3.5 text-purple-600 shrink-0 mt-0.5" />
+                <p className="text-[10px] text-purple-900 leading-relaxed font-medium">
+                  Hệ thống tự động phát hiện ngôn ngữ gốc của video (Trung, Anh, Hàn, Nhật...), phiên dịch chuẩn văn phong mạng xã hội và lồng ghép giọng đọc mượt mà khớp khẩu hình video.
+                </p>
               </div>
             </div>
           )}
         </div>
+
 
         {/* Channel Assignment & Distribution Section */}
         <div className="p-4 bg-gradient-to-br from-blue-50/70 via-indigo-50/40 to-slate-50 rounded-2xl border border-blue-100/90 space-y-3.5">
