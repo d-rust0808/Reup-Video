@@ -28,11 +28,23 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     enable_tts: false,
     tts_voice: 'vi-VN-HoaiMyNeural',
     target_lang: 'vi',
+    channel_id: null,
+    post_title: '',
+    post_caption: '',
+    post_tags: [],
+    publish_status: 'READY',
   });
 
   useEffect(() => {
     if (selectedMedia) {
       setCurrentMedia(selectedMedia);
+      if (selectedMedia.title) {
+        setOptions((prev) => ({
+          ...prev,
+          post_title: prev.post_title || selectedMedia.title,
+          post_caption: prev.post_caption || `${selectedMedia.title}\n\n#reup #trending #viral`,
+        }));
+      }
     }
   }, [selectedMedia]);
 
@@ -59,6 +71,13 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         author: 'File Tải Lên',
       };
       setCurrentMedia(newMedia);
+      if (res.filename) {
+        setOptions((prev) => ({
+          ...prev,
+          post_title: prev.post_title || res.filename,
+          post_caption: prev.post_caption || `${res.filename}\n\n#reup #trending #viral`,
+        }));
+      }
     } catch (err) {
       setMsg({ type: 'error', text: err.message || 'Tải file video lên thất bại' });
     } finally {
@@ -103,6 +122,11 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     const payload = {
       video_path: currentMedia.file_path || `data/input/${currentMedia.video_id}.mp4`,
       platform: currentMedia.platform || 'douyin',
+      channel_id: options.channel_id,
+      post_title: options.post_title || currentMedia.title,
+      post_caption: options.post_caption,
+      post_tags: options.post_tags,
+      publish_status: options.publish_status,
       watermark: {
         method: cleanMethod,
         roi: pixelRoi,
@@ -121,8 +145,14 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         enable_tts: options.enable_tts,
         tts_voice: options.tts_voice || 'vi-VN-HoaiMyNeural',
         target_lang: options.target_lang || 'vi',
+        channel_id: options.channel_id,
+        post_title: options.post_title || currentMedia.title,
+        post_caption: options.post_caption,
+        post_tags: options.post_tags,
+        publish_status: options.publish_status,
       },
     };
+
 
     try {
       const res = await submitJob(payload);

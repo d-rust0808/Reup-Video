@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Wand2,
   Hash,
@@ -9,12 +9,75 @@ import {
   VolumeX,
   Mic,
   Languages,
+  Tv,
+  Tag,
+  CheckCircle2,
+  FileText,
+  Sparkles,
+  Loader2
 } from 'lucide-react';
+import { fetchChannels } from '../services/api';
 
 export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
+  const [channels, setChannels] = useState([]);
+  const [loadingChannels, setLoadingChannels] = useState(false);
+
+
+  useEffect(() => {
+    loadChannels();
+  }, []);
+
+  const loadChannels = async () => {
+    setLoadingChannels(true);
+    try {
+      const data = await fetchChannels();
+      setChannels(Array.isArray(data) ? data : []);
+    } catch {
+      setChannels([]);
+    } finally {
+      setLoadingChannels(false);
+    }
+  };
+
   const handleChange = (key, value) => {
     onChange({ ...options, [key]: value });
   };
+
+  const handleChannelSelect = (channelId) => {
+    if (!channelId || channelId === 'none') {
+      onChange({
+        ...options,
+        channel_id: null,
+      });
+      return;
+    }
+    const selectedChan = channels.find((c) => c.id === channelId);
+    const chanTags = selectedChan?.tags || [];
+    const tagString = chanTags.map((t) => (t.startsWith('#') ? t : `#${t}`)).join(' ');
+
+    let newCaption = options.post_caption || '';
+    if (tagString && !newCaption.includes(tagString)) {
+      newCaption = newCaption ? `${newCaption} ${tagString}` : tagString;
+    }
+
+    onChange({
+      ...options,
+      channel_id: channelId,
+      post_tags: chanTags,
+      post_caption: newCaption,
+      publish_status: options.publish_status || 'READY',
+    });
+  };
+
+  const handleAppendTag = (tag) => {
+    const formatted = tag.startsWith('#') ? tag : `#${tag}`;
+    const currentCaption = options.post_caption || '';
+    if (!currentCaption.includes(formatted)) {
+      handleChange('post_caption', currentCaption ? `${currentCaption} ${formatted}` : formatted);
+    }
+  };
+
+  const activeChannel = channels.find((c) => c.id === options.channel_id);
 
   return (
     <div className="clean-panel rounded-3xl p-6 sm:p-7 shadow-xs space-y-6">
@@ -359,6 +422,135 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                       <option value="id-ID-GadisNeural">🎙️ Nữ Indo: Gadis (Tự nhiên Đông Nam Á)</option>
                     )}
                   </select>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Channel Assignment & Distribution Section */}
+        <div className="p-4 bg-gradient-to-br from-blue-50/70 via-indigo-50/40 to-slate-50 rounded-2xl border border-blue-100/90 space-y-3.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              <Tv className="w-4 h-4 text-blue-600" />
+              <span className="text-xs font-extrabold text-slate-900">
+                Phân Bổ Kênh Xuất Bản (Channel Assignment)
+              </span>
+            </div>
+            <span className="text-[10px] bg-blue-100/80 text-blue-700 px-2 py-0.5 rounded-full font-bold">
+              Tự động gán video
+            </span>
+          </div>
+
+          {/* Channel Selector */}
+          <div className="space-y-1.5">
+            <label className="block text-[11px] font-bold text-slate-700 flex items-center justify-between">
+              <span>Chọn Kênh Đích:</span>
+              {loadingChannels && (
+                <span className="text-[10px] text-blue-600 flex items-center gap-1 font-normal">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Đang tải...
+                </span>
+              )}
+            </label>
+            <select
+              value={options.channel_id || 'none'}
+              onChange={(e) => handleChannelSelect(e.target.value)}
+              className="w-full text-xs font-semibold bg-white border border-slate-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 shadow-2xs"
+            >
+
+              <option value="none">📦 Không gán kênh (Chỉ lưu vào kho thành phẩm)</option>
+              {channels.map((chan) => (
+                <option key={chan.id} value={chan.id}>
+                  📺 [{chan.platform?.toUpperCase() || 'KHÁC'}] {chan.name} {chan.tags?.length ? `(${chan.tags.join(', ')})` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* If Channel is Selected: Metadata & Caption Form */}
+          {options.channel_id && options.channel_id !== 'none' && (
+            <div className="space-y-3 pt-2 border-t border-blue-100/80 animate-fadeIn">
+              {/* Post Title */}
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1 flex items-center gap-1">
+                  <FileText className="w-3.5 h-3.5 text-blue-600" />
+                  Tiêu Đề Đăng Bài:
+                </label>
+                <input
+                  type="text"
+                  value={options.post_title || ''}
+                  onChange={(e) => handleChange('post_title', e.target.value)}
+                  placeholder="Ví dụ: Review chi tiết cảnh đẹp Hồ Nhĩ Hải..."
+                  className="w-full text-xs bg-white border border-slate-200 rounded-xl px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 shadow-2xs"
+                />
+              </div>
+
+              {/* Post Caption & Hashtags */}
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1 flex items-center justify-between">
+                  <span className="flex items-center gap-1">
+                    <Tag className="w-3.5 h-3.5 text-indigo-600" />
+                    Mô Tả & Hashtags:
+                  </span>
+                  {activeChannel?.tags?.length > 0 && (
+                    <span className="text-[10px] text-slate-500 font-normal">
+                      Bấm thẻ bên dưới để chèn nhanh
+                    </span>
+                  )}
+                </label>
+                <textarea
+                  rows={2}
+                  value={options.post_caption || ''}
+                  onChange={(e) => handleChange('post_caption', e.target.value)}
+                  placeholder="Nhập nội dung caption và hashtags..."
+                  className="w-full text-xs bg-white border border-slate-200 rounded-xl px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 shadow-2xs resize-none"
+                />
+                {/* Quick Tag Pills from Channel */}
+                {activeChannel?.tags && activeChannel.tags.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mt-1.5">
+                    {activeChannel.tags.map((t, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => handleAppendTag(t)}
+                        className="text-[10px] font-bold bg-white text-indigo-700 hover:bg-indigo-50 border border-indigo-200/80 px-2 py-0.5 rounded-lg transition shadow-2xs flex items-center gap-1 cursor-pointer"
+                      >
+                        <Sparkles className="w-2.5 h-2.5 text-amber-500" />
+                        {t.startsWith('#') ? t : `#${t}`}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Publish Status Selector */}
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1.5">
+                  Trạng Thái Bài Viết:
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { id: 'READY', label: '🚀 Sẵn Sàng', color: 'border-emerald-300 text-emerald-700 bg-emerald-50/50' },
+                    { id: 'DRAFT', label: '📝 Bản Nháp', color: 'border-amber-300 text-amber-700 bg-amber-50/50' },
+                    { id: 'PUBLISHED', label: '✅ Đã Đăng', color: 'border-blue-300 text-blue-700 bg-blue-50/50' },
+                  ].map((s) => {
+                    const isCur = (options.publish_status || 'READY') === s.id;
+                    return (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => handleChange('publish_status', s.id)}
+                        className={`text-xs py-1.5 px-2 rounded-xl font-bold border transition cursor-pointer flex items-center justify-center gap-1 ${
+                          isCur
+                            ? `${s.color} border-2 shadow-xs font-extrabold`
+                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        {isCur && <CheckCircle2 className="w-3 h-3 text-current" />}
+                        {s.label}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             </div>

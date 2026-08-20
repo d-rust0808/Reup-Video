@@ -110,7 +110,15 @@ class ReupConfig(BaseModel):
     tts_engine: str = Field(default="edge-tts", description="TTS engine name ('edge-tts', 'gtts', 'coqui-tts')")
     source_lang: str = Field(default="auto", description="Source language code for STT/translation")
 
+    # Channel auto-distribution
+    channel_id: Optional[str] = Field(default=None, description="Target distribution channel ID")
+    post_title: Optional[str] = Field(default=None, description="Title for post upon completion")
+    post_caption: Optional[str] = Field(default=None, description="Caption/Hashtags for post upon completion")
+    post_tags: Optional[List[str]] = Field(default_factory=list, description="Tags/Labels for channel video")
+    publish_status: Optional[str] = Field(default="READY", description="Publish status: DRAFT, READY, PUBLISHED")
+
     @model_validator(mode="after")
+
     def _apply_platform_presets(self) -> "ReupConfig":
         if self.youtube_compliance_mode:
             self.hflip = True

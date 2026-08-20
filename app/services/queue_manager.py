@@ -883,10 +883,41 @@ class BatchQueueManager:
                 )
                 conn.commit()
 
+            # Auto-assign to distribution channel if configured
+            chan_id = getattr(reup_config, "channel_id", None) or params.get("channel_id")
+            if chan_id:
+                try:
+                    with self._get_conn() as conn:
+                        cv_id = f"cvid_{uuid.uuid4().hex[:8]}"
+                        raw_tags = getattr(reup_config, "post_tags", None) or params.get("post_tags") or []
+                        tags_json = json.dumps(raw_tags if isinstance(raw_tags, list) else [], ensure_ascii=False)
+                        p_title = getattr(reup_config, "post_title", None) or params.get("post_title") or f"Video Reup #{job_id[-6:]}"
+                        p_caption = getattr(reup_config, "post_caption", None) or params.get("post_caption") or ""
+                        p_status = (getattr(reup_config, "publish_status", None) or params.get("publish_status") or "READY").upper()
+                        conn.execute("""
+                            INSERT INTO channel_videos (
+                                id, channel_id, job_id, title, caption, tags,
+                                publish_status, video_path, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            cv_id, chan_id, job_id, p_title, p_caption,
+                            tags_json, p_status, final_video_path, now, now
+                        ))
+                        conn.commit()
+                    self.append_job_log(
+                        job_id,
+                        f"📢 Đã tự động phân bổ video vào kênh thành công!",
+                        level="SUCCESS",
+                        stage="COMPLETED"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to auto-assign video {job_id} to channel {chan_id}: {e}")
+
             updated_job = self.get_job(job_id)
             if updated_job:
                 self._notify_callbacks(updated_job)
             return updated_job or {}
+
 
         except Exception as e:
             logger.error(f"Pipeline failure for job {job_id}: {e}")

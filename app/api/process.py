@@ -43,6 +43,13 @@ class ReupPayload(BaseModel):
     tts_voice: Optional[str] = "vi-VN-HoaiMyNeural"
     target_lang: Optional[str] = "vi"
 
+    # Channel distribution
+    channel_id: Optional[str] = None
+    post_title: Optional[str] = None
+    post_caption: Optional[str] = None
+    post_tags: Optional[List[str]] = None
+    publish_status: Optional[str] = "READY"
+
 
 class ProcessJobRequest(BaseModel):
     media_id: Optional[str] = None
@@ -68,9 +75,17 @@ class ProcessJobRequest(BaseModel):
     tts_voice: Optional[str] = "vi-VN-HoaiMyNeural"
     target_lang: Optional[str] = "vi"
 
+    # Channel distribution
+    channel_id: Optional[str] = None
+    post_title: Optional[str] = None
+    post_caption: Optional[str] = None
+    post_tags: Optional[List[str]] = None
+    publish_status: Optional[str] = "READY"
+
     # Nested payload fields (from React frontend)
     watermark: Optional[WatermarkPayload] = None
     reup: Optional[ReupPayload] = None
+
 
 
 @router.post("/process/job", status_code=status.HTTP_201_CREATED)
@@ -162,12 +177,11 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
 
     reup_bright = req.reup.brightness if req.reup and req.reup.brightness is not None else req.brightness
     reup_contrast = req.reup.contrast if req.reup and req.reup.contrast is not None else req.contrast
-    reup_sat = req.reup.saturation if req.reup and req.reup.saturation is not None else req.saturation
-    reup_md5 = req.reup.modify_md5 if req.reup and req.reup.modify_md5 is not None else req.modify_md5
-    reup_vocal_mute = req.reup.enable_vocal_mute if req.reup and req.reup.enable_vocal_mute is not None else req.enable_vocal_mute
-    reup_tts = req.reup.enable_tts if req.reup and req.reup.enable_tts is not None else req.enable_tts
-    reup_tts_voice = (req.reup.tts_voice if req.reup and req.reup.tts_voice else req.tts_voice) or "vi-VN-HoaiMyNeural"
-    reup_target_lang = (req.reup.target_lang if req.reup and req.reup.target_lang else req.target_lang) or "vi"
+    reup_chan_id = req.reup.channel_id if req.reup and req.reup.channel_id else req.channel_id
+    reup_post_title = req.reup.post_title if req.reup and req.reup.post_title else req.post_title
+    reup_post_caption = req.reup.post_caption if req.reup and req.reup.post_caption else req.post_caption
+    reup_post_tags = (req.reup.post_tags if req.reup and req.reup.post_tags is not None else req.post_tags) or []
+    reup_pub_status = (req.reup.publish_status if req.reup and req.reup.publish_status else req.publish_status) or "READY"
 
     reup_cfg = ReupConfig(
         hflip=reup_hflip if reup_hflip is not None else True,
@@ -181,8 +195,14 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         enable_vocal_mute=reup_vocal_mute if reup_vocal_mute is not None else True,
         enable_tts=reup_tts if reup_tts is not None else True,
         tts_voice=reup_tts_voice,
-        target_lang=reup_target_lang
+        target_lang=reup_target_lang,
+        channel_id=reup_chan_id,
+        post_title=reup_post_title,
+        post_caption=reup_post_caption,
+        post_tags=reup_post_tags,
+        publish_status=reup_pub_status
     )
+
 
     # 5. Enqueue job via BatchQueueManager
     qm: Optional[BatchQueueManager] = getattr(request.app.state, "queue_manager", None)
