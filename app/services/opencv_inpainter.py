@@ -11,7 +11,7 @@ import sys
 import shutil
 import subprocess
 import logging
-from typing import Tuple, Optional, Any, cast
+from typing import Tuple, Optional, List, Dict, Any, cast
 
 import numpy as np
 
@@ -79,18 +79,64 @@ def _get_fourcc(codec: str = "mp4v") -> int:
 
 
 
-def extract_adaptive_text_mask(roi_slice: np.ndarray) -> np.ndarray:
+class TemporalTextTracker:
     """
-    Extracts high-precision text character stroke mask from BGR ROI image slice.
-    Combines bilateral smoothing, local contrast difference, adaptive Sobel gradient,
-    and connected component geometric analysis to detect bright, dark, colored, and
-    semi-transparent text strokes while cleanly suppressing background noise.
+    Temporal Subtitle & Watermark Consistency Tracker.
+    Maintains detected text bounding boxes across consecutive video frames (hysteresis window)
+    to eliminate frame flickering, motion blur dropouts, and fade-in/fade-out detection misses.
+    """
 
-    Args:
-        roi_slice: BGR numpy array image slice of ROI.
+    def __init__(self, persistence_frames: int = 15, iou_threshold: float = 0.25):
+        self.persistence_frames = max(3, persistence_frames)
+        self.iou_threshold = iou_threshold
+        self.active_tracks: List[Dict[str, Any]] = []
 
-    Returns:
-        2D uint8 numpy binary mask (0 or 255) of shape (height, width).
+    def _compute_iou(self, b1: Tuple[int, int, int, int], b2: Tuple[int, int, int, int]) -> float:
+        x1 = max(b1[0], b2[0])
+        y1 = max(b1[1], b2[1])
+        x2 = min(b1[0] + b1[2], b2[0] + b2[2])
+        y2 = min(b1[1] + b1[3], b2[1] + b2[3])
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+        inter = (x2 - x1) * (y2 - y1)
+        union = (b1[2] * b1[3]) + (b2[2] * b2[3]) - inter
+        return inter / union if union > 0 else 0.0
+
+    def update(self, detected_boxes: List[Tuple[int, int, int, int]]) -> List[Tuple[int, int, int, int]]:
+        # Decrement persistence for active tracks
+        for track in self.active_tracks:
+            track["remaining"] -= 1
+
+        # Match new detections with existing tracks
+        for dbox in detected_boxes:
+            matched = False
+            for track in self.active_tracks:
+                if self._compute_iou(track["box"], dbox) > self.iou_threshold:
+                    track["box"] = dbox
+                    track["remaining"] = self.persistence_frames
+                    matched = True
+                    break
+            if not matched:
+                self.active_tracks.append({"box": dbox, "remaining": self.persistence_frames})
+
+        # Keep alive active tracks within persistence window
+        self.active_tracks = [t for t in self.active_tracks if t["remaining"] > 0]
+        return [t["box"] for t in self.active_tracks]
+
+    def get_active_boxes(self) -> List[Tuple[int, int, int, int]]:
+        for track in self.active_tracks:
+            track["remaining"] -= 1
+        self.active_tracks = [t for t in self.active_tracks if t["remaining"] > 0]
+        return [t["box"] for t in self.active_tracks]
+
+
+def extract_adaptive_text_mask(roi_slice: np.ndarray) -> np.ndarray:
+
+
+    """
+    Extracts ultra-sharp character stroke mask from BGR ROI slice without smudging background textures.
+    Uses multi-scale morphological gradient, local luminance contrast, and 3x3 anti-halo dilation.
+    Preserves fine background details (veins, dew drops, grain).
     """
     if roi_slice is None or roi_slice.size == 0:
         return np.zeros((0, 0), dtype=np.uint8)
@@ -101,116 +147,119 @@ def extract_adaptive_text_mask(roi_slice: np.ndarray) -> np.ndarray:
 
     gray = cv2.cvtColor(roi_slice, cv2.COLOR_BGR2GRAY)
 
-    # 1. Bilateral smoothing to suppress texture noise (grass, film grain) while preserving sharp text edges
+    # 1. Bilateral smoothing to suppress texture noise while preserving sharp text boundaries
     smooth = cv2.bilateralFilter(gray, 5, 40, 40)
 
-    # 2. High-frequency Sobel & Morphological Gradient
+    # 2. Morphological Gradient on text edges
     kernel_grad = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     grad = cv2.morphologyEx(smooth, cv2.MORPH_GRADIENT, kernel_grad)
 
-    if np.max(grad) < 14:
-        return np.zeros_like(gray)
+    # 3. Local Contrast Difference
+    mean_local = cv2.blur(smooth, (9, 9))
+    diff_local = cv2.absdiff(smooth, mean_local)
 
-    # 3. Local Contrast Difference (Text stands out from local average background)
-    mean_local = cv2.blur(gray, (17, 17))
-    diff_bright = cv2.subtract(gray, mean_local)
-    diff_dark = cv2.subtract(mean_local, gray)
-    diff_contrast = cv2.max(diff_bright, diff_dark)
+    # Combine text stroke features
+    feat = cv2.addWeighted(grad, 0.6, diff_local, 0.4, 0)
 
-    # Dynamic contrast threshold
-    otsu_c, _ = cv2.threshold(diff_contrast, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    c_thresh = max(14, min(28, int(otsu_c)))
-    thresh_c = (diff_contrast >= c_thresh).astype(np.uint8) * 255
+    # Dynamic Otsu thresholding
+    _, binary = cv2.threshold(feat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # Gradient edge threshold
-    otsu_g, _ = cv2.threshold(grad, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    g_thresh = max(16, min(32, int(otsu_g)))
-    thresh_g = (grad >= g_thresh).astype(np.uint8) * 255
-
-    # Combine text edge & contrast features
-    text_cands = cv2.bitwise_and(thresh_c, thresh_g)
-
-    # 4. Text stroke closure to join broken character segments
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    closed = cv2.morphologyEx(text_cands, cv2.MORPH_CLOSE, kernel_close)
-
-    # 5. Connected Component Analysis (CCA)
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(closed, connectivity=8)
-    char_mask = np.zeros_like(gray)
-
-    min_area = 8
-    for i in range(1, num_labels):
-        comp_w = stats[i, cv2.CC_STAT_WIDTH]
-        comp_h = stats[i, cv2.CC_STAT_HEIGHT]
-        comp_area = stats[i, cv2.CC_STAT_AREA]
-
-        if 4 <= comp_h <= int(h * 0.85) and 3 <= comp_w <= int(w * 0.95) and comp_area >= min_area:
-            aspect = comp_w / float(comp_h)
-            if 0.10 <= aspect <= 18.0:
-                char_mask[labels == i] = 255
-
-    if cv2.countNonZero(char_mask) == 0:
-        return np.zeros_like(gray)
-
-    # 6. Anti-Halo Morphological Dilation (Engulfs 2-4px anti-aliased font edges to eliminate chalk smears)
-    kernel_d = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    text_mask = cv2.dilate(char_mask, kernel_d, iterations=1)
-
-    # Safety cap: if mask covers > 45% of ROI, suppress
-    if cv2.countNonZero(text_mask) > 0.45 * (h * w):
-        return np.zeros_like(gray)
+    # 4. Minimal anti-halo dilation (3x3 ellipse = 1px radius) to prevent texture blurring
+    kernel_d = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    text_mask = cv2.dilate(binary, kernel_d, iterations=1)
 
     return text_mask
 
 
-def extract_dynamic_subtitle_mask(sub_zone: np.ndarray) -> np.ndarray:
+def extract_dynamic_subtitle_mask(
+    sub_zone: np.ndarray,
+    tracker: Optional[TemporalTextTracker] = None,
+    run_ocr: bool = True
+) -> np.ndarray:
     """
-    Dynamically detects all active hardcoded subtitles inside a vertical frame zone.
-    Matches centered high-luminance text strokes with sharp gradients and horizontal
-    alignment, and applies Anti-Halo dilation to completely engulf drop shadows.
+    Dynamically detects all active hardcoded subtitles, title overlays, and single Asian characters
+    (e.g. 【夏】) inside a video frame zone with temporal consistency.
+    Combines Apple Neural OCR, temporal tracking, and fine-stroke mask extraction.
     """
     if sub_zone is None or sub_zone.size == 0:
         return np.zeros((0, 0), dtype=np.uint8)
 
     zh, zw = sub_zone.shape[:2]
+    if zh == 0 or zw == 0:
+        return np.zeros((zh, zw), dtype=np.uint8)
+
     gray = cv2.cvtColor(sub_zone, cv2.COLOR_BGR2GRAY)
-
-    # 1. Bilateral smoothing to suppress clothing texture (plaid, knit, fabric)
-    smooth = cv2.bilateralFilter(gray, 5, 30, 30)
-
-    # 2. Text edge gradient + luminance core
-    kernel_grad = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    grad = cv2.morphologyEx(smooth, cv2.MORPH_GRADIENT, kernel_grad)
-
-    bright = (gray >= 165).astype(np.uint8) * 255
-    text_cand = cv2.bitwise_and(bright, (grad >= 10).astype(np.uint8) * 255)
-
-    # 3. Horizontal text stroke connection (joins characters into sentence lines)
-    kernel_conn = cv2.getStructuringElement(cv2.MORPH_RECT, (16, 3))
-    connected = cv2.morphologyEx(text_cand, cv2.MORPH_CLOSE, kernel_conn)
-
-    # 4. Find subtitle contours
-    contours, _ = cv2.findContours(connected, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     text_mask = np.zeros_like(gray)
-    kernel_d = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
 
-    for cnt in contours:
-        cx, cy, cw, ch = cv2.boundingRect(cnt)
-        aspect = cw / float(ch) if ch > 0 else 0
-        center_x = cx + cw / 2.0
-        dist_from_center = abs(center_x - zw / 2.0)
+    # 0. Neural OCR text bounding box detection (Apple Vision Neural Engine) + Temporal Tracking
+    try:
+        if run_ocr:
+            from app.services.subtitle_detector import detect_text_boxes_neural
+            raw_boxes = detect_text_boxes_neural(sub_zone, padding=4)
+            active_boxes = tracker.update(raw_boxes) if tracker is not None else raw_boxes
+        else:
+            active_boxes = tracker.get_active_boxes() if tracker is not None else []
 
-        # Precise subtitle line criteria:
-        # - Width >= 40px
-        # - Height 12px to 75px
-        # - Aspect ratio >= 1.05
-        # - Centered horizontally (within 40% of video center)
-        if cw >= 40 and 12 <= ch <= 75 and aspect >= 1.05 and dist_from_center <= zw * 0.40:
-            box_slice = text_cand[cy:cy+ch, cx:cx+cw]
-            box_dilated = cv2.dilate(box_slice, kernel_d, iterations=1)
-            text_mask[cy:cy+ch, cx:cx+cw] = box_dilated
+        for bx, by, bw, bh in active_boxes:
+
+            # Clamp coordinates
+            cbx = max(0, min(bx, zw - 1))
+            cby = max(0, min(by, zh - 1))
+            cbw = max(1, min(bw, zw - cbx))
+            cbh = max(1, min(bh, zh - cby))
+
+            box_slice = sub_zone[cby : cby + cbh, cbx : cbx + cbw]
+            box_mask = extract_adaptive_text_mask(box_slice)
+            if cv2.countNonZero(box_mask) > 0:
+                text_mask[cby : cby + cbh, cbx : cbx + cbw] = cv2.bitwise_or(
+                    text_mask[cby : cby + cbh, cbx : cbx + cbw], box_mask
+                )
+    except Exception as e:
+        logger.debug(f"Neural OCR detection skipped: {e}")
+
+    # 1. Morphological Gradient fallback for non-OCR watermarks/icons
+    smooth = cv2.bilateralFilter(gray, 5, 40, 40)
+    k_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+    top_hat = cv2.morphologyEx(smooth, cv2.MORPH_TOPHAT, k_hat)
+    black_hat = cv2.morphologyEx(smooth, cv2.MORPH_BLACKHAT, k_hat)
+    hat_comb = cv2.max(top_hat, black_hat)
+
+    k_grad = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    grad = cv2.morphologyEx(smooth, cv2.MORPH_GRADIENT, k_grad)
+    diff = cv2.absdiff(smooth, cv2.blur(smooth, (15, 15)))
+
+    feat = cv2.addWeighted(hat_comb, 0.4, grad, 0.3, 0)
+    feat = cv2.addWeighted(feat, 1.0, diff, 0.3, 0)
+
+    _, binary = cv2.threshold(feat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Suppress oversized background blobs
+    k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    large_blobs = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k_open)
+    clean_bin = cv2.subtract(binary, large_blobs)
+
+    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+    closed = cv2.morphologyEx(clean_bin, cv2.MORPH_CLOSE, close_k)
+
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(closed, connectivity=8)
+    kernel_d = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+
+    for i in range(1, num_labels):
+        cw = stats[i, cv2.CC_STAT_WIDTH]
+        ch = stats[i, cv2.CC_STAT_HEIGHT]
+        area = stats[i, cv2.CC_STAT_AREA]
+
+        if 8 <= ch <= int(zh * 0.5) and 6 <= cw <= int(zw * 0.90) and 16 <= area <= int(zh * zw * 0.15):
+            aspect = cw / float(ch) if ch > 0 else 0
+            if 0.08 <= aspect <= 25.0:
+                char_bin = (labels == i).astype(np.uint8) * 255
+                dilated_char = cv2.dilate(char_bin, kernel_d, iterations=1)
+                text_mask = cv2.bitwise_or(text_mask, dilated_char)
 
     return text_mask
+
+
+
 
 
 def remux_audio_if_available(input_path: str, temp_video_path: str, output_path: str) -> bool:
@@ -246,21 +295,12 @@ def inpaint_video_opencv(
     output_path: str,
     roi: Tuple[int, int, int, int],
     method: str = "telea",
-    radius: int = 3
+    radius: int = 3,
+    progress_callback: Optional[Any] = None
 ) -> str:
     """
     Inpaints video ROI using OpenCV Telea or Navier-Stokes algorithm.
     Supports dynamic per-frame subtitle tracking when roi=(0, 0, 0, 0) or explicit manual ROI.
-
-    Args:
-        input_path: Absolute or relative path to input video.
-        output_path: Target path for output video.
-        roi: 4-element tuple (x, y, w, h) specifying pixel ROI, or (0, 0, 0, 0) for dynamic subtitle mode.
-        method: "telea" (Fast Marching) or "ns" (Navier-Stokes).
-        radius: Inpainting search radius in pixels.
-
-    Returns:
-        Path to processed output video.
     """
     if not HAS_OPENCV:
         raise RuntimeError("OpenCV library (cv2) is not installed")
@@ -301,6 +341,9 @@ def inpaint_video_opencv(
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames_est = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total_frames_est <= 0:
+        total_frames_est = 300
     if fps <= 0 or np.isnan(fps):
         fps = 30.0
 
@@ -335,10 +378,11 @@ def inpaint_video_opencv(
             encoder_proc = subprocess.Popen(encoder_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
             is_dynamic_auto = (roi == (0, 0, 0, 0) or (x == 0 and y == 0 and (w == 0 or w == width)))
+            tracker = TemporalTextTracker(persistence_frames=15) if is_dynamic_auto else None
 
             if is_dynamic_auto:
-                y1 = int(height * 0.45)
-                y2 = int(height * 0.96)
+                y1 = int(height * 0.10)
+                y2 = int(height * 0.98)
                 x1 = 0
                 x2 = width
                 rw = width
@@ -362,13 +406,14 @@ def inpaint_video_opencv(
                 if rw > 0 and rh > 0:
                     if is_dynamic_auto:
                         sub_zone = frame[y1:y2, x1:x2]
-                        text_mask = extract_dynamic_subtitle_mask(sub_zone)
+                        run_ocr = (frames_processed % 5 == 0)
+                        text_mask = extract_dynamic_subtitle_mask(sub_zone, tracker=tracker, run_ocr=run_ocr)
                         if cv2.countNonZero(text_mask) > 0:
-                            inpaint_r = max(1, min(radius, 3))
+                            inpaint_r = max(1, min(radius, 2))
                             inpainted_zone = cv2.inpaint(sub_zone, text_mask, inpaintRadius=inpaint_r, flags=flag)
                             frame[y1:y2, x1:x2] = inpainted_zone
                     else:
-                        pad = max(radius * 2, 10)
+                        pad = max(radius * 2, 8)
                         px1 = max(0, x1 - pad)
                         py1 = max(0, y1 - pad)
                         px2 = min(width, x2 + pad)
@@ -381,7 +426,7 @@ def inpaint_video_opencv(
                         if cv2.countNonZero(text_mask) > 0:
                             sub_mask = np.zeros((py2 - py1, px2 - px1), dtype=np.uint8)
                             sub_mask[y1 - py1 : y2 - py1, x1 - px1 : x2 - px1] = text_mask
-                            inpaint_r = max(1, min(radius, 3))
+                            inpaint_r = max(1, min(radius, 2))
                             inpainted_sub = cv2.inpaint(sub_frame, sub_mask, inpaintRadius=inpaint_r, flags=flag)
                             frame[py1:py2, px1:px2] = inpainted_sub
 
@@ -389,10 +434,18 @@ def inpaint_video_opencv(
                     encoder_proc.stdin.write(frame.tobytes())
                 frames_processed += 1
 
+                if progress_callback and frames_processed % 15 == 0:
+                    cur_prog = min(0.65, 0.35 + 0.30 * (frames_processed / max(1, total_frames_est)))
+                    try:
+                        progress_callback(cur_prog)
+                    except Exception:
+                        pass
+
             if decoder.stdout:
                 decoder.stdout.close()
             if encoder_proc.stdin:
                 encoder_proc.stdin.close()
+
 
             decoder.wait()
             encoder_proc.wait()
@@ -418,10 +471,11 @@ def inpaint_video_opencv(
 
     try:
         is_dynamic_auto = (roi == (0, 0, 0, 0) or (x == 0 and y == 0 and (w == 0 or w == width)))
+        tracker_b = TemporalTextTracker(persistence_frames=15) if is_dynamic_auto else None
 
         if is_dynamic_auto:
-            y1 = int(height * 0.45)
-            y2 = int(height * 0.96)
+            y1 = int(height * 0.10)
+            y2 = int(height * 0.98)
             x1 = 0
             x2 = width
             rw = width
@@ -442,13 +496,13 @@ def inpaint_video_opencv(
             if rw > 0 and rh > 0:
                 if is_dynamic_auto:
                     sub_zone = frame[y1:y2, x1:x2]
-                    text_mask = extract_dynamic_subtitle_mask(sub_zone)
+                    text_mask = extract_dynamic_subtitle_mask(sub_zone, tracker=tracker_b)
                     if cv2.countNonZero(text_mask) > 0:
-                        inpaint_r = max(1, min(radius, 3))
+                        inpaint_r = max(1, min(radius, 2))
                         inpainted_zone = cv2.inpaint(sub_zone, text_mask, inpaintRadius=inpaint_r, flags=flag)
                         frame[y1:y2, x1:x2] = inpainted_zone
                 else:
-                    pad = max(radius * 2, 10)
+                    pad = max(radius * 2, 8)
                     px1 = max(0, x1 - pad)
                     py1 = max(0, y1 - pad)
                     px2 = min(width, x2 + pad)
@@ -461,9 +515,10 @@ def inpaint_video_opencv(
                     if cv2.countNonZero(text_mask) > 0:
                         sub_mask = np.zeros((py2 - py1, px2 - px1), dtype=np.uint8)
                         sub_mask[y1 - py1 : y2 - py1, x1 - px1 : x2 - px1] = text_mask
-                        inpaint_r = max(1, min(radius, 3))
+                        inpaint_r = max(1, min(radius, 2))
                         inpainted_sub = cv2.inpaint(sub_frame, sub_mask, inpaintRadius=inpaint_r, flags=flag)
                         frame[py1:py2, px1:px2] = inpainted_sub
+
 
             writer.write(frame)
     finally:
@@ -498,11 +553,12 @@ class OpenCVInpainter:
         output_path: str,
         roi: Tuple[int, int, int, int],
         radius: Optional[int] = None,
-        method: Optional[str] = None
+        method: Optional[str] = None,
+        progress_callback: Optional[Any] = None
     ) -> str:
         r = radius if radius is not None else self.radius
         m = method if method is not None else self.method
-        return inpaint_video_opencv(input_path, output_path, roi, method=m, radius=r)
+        return inpaint_video_opencv(input_path, output_path, roi, method=m, radius=r, progress_callback=progress_callback)
 
     def inpaint(
         self,
@@ -510,6 +566,8 @@ class OpenCVInpainter:
         output_path: str,
         roi: Tuple[int, int, int, int],
         radius: Optional[int] = None,
-        method: Optional[str] = None
+        method: Optional[str] = None,
+        progress_callback: Optional[Any] = None
     ) -> str:
-        return self.inpaint_video(input_path, output_path, roi, radius=radius, method=method)
+        return self.inpaint_video(input_path, output_path, roi, radius=radius, method=method, progress_callback=progress_callback)
+

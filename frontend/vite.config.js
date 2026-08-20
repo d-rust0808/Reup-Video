@@ -4,9 +4,21 @@ import tailwindcss from '@tailwindcss/vite'
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: './',
   plugins: [react(), tailwindcss()],
   server: {
     port: 3000,
+    watch: {
+      ignored: [
+        '**/data/**',
+        '**/release/**',
+        '**/dist/**',
+        '**/electron/**',
+        '**/*.sqlite*',
+        '**/*.log',
+        '**/tmp/**',
+      ],
+    },
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8000',
@@ -19,3 +31,4 @@ export default defineConfig({
     },
   },
 })
+

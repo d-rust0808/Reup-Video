@@ -8,10 +8,12 @@ import os
 import json
 import math
 import uuid
+import shutil
 import asyncio
 import sqlite3
 import logging
 from datetime import datetime, timezone
+
 from typing import Optional, List, Dict, Any, Callable, Union
 from concurrent.futures import ProcessPoolExecutor
 
@@ -86,12 +88,21 @@ class BatchQueueManager:
             except Exception as e:
                 logger.warning(f"Error in queue callback: {e}")
 
+    def ensure_workers(self) -> None:
+        """Ensures that worker pool tasks are actively running in the current event loop."""
+        self._workers = [w for w in self._workers if not w.done()]
+        try:
+            loop = asyncio.get_running_loop()
+            while len(self._workers) < self.max_concurrent_jobs:
+                worker = loop.create_task(self._worker_loop())
+                self._workers.append(worker)
+        except RuntimeError:
+            pass
+
     async def start(self) -> None:
         """Starts worker pool and recovers pending/interrupted jobs from SQLite."""
         await self.recover_jobs()
-        for _ in range(self.max_concurrent_jobs):
-            worker = asyncio.create_task(self._worker_loop())
-            self._workers.append(worker)
+        self.ensure_workers()
 
     async def stop(self) -> None:
         """Cancels workers and shuts down ProcessPoolExecutor."""
@@ -103,19 +114,26 @@ class BatchQueueManager:
 
     async def recover_jobs(self) -> None:
         """Recovers interrupted jobs from database on startup/restart."""
+        job_ids = []
         with self._get_conn() as conn:
             cursor = conn.execute(
                 "SELECT job_id FROM jobs WHERE status IN ('PENDING', 'DOWNLOADING', 'WATERMARK_REMOVAL', 'REUP_TRANSFORM', 'PROCESSING')"
             )
             rows = cursor.fetchall()
             for row in rows:
-                job_id = row["job_id"]
-                conn.execute(
-                    "UPDATE jobs SET status = 'PENDING', updated_at = ? WHERE job_id = ?",
-                    (_utc_now_iso(), job_id)
-                )
-                await self.queue.put(job_id)
-            conn.commit()
+                job_ids.append(row["job_id"])
+
+            if job_ids:
+                now_iso = _utc_now_iso()
+                for jid in job_ids:
+                    conn.execute(
+                        "UPDATE jobs SET status = 'PENDING', updated_at = ? WHERE job_id = ?",
+                        (now_iso, jid)
+                    )
+                conn.commit()
+
+        for jid in job_ids:
+            await self.queue.put(jid)
 
     async def add_job(
         self,
@@ -157,8 +175,10 @@ class BatchQueueManager:
             )
             conn.commit()
 
+        self.ensure_workers()
         await self.queue.put(job_id)
         return job_id
+
 
     # -----------------------------------------------------------------------
     # Test Suite & Synchronous Compatibility Methods (tests/test_reup.py)
@@ -381,50 +401,123 @@ class BatchQueueManager:
         if updated_job:
             self._notify_callbacks(updated_job)
 
+    def update_job_progress(
+        self,
+        job_id: str,
+        progress: Union[float, int, str],
+        stage: Optional[str] = None
+    ) -> None:
+        """Lightweight method to update progress percentage and broadcast to WebSocket."""
+        self.update_job_status(job_id, status=stage or "WATERMARK_REMOVAL", progress=progress)
+
+
+    def _row_to_dict(self, row) -> Dict[str, Any]:
+        """Converts an SQLite row to a clean job dictionary."""
+        d = dict(row)
+        inp_path = d.get("input_file_path") or d.get("source_url") or ""
+        out_path = d.get("output_file_path") or ""
+        prog_val = d.get("progress_percent")
+        if prog_val is None:
+            prog_val = d.get("progress")
+        if prog_val is None:
+            prog_val = 0.0
+        try:
+            raw_prog = float(prog_val)
+        except (ValueError, TypeError):
+            raw_prog = 0.0
+        prog_ratio = raw_prog / 100.0 if raw_prog > 1.0 else raw_prog
+        prog_pct = raw_prog if raw_prog > 1.0 else raw_prog * 100.0
+        raw_status = d.get("status")
+        if raw_status is None:
+            status_upper = "PENDING"
+        else:
+            status_upper = str(raw_status).strip().upper() or "PENDING"
+
+        params_dict = {}
+        raw_reup = d.get("reup_config")
+        if isinstance(raw_reup, dict):
+            params_dict = raw_reup
+        elif isinstance(raw_reup, str) and raw_reup.strip():
+            try:
+                parsed = json.loads(raw_reup)
+                if isinstance(parsed, dict):
+                    params_dict = parsed
+            except Exception:
+                params_dict = {}
+
+        raw_logs = d.get("logs")
+        logs_list = []
+        if isinstance(raw_logs, list):
+            logs_list = raw_logs
+        elif isinstance(raw_logs, str) and raw_logs.strip():
+            try:
+                parsed_logs = json.loads(raw_logs)
+                if isinstance(parsed_logs, list):
+                    logs_list = parsed_logs
+            except Exception:
+                logs_list = []
+
+        raw_msg = d.get("message") or ""
+
+        return {
+            "job_id": d["job_id"],
+            "source_url": d.get("source_url", ""),
+            "platform": d.get("platform", "auto"),
+            "status": status_upper,
+            "progress": prog_ratio,
+            "progress_percent": prog_pct,
+            "stage": status_upper,
+            "input_path": inp_path,
+            "output_path": out_path,
+            "input_file_path": inp_path,
+            "output_file_path": out_path,
+            "error_message": d.get("error_message"),
+            "error": d.get("error_message"),
+            "message": str(raw_msg),
+            "log": str(raw_msg),
+            "logs": logs_list,
+            "watermark_config": d.get("watermark_config"),
+            "reup_config": d.get("reup_config"),
+            "params": params_dict,
+            "created_at": d.get("created_at"),
+            "updated_at": d.get("updated_at"),
+        }
+
     def list_jobs(self, status_filter: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Lists jobs with optional status filter."""
+        """Lists jobs with optional status filter in a single optimized query."""
         with self._get_conn() as conn:
             if status_filter:
-                cursor = conn.execute("SELECT job_id FROM jobs WHERE UPPER(status) = ? ORDER BY created_at ASC", (status_filter.upper(),))
+                cursor = conn.execute("SELECT * FROM jobs WHERE UPPER(status) = ? ORDER BY created_at ASC", (status_filter.upper(),))
             else:
-                cursor = conn.execute("SELECT job_id FROM jobs ORDER BY created_at ASC")
+                cursor = conn.execute("SELECT * FROM jobs ORDER BY created_at ASC")
             
             rows = cursor.fetchall()
-            jobs = []
-            for r in rows:
-                j = self.get_job(r["job_id"])
-                if j:
-                    jobs.append(j)
-            return jobs
+            return [self._row_to_dict(r) for r in rows]
 
     def list_jobs_paginated(
         self, status_filter: Optional[str] = None, limit: int = 50, offset: int = 0
     ) -> tuple:
-        """Lists jobs with optional status filter and offset/limit pagination, returning (jobs_list, total_count)."""
+        """Lists jobs with optional status filter and offset/limit pagination in a single optimized query."""
         with self._get_conn() as conn:
             if status_filter:
                 sf = status_filter.upper()
                 count_cursor = conn.execute("SELECT COUNT(*) FROM jobs WHERE UPPER(status) = ?", (sf,))
                 total = count_cursor.fetchone()[0]
                 cursor = conn.execute(
-                    "SELECT job_id FROM jobs WHERE UPPER(status) = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                    "SELECT * FROM jobs WHERE UPPER(status) = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
                     (sf, limit, offset)
                 )
             else:
                 count_cursor = conn.execute("SELECT COUNT(*) FROM jobs")
                 total = count_cursor.fetchone()[0]
                 cursor = conn.execute(
-                    "SELECT job_id FROM jobs ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                    "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ? OFFSET ?",
                     (limit, offset)
                 )
             
             rows = cursor.fetchall()
-            jobs = []
-            for r in rows:
-                j = self.get_job(r["job_id"])
-                if j:
-                    jobs.append(j)
-            return jobs, total
+            return [self._row_to_dict(r) for r in rows], total
+
 
     def cancel_job(self, job_id: str) -> bool:
         """Cancels a pending or active job and cleans up partial output files."""
@@ -595,6 +688,9 @@ class BatchQueueManager:
                     else:
                         raise FileNotFoundError(f"Failed to download source video from URL: {source_url}")
 
+                    if not current_video_path or not os.path.exists(current_video_path):
+                        raise FileNotFoundError(f"Source video download failed for {source_url}")
+
                     self.append_job_log(
                         job_id,
                         f"✅ Tải video thành công: {os.path.basename(current_video_path)} ({os.path.getsize(current_video_path):,} bytes)",
@@ -602,6 +698,7 @@ class BatchQueueManager:
                         stage="DOWNLOADING",
                         progress=0.25
                     )
+
                 except Exception as e:
                     logger.error(f"Stage 1 video download error for {job_id}: {e}")
                     raise FileNotFoundError(f"Source video download failed for {source_url}: {e}")
@@ -648,6 +745,13 @@ class BatchQueueManager:
                 f"{job_id}_stage2.mp4"
             )
 
+            # Defensive purge of any stale partial stage 2 file from prior interrupted run
+            if os.path.exists(stage2_out_path):
+                try:
+                    os.remove(stage2_out_path)
+                except Exception:
+                    pass
+
             algo_name = wm_config.algorithm or "auto"
             self.append_job_log(
                 job_id,
@@ -668,8 +772,10 @@ class BatchQueueManager:
             stage2_res_path = WatermarkService.remove_watermark_and_subtitles(
                 video_path=current_video_path,
                 config=wm_config,
-                output_path=stage2_out_path
+                output_path=stage2_out_path,
+                progress_callback=lambda p: self.update_job_progress(job_id, p, stage="WATERMARK_REMOVAL")
             )
+
 
             if stage2_res_path and os.path.exists(stage2_res_path):
                 current_video_path = stage2_res_path
@@ -729,11 +835,19 @@ class BatchQueueManager:
                     progress=0.85
                 )
 
+            # Defensive purge of any stale output file before final render
+            if os.path.exists(target_out_path):
+                try:
+                    os.remove(target_out_path)
+                except Exception:
+                    pass
+
             final_video_path = ReupService.process_reup_pipeline(
                 video_path=current_video_path,
                 config=reup_config,
                 output_path=target_out_path
             )
+
 
             # Cleanup intermediate stage 2 file if separate
             if stage2_res_path and stage2_res_path != target_out_path and stage2_res_path != final_video_path and os.path.exists(stage2_res_path):

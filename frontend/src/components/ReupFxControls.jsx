@@ -30,11 +30,11 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
         </label>
         <div className="grid grid-cols-2 gap-2 text-xs">
           {[
-            { id: 'crop', label: '🌟 Cắt Bỏ Phụ Đề Đáy (Crop 13%)', desc: 'Sạch 100% không tỳ vết, không vệt mờ (Khuyên dùng)' },
-            { id: 'boxblur', label: '🎬 Dải Mờ Điện Ảnh (Blur Bar)', desc: 'Mờ mịn dải phụ đề đáy phong cách phim' },
-            { id: 'auto', label: '🔮 Inpaint Nét Chữ AI + OpenCV', desc: 'Tự quét & xóa nét chữ động' },
-            { id: 'telea', label: '⚡ OpenCV Telea', desc: 'Inpaint nhanh mượt mà' },
-            { id: 'ns', label: '🔬 OpenCV Navier-Stokes', desc: 'Inpaint khử biên mượt mà' },
+            { id: 'all', label: '🚀 Siêu Cấp Toàn Năng (All-In-One)', desc: 'Vừa cắt sạch 100% phụ đề đáy vừa inpaint quét xóa sạch logo/text ở giữa và đỉnh (Khuyên dùng)' },
+            { id: 'auto', label: '🔮 Inpaint Nét Chữ AI + OpenCV', desc: 'Tự động quét & xóa sạch chữ/logo trên mọi vị trí (Giữ nguyên 100% khung hình)' },
+            { id: 'crop', label: '🌟 Cắt Bỏ Phụ Đề Đáy (Crop 13%)', desc: 'Cắt bỏ dải phụ đề đáy video (chỉ áp dụng cho đáy video)' },
+            { id: 'boxblur', label: '🎬 Dải Mờ Điện Ảnh (Blur Bar)', desc: 'Làm mờ mịn dải phụ đề phong cách điện ảnh' },
+            { id: 'telea', label: '⚡ OpenCV Telea (Nhanh)', desc: 'Xóa mượt mà theo vùng ROI đã chọn' },
             { id: 'none', label: '🚫 Giữ Nguyên Khung Hình', desc: 'Không can thiệp phụ đề/watermark' },
           ].map((item) => {
             const isSelected =

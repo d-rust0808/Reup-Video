@@ -71,7 +71,47 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at)")
+
+        # Channels Table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS channels (
+                channel_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                platform TEXT NOT NULL DEFAULT 'tiktok',
+                handle TEXT NOT NULL DEFAULT '',
+                tags TEXT NOT NULL DEFAULT '[]',
+                description TEXT NOT NULL DEFAULT '',
+                color TEXT NOT NULL DEFAULT 'blue',
+                status TEXT NOT NULL DEFAULT 'ACTIVE',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_channels_platform ON channels(platform)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_channels_status ON channels(status)")
+
+        # Channel Videos Table (Content Management)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS channel_videos (
+                id TEXT PRIMARY KEY,
+                channel_id TEXT NOT NULL,
+                job_id TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                caption TEXT NOT NULL DEFAULT '',
+                tags TEXT NOT NULL DEFAULT '[]',
+                publish_status TEXT NOT NULL DEFAULT 'DRAFT',
+                scheduled_at TEXT,
+                published_at TEXT,
+                video_path TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chan_vid_channel ON channel_videos(channel_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chan_vid_status ON channel_videos(publish_status)")
         conn.commit()
+
     logger.info(f"Database initialized successfully at: {db_path}")
 
 

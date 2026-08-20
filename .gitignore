@@ -111,3 +111,10 @@ Thumbs.db
 .vscode/*
 !.vscode/settings.json
 !.vscode/launch.json
+
+# Logs & Desktop Releases
+app/modules/logs/
+frontend/release/
+frontend/data/
+*.log
+

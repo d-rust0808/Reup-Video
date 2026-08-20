@@ -11,6 +11,7 @@ from app.api.stream import router as stream_router
 from app.api.process import router as process_router
 from app.api.jobs import router as jobs_router
 from app.api.outputs import router as outputs_router
+from app.api.channels import router as channels_router
 
 api_router = APIRouter()
 
@@ -19,3 +20,5 @@ api_router.include_router(stream_router, tags=["Stream"])
 api_router.include_router(process_router, tags=["Process"])
 api_router.include_router(jobs_router, tags=["Jobs"])
 api_router.include_router(outputs_router, tags=["Outputs"])
+api_router.include_router(channels_router, tags=["Channels"])
+

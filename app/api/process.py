@@ -209,16 +209,16 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         )
         conn.commit()
 
-    # Enqueue job for background processing asynchronously without blocking web server thread
+    # Enqueue job for background processing asynchronously across parallel worker pool
+    qm.ensure_workers()
     await qm.queue.put(job_id)
-    if not qm._workers:
-        background_tasks.add_task(qm.process_job, job_id)
 
     return {
         "job_id": job_id,
         "status": "PROCESSING",
         "message": "Job submitted successfully"
     }
+
 
 
 @router.get("/voices")

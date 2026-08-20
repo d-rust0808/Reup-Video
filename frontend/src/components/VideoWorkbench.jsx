@@ -15,7 +15,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
   const [isDragOver, setIsDragOver] = useState(false);
 
   const [options, setOptions] = useState({
-    wm_method: 'crop',
+    wm_method: 'all',
     hflip: false,
     speed_ratio: 1.03,
     pitch_shift: true,

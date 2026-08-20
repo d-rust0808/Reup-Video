@@ -3,7 +3,7 @@ import { fetchOutputs, getDownloadUrl, downloadBatchZip, deleteOutput, deleteBat
 import { ConfirmModal } from './ConfirmModal';
 import { Toast } from './Toast';
 import { VideoModal } from './VideoModal';
-import { FolderDown, Download, CheckSquare, Square, FileVideo, Loader2, Trash2, RefreshCw, ShieldCheck, Play } from 'lucide-react';
+import { FolderDown, Download, CheckSquare, Square, FileVideo, Loader2, Trash2, RefreshCw, ShieldCheck, Play, FolderOpen } from 'lucide-react';
 
 export function OutputGallery() {
   const [outputs, setOutputs] = useState([]);
@@ -16,6 +16,14 @@ export function OutputGallery() {
   const [toast, setToast] = useState(null); // { type, title, message }
   const [previewVideo, setPreviewVideo] = useState(null);
 
+  const isDesktopApp = typeof window !== 'undefined' && !!window.electronAPI?.isDesktop;
+
+  const handleOpenInDesktopFolder = (filePath = '') => {
+    if (window.electronAPI?.showItemInFolder) {
+      window.electronAPI.showItemInFolder(filePath);
+    }
+  };
+
   const loadOutputs = async () => {
     try {
       const data = await fetchOutputs();
@@ -25,7 +33,6 @@ export function OutputGallery() {
       setSelectedIds((prev) => prev.filter((id) => list.some((item) => (item.job_id || item.filename) === id)));
     } catch (e) {
       console.error('Failed to load output files:', e);
-      setOutputs([]);
     } finally {
       setLoading(false);
     }
@@ -33,7 +40,10 @@ export function OutputGallery() {
 
   useEffect(() => {
     loadOutputs();
+    const timer = setTimeout(() => setLoading(false), 2000);
+    return () => clearTimeout(timer);
   }, []);
+
 
   const toggleSelect = (jobId) => {
     setSelectedIds((prev) =>
@@ -230,6 +240,17 @@ export function OutputGallery() {
             <span>Xóa Tất Cả</span>
           </button>
 
+          {isDesktopApp && (
+            <button
+              onClick={() => handleOpenInDesktopFolder('')}
+              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs font-bold px-3.5 py-2.5 rounded-xl transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+              title="Mở thư mục video trên máy tính (Finder / Explorer)"
+            >
+              <FolderOpen className="w-4 h-4 text-indigo-600" />
+              <span>Mở Thư Mục Máy</span>
+            </button>
+          )}
+
           <button
             onClick={handleBatchZip}
             disabled={selectedIds.length === 0 || zipping}
@@ -307,6 +328,18 @@ export function OutputGallery() {
                     >
                       <Play className="w-3.5 h-3.5 text-blue-600 fill-blue-600" /> Xem
                     </button>
+                    {isDesktopApp && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleOpenInDesktopFolder(item.file_path || item.filename || '');
+                        }}
+                        title="Mở video này trong thư mục máy tính"
+                        className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl border border-transparent hover:border-indigo-200 transition cursor-pointer"
+                      >
+                        <FolderOpen className="w-4 h-4" />
+                      </button>
+                    )}
                     <button
                       onClick={(e) => requestDelete(e, jobId)}
                       title="Xóa video này"

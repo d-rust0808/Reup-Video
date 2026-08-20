@@ -5,7 +5,8 @@ import { UrlExtractor } from './components/UrlExtractor';
 import { VideoWorkbench } from './components/VideoWorkbench';
 import { BatchQueue } from './components/BatchQueue';
 import { OutputGallery } from './components/OutputGallery';
-import { checkHealth, fetchJobs, fetchOutputs } from './services/api';
+import { ChannelManager } from './components/ChannelManager';
+import { fetchJobs, fetchOutputs } from './services/api';
 import { WebSocketClient } from './services/websocket';
 
 export default function App() {
@@ -20,14 +21,15 @@ export default function App() {
   const [queueCount, setQueueCount] = useState(0);
   const [outputCount, setOutputCount] = useState(0);
 
-  // Fetch job and output counts for Sidebar badges
+  // Fetch job and output counts for Sidebar badges & server online status
   const updateCounts = useCallback(async () => {
     try {
       const jobsData = await fetchJobs();
       const jobsList = Array.isArray(jobsData) ? jobsData : (jobsData.jobs || jobsData.items || []);
       setQueueCount(jobsList.length);
+      setServerOnline(true);
     } catch {
-      // ignore offline
+      setServerOnline(false);
     }
     try {
       const outputsData = await fetchOutputs();
@@ -40,24 +42,9 @@ export default function App() {
 
   useEffect(() => {
     updateCounts();
-    const interval = setInterval(updateCounts, 4000);
+    const interval = setInterval(updateCounts, 6000);
     return () => clearInterval(interval);
-  }, [updateCounts, wsUpdate]);
-
-  // Backend Health check polling
-  useEffect(() => {
-    const verifyServer = async () => {
-      try {
-        await checkHealth();
-        setServerOnline(true);
-      } catch {
-        setServerOnline(false);
-      }
-    };
-    verifyServer();
-    const interval = setInterval(verifyServer, 5000);
-    return () => clearInterval(interval);
-  }, []);
+  }, [updateCounts]);
 
   // WebSocket client initialization
   useEffect(() => {
@@ -69,17 +56,31 @@ export default function App() {
     return () => client.close();
   }, []);
 
-  // Global Keyboard Shortcuts (1 -> Extract, 2 -> Studio, 3 -> Queue, 4 -> Gallery)
+  // Global Keyboard Shortcuts (Ctrl/Cmd + 1, 2, 3, 4, 5)
   useEffect(() => {
     const handleKeyDown = (e) => {
+      // Only trigger if modifier key Ctrl or Cmd is held
+      if (!(e.ctrlKey || e.metaKey)) return;
+
       // Ignore when typing inside input / textarea
       if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
 
-      if (e.key === '1') setActiveTab('extract');
-      else if (e.key === '2') setActiveTab('workbench');
-      else if (e.key === '3') setActiveTab('queue');
-      else if (e.key === '4') setActiveTab('gallery');
-      else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
+      if (e.key === '1') {
+        e.preventDefault();
+        setActiveTab('extract');
+      } else if (e.key === '2') {
+        e.preventDefault();
+        setActiveTab('workbench');
+      } else if (e.key === '3') {
+        e.preventDefault();
+        setActiveTab('queue');
+      } else if (e.key === '4') {
+        e.preventDefault();
+        setActiveTab('gallery');
+      } else if (e.key === '5') {
+        e.preventDefault();
+        setActiveTab('channels');
+      } else if (e.key.toLowerCase() === 'b') {
         e.preventDefault();
         setCollapsed((prev) => !prev);
       }
@@ -108,6 +109,8 @@ export default function App() {
         return 'Hàng Chờ Xử Lý Realtime';
       case 'gallery':
         return 'Thư Viện Video Thành Phẩm';
+      case 'channels':
+        return 'Kênh & Quản Lý Nội Dung';
       default:
         return 'Reup Studio';
     }
@@ -155,8 +158,11 @@ export default function App() {
           {activeTab === 'queue' && <BatchQueue wsUpdates={wsUpdate} />}
 
           {activeTab === 'gallery' && <OutputGallery />}
+
+          {activeTab === 'channels' && <ChannelManager />}
         </main>
       </div>
     </div>
   );
 }
+

@@ -25,7 +25,12 @@ set_settings_ref(settings)
 params: AppParams = AppParams()
 
 HOME_DIR = settings.homedir
-Path(HOME_DIR).mkdir(parents=True, exist_ok=True)
+try:
+    Path(HOME_DIR).mkdir(parents=True, exist_ok=True)
+except Exception:
+    HOME_DIR = os.path.join(ROOT_DIR, "output")
+    Path(HOME_DIR).mkdir(parents=True, exist_ok=True)
+    settings.homedir = HOME_DIR
 
 defaulelang, _transobj = _init_language(settings)
 

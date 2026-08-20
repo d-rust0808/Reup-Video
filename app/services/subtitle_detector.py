@@ -23,6 +23,84 @@ except ImportError:
     cv2 = cast(Any, None)
     HAS_OPENCV = False
 
+Vision: Any = None
+NSData: Any = None
+VNImageRequestHandler: Any = None
+VNRecognizeTextRequest: Any = None
+VNRequestTextRecognitionLevelAccurate: Any = 0
+
+try:
+    import Vision as _Vision  # type: ignore[import-untyped, import-not-found]
+    import Foundation as _Foundation  # type: ignore[import-untyped, import-not-found]
+    Vision = _Vision
+    NSData = getattr(_Foundation, "NSData", None)
+    VNImageRequestHandler = getattr(_Vision, "VNImageRequestHandler", None)
+    VNRecognizeTextRequest = getattr(_Vision, "VNRecognizeTextRequest", None)
+    VNRequestTextRecognitionLevelAccurate = getattr(_Vision, "VNRequestTextRecognitionLevelAccurate", 0)
+    HAS_APPLE_VISION = (
+        Vision is not None
+        and NSData is not None
+        and VNImageRequestHandler is not None
+        and VNRecognizeTextRequest is not None
+    )
+except Exception:
+    Vision = None
+    NSData = None
+    VNImageRequestHandler = None
+    VNRecognizeTextRequest = None
+    HAS_APPLE_VISION = False
+
+
+def detect_text_boxes_neural(frame: np.ndarray, padding: int = 6) -> List[Tuple[int, int, int, int]]:
+    """
+    Hardware-accelerated Neural Text & Subtitle Region Detector.
+    Uses Apple Vision Framework (Apple Neural Engine) on macOS to detect all text, Chinese characters,
+    brackets, labels, and subtitles with pixel-level bounding boxes.
+    """
+    if (
+        not HAS_APPLE_VISION
+        or NSData is None
+        or VNImageRequestHandler is None
+        or VNRecognizeTextRequest is None
+        or frame is None
+        or frame.size == 0
+    ):
+        return []
+
+    h, w = frame.shape[:2]
+    try:
+        _, buf = cv2.imencode('.png', frame)
+        ns_data = NSData.dataWithBytes_length_(buf.tobytes(), len(buf))
+        handler = VNImageRequestHandler.alloc().initWithData_options_(ns_data, {})
+
+        boxes = []
+
+        def on_complete(req, err):
+            if not err and req.results():
+                for obs in req.results():
+                    bbox = obs.boundingBox()
+                    bx = int(bbox.origin.x * w)
+                    bw = int(bbox.size.width * w)
+                    bh = int(bbox.size.height * h)
+                    by = int((1.0 - bbox.origin.y - bbox.size.height) * h)
+
+                    x1 = max(0, bx - padding)
+                    y1 = max(0, by - padding)
+                    x2 = min(w, bx + bw + padding)
+                    y2 = min(h, by + bh + padding)
+                    boxes.append((x1, y1, x2 - x1, y2 - y1))
+
+        req = VNRecognizeTextRequest.alloc().initWithCompletionHandler_(on_complete)
+        req.setRecognitionLanguages_(['zh-Hans', 'zh-Hant', 'en-US', 'vi-VN'])
+        req.setRecognitionLevel_(VNRequestTextRecognitionLevelAccurate)
+        req.setUsesLanguageCorrection_(False)
+        handler.performRequests_error_([req], None)
+        return boxes
+    except Exception as e:
+        logger.warning(f"Apple Vision text detection exception: {e}")
+        return []
+
+
 
 class SubtitleDetectorError(Exception):
     """Raised when subtitle detection fails."""

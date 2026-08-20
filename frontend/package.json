@@ -1,13 +1,39 @@
 {
-  "name": "frontend",
+  "name": "reup-video-desktop",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "lint": "oxlint --deny-warnings",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "electron:dev": "concurrently -k -n \"BACKEND,VITE,DESKTOP\" -c \"green,cyan,magenta\" \"cd .. && python3 -m uvicorn app.main:app --port 8000 --host 127.0.0.1 --reload\" \"wait-on tcp:8000 && vite\" \"wait-on tcp:8000 && wait-on tcp:3000 && cross-env NODE_ENV=development electron .\"",
+    "electron:build": "vite build && electron-builder",
+    "electron:pack": "vite build && electron-builder --dir"
+  },
+  "build": {
+    "appId": "com.reupvideo.studio",
+    "productName": "Reup-Video Studio",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": ["dmg", "zip"],
+      "category": "public.app-category.video",
+      "icon": "electron/assets/icon.icns"
+    },
+    "win": {
+      "target": ["nsis", "portable"],
+      "icon": "electron/assets/icon.png"
+    }
+
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
@@ -20,7 +46,13 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.4",
+    "concurrently": "^10.0.5",
+    "cross-env": "^10.1.0",
+    "electron": "^43.4.1",
+    "electron-builder": "^26.15.3",
     "oxlint": "^1.75.0",
-    "vite": "^8.2.0"
+    "vite": "^8.2.0",
+    "wait-on": "^9.1.0"
   }
 }
+

@@ -4,6 +4,7 @@ import {
   Sliders,
   Layers,
   FolderDown,
+  Tv2,
   Server,
   Wifi,
   Cpu,
@@ -23,6 +24,8 @@ export function Sidebar({
   collapsed,
   setCollapsed,
 }) {
+  const isDesktopApp = typeof window !== 'undefined' && !!window.electronAPI?.isDesktop;
+
   const menuItems = [
     {
       id: 'extract',
@@ -30,7 +33,7 @@ export function Sidebar({
       shortLabel: 'Bóc Tách',
       icon: Link2,
       badge: extractedCount,
-      shortcut: '1',
+      shortcut: '⌘1',
       desc: 'Douyin, Kuaishou, XHS & File máy',
       activeBg: 'bg-blue-50/90 text-blue-800 border-blue-200 shadow-xs font-bold',
       iconActive: 'bg-blue-600 text-white shadow-sm shadow-blue-500/20',
@@ -41,7 +44,7 @@ export function Sidebar({
       label: 'Studio & Canvas ROI',
       shortLabel: 'Studio',
       icon: Sliders,
-      shortcut: '2',
+      shortcut: '⌘2',
       desc: 'Xoá watermark, logo & chỉnh Reup',
       activeBg: 'bg-blue-50/90 text-blue-800 border-blue-200 shadow-xs font-bold',
       iconActive: 'bg-blue-600 text-white shadow-sm shadow-blue-500/20',
@@ -53,7 +56,7 @@ export function Sidebar({
       shortLabel: 'Hàng Chờ',
       icon: Layers,
       badge: queueCount,
-      shortcut: '3',
+      shortcut: '⌘3',
       desc: 'Theo dõi tiến trình 4 giai đoạn',
       activeBg: 'bg-blue-50/90 text-blue-800 border-blue-200 shadow-xs font-bold',
       iconActive: 'bg-blue-600 text-white shadow-sm shadow-blue-500/20',
@@ -65,13 +68,25 @@ export function Sidebar({
       shortLabel: 'Thư Viện',
       icon: FolderDown,
       badge: outputCount,
-      shortcut: '4',
+      shortcut: '⌘4',
       desc: 'Video thành phẩm chuẩn H.264/AAC',
       activeBg: 'bg-blue-50/90 text-blue-800 border-blue-200 shadow-xs font-bold',
       iconActive: 'bg-blue-600 text-white shadow-sm shadow-blue-500/20',
       iconInactive: 'bg-slate-100 text-slate-600 group-hover:bg-slate-200 group-hover:text-slate-900',
     },
+    {
+      id: 'channels',
+      label: 'Kênh & Quản Lý Nội Dung',
+      shortLabel: 'Quản Lý Kênh',
+      icon: Tv2,
+      shortcut: '⌘5',
+      desc: 'Gắn nhãn, phân loại & lịch đăng',
+      activeBg: 'bg-blue-50/90 text-blue-800 border-blue-200 shadow-xs font-bold',
+      iconActive: 'bg-blue-600 text-white shadow-sm shadow-blue-500/20',
+      iconInactive: 'bg-slate-100 text-slate-600 group-hover:bg-slate-200 group-hover:text-slate-900',
+    },
   ];
+
 
   return (
     <aside
@@ -82,17 +97,26 @@ export function Sidebar({
       {/* Collapse Toggle Button */}
       <button
         onClick={() => setCollapsed(!collapsed)}
-        className="absolute -right-3.5 top-18 w-7 h-7 bg-white border border-slate-200 hover:bg-slate-50 hover:border-slate-300 text-slate-600 rounded-full flex items-center justify-center shadow-md transition z-40 cursor-pointer"
-        title={collapsed ? 'Mở rộng sidebar' : 'Thu gọn sidebar'}
+        className={`absolute -right-3.5 ${isDesktopApp ? 'top-23' : 'top-18'} w-7 h-7 bg-white border border-slate-200 hover:bg-slate-50 hover:border-slate-300 text-slate-600 rounded-full flex items-center justify-center shadow-md transition z-40 cursor-pointer`}
+        style={{ WebkitAppRegion: 'no-drag' }}
+        title={collapsed ? 'Mở rộng sidebar (⌘B)' : 'Thu gọn sidebar (⌘B)'}
       >
         {collapsed ? <ChevronRight className="w-4 h-4 text-slate-600" /> : <ChevronLeft className="w-4 h-4 text-slate-600" />}
       </button>
 
       {/* Top Brand & Navigation */}
-      <div className="p-4 space-y-6">
+      <div className={`${collapsed ? 'p-2.5' : 'p-4'} space-y-4 ${isDesktopApp ? 'pt-7' : ''}`}>
+        {/* macOS Traffic Lights drag region */}
+        {isDesktopApp && (
+          <div
+            className="h-3 w-full"
+            style={{ WebkitAppRegion: 'drag' }}
+          />
+        )}
+
         {/* Brand Header with AI Generated Logo */}
-        <div className="flex items-center space-x-3 px-1 py-1">
-          <div className="w-11 h-11 rounded-2xl overflow-hidden shadow-md shadow-blue-600/15 border border-slate-200/80 shrink-0 bg-white flex items-center justify-center cursor-pointer">
+        <div className={`flex items-center ${collapsed ? 'justify-center' : 'space-x-3 px-1'} py-1`} style={{ WebkitAppRegion: 'no-drag' }}>
+          <div className="w-10 h-10 rounded-2xl overflow-hidden shadow-md shadow-blue-600/15 border border-slate-200/80 shrink-0 bg-white flex items-center justify-center cursor-pointer">
             <img
               src="/logo.jpg"
               alt="Reup Studio AI"
@@ -129,14 +153,14 @@ export function Sidebar({
               <button
                 key={item.id}
                 onClick={() => setActiveTab(item.id)}
-                className={`w-full p-2.5 rounded-2xl transition-all duration-150 flex items-center justify-between group cursor-pointer border ${
+                className={`w-full ${collapsed ? 'p-2.5 justify-center' : 'p-2.5 justify-between'} rounded-2xl transition-all duration-150 flex items-center group cursor-pointer border ${
                   isActive
                     ? item.activeBg
                     : 'border-transparent text-slate-700 hover:text-slate-900 hover:bg-slate-50 font-semibold'
                 }`}
-                title={collapsed ? `${item.label} (${item.desc})` : undefined}
+                title={collapsed ? `${item.label} (${item.desc}) - ${item.shortcut}` : undefined}
               >
-                <div className="flex items-center space-x-3 min-w-0">
+                <div className={`flex items-center ${collapsed ? 'justify-center' : 'space-x-3'} min-w-0 relative`}>
                   <div
                     className={`p-2 rounded-xl transition-all shrink-0 ${
                       isActive ? item.iconActive : item.iconInactive
@@ -144,6 +168,12 @@ export function Sidebar({
                   >
                     <Icon className="w-4 h-4" />
                   </div>
+
+                  {collapsed && item.badge !== undefined && item.badge > 0 && (
+                    <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-600 text-white text-[9px] font-black rounded-full flex items-center justify-center shadow-xs">
+                      {item.badge}
+                    </span>
+                  )}
 
                   {!collapsed && (
                     <div className="text-left overflow-hidden">
@@ -182,7 +212,7 @@ export function Sidebar({
       </div>
 
       {/* Bottom Health & System Specs */}
-      <div className="p-3.5 m-3 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-2.5">
+      <div className={`${collapsed ? 'p-2 m-2' : 'p-3.5 m-3'} bg-slate-50 rounded-2xl border border-slate-200/80 space-y-2.5`}>
         {!collapsed ? (
           <>
             <div className="flex items-center justify-between text-xs">
@@ -242,5 +272,6 @@ export function Sidebar({
         )}
       </div>
     </aside>
+
   );
 }

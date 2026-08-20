@@ -2,7 +2,35 @@
  * API Service for interacting with FastAPI Backend endpoints
  */
 
-const API_BASE = '/api/v1';
+export const isDesktop =
+  typeof window !== 'undefined' &&
+  (!!window.electronAPI?.isDesktop || window.location.protocol === 'file:');
+
+export const getApiBase = () => {
+  if (
+    typeof window !== 'undefined' &&
+    (window.location.protocol === 'file:' || !window.location.host || window.location.host === '')
+  ) {
+    return 'http://127.0.0.1:8000/api/v1';
+  }
+  return '/api/v1';
+};
+
+export const API_BASE = getApiBase();
+
+export function getMediaUrl(path) {
+  if (!path) return '';
+  if (path.startsWith('http://') || path.startsWith('https://')) return path;
+  if (path.startsWith('/')) {
+    const origin =
+      typeof window !== 'undefined' &&
+      (window.location.protocol === 'file:' || !window.location.host)
+        ? 'http://127.0.0.1:8000'
+        : '';
+    return `${origin}${path}`;
+  }
+  return path;
+}
 
 export async function checkHealth() {
   const res = await fetch(`${API_BASE}/health`);
@@ -174,4 +202,102 @@ export async function fetchVoices() {
   if (!res.ok) throw new Error('Failed to fetch voices list');
   return res.json();
 }
+
+// -----------------------------------------------------------------------------
+// Channel & Content Management APIs
+// -----------------------------------------------------------------------------
+
+export async function fetchChannels() {
+  const res = await fetch(`${API_BASE}/channels`);
+  if (!res.ok) throw new Error('Failed to fetch channels');
+  return res.json();
+}
+
+export async function createChannel(payload) {
+  const res = await fetch(`${API_BASE}/channels`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to create channel');
+  }
+  return res.json();
+}
+
+export async function updateChannel(channelId, payload) {
+  const res = await fetch(`${API_BASE}/channels/${channelId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to update channel');
+  }
+  return res.json();
+}
+
+export async function deleteChannel(channelId) {
+  const res = await fetch(`${API_BASE}/channels/${channelId}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to delete channel');
+  }
+  return res.json();
+}
+
+export async function fetchChannelVideos(channelId, status = '', tag = '') {
+  let url = `${API_BASE}/channels/${channelId}/videos`;
+  const params = new URLSearchParams();
+  if (status) params.append('status_filter', status);
+  if (tag) params.append('tag', tag);
+  const q = params.toString();
+  if (q) url += `?${q}`;
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Failed to fetch channel videos');
+  return res.json();
+}
+
+export async function assignVideoToChannel(channelId, payload) {
+  const res = await fetch(`${API_BASE}/channels/${channelId}/videos`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to assign video to channel');
+  }
+  return res.json();
+}
+
+export async function updateChannelVideo(videoId, payload) {
+  const res = await fetch(`${API_BASE}/channel-videos/${videoId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to update video content');
+  }
+  return res.json();
+}
+
+export async function removeVideoFromChannel(videoId) {
+  const res = await fetch(`${API_BASE}/channel-videos/${videoId}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to remove video from channel');
+  }
+  return res.json();
+}
+
 

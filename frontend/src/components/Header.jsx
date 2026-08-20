@@ -3,6 +3,7 @@ import {
   Layers,
   Video,
   FolderDown,
+  MonitorCheck,
 } from 'lucide-react';
 
 export function Header({
@@ -11,10 +12,18 @@ export function Header({
   queueCount,
   outputCount,
 }) {
+  const isDesktopApp = typeof window !== 'undefined' && !!window.electronAPI?.isDesktop;
+
   return (
-    <header className="h-16 bg-white/95 backdrop-blur-md border-b border-slate-200/90 px-6 flex items-center justify-between sticky top-0 z-20 shadow-xs">
+    <header
+      className={`${
+        isDesktopApp ? 'h-18 pt-2.5' : 'h-16'
+      } bg-white/95 backdrop-blur-md border-b border-slate-200/90 px-6 flex items-center justify-between sticky top-0 z-20 shadow-xs select-none transition-all`}
+      style={{ WebkitAppRegion: 'drag' }}
+    >
+
       {/* Left Breadcrumbs & Context Title */}
-      <div className="flex items-center space-x-3">
+      <div className="flex items-center space-x-3" style={{ WebkitAppRegion: 'no-drag' }}>
         <div className="flex items-center space-x-2 text-xs font-semibold text-slate-500">
           <span
             className="flex items-center gap-1.5 text-blue-600 font-bold hover:text-blue-700 cursor-pointer"
@@ -22,6 +31,11 @@ export function Header({
           >
             <Video className="w-4 h-4" /> Reup Studio
           </span>
+          {isDesktopApp && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/80">
+              <MonitorCheck className="w-3 h-3" /> Desktop
+            </span>
+          )}
           <span className="text-slate-300 font-normal">/</span>
           <span className="text-slate-900 font-extrabold tracking-tight text-sm sm:text-base flex items-center gap-2">
             {activeTabTitle}
@@ -30,7 +44,7 @@ export function Header({
       </div>
 
       {/* Right Stats, Engine Tags & Actions */}
-      <div className="flex items-center space-x-3">
+      <div className="flex items-center space-x-3" style={{ WebkitAppRegion: 'no-drag' }}>
 
         {/* Supported Platforms Pills */}
         <div className="hidden sm:flex items-center space-x-1.5">

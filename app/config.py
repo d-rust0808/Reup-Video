@@ -93,9 +93,10 @@ class Settings(BaseModel):
         description="Allowed CORS origins list or JSON/comma-separated string"
     )
     MAX_CONCURRENT_JOBS: int = Field(
-        default_factory=lambda: int(os.getenv("MAX_CONCURRENT_JOBS", "2")),
+        default_factory=lambda: int(os.getenv("MAX_CONCURRENT_JOBS", "3")),
         description="Maximum concurrent video processing tasks"
     )
+
 
     def get_cors_origins(self) -> List[str]:
         """Parses CORS_ORIGINS into a clean list of string origins."""

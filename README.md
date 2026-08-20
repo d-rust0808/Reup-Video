@@ -149,23 +149,30 @@ python3 -m app.main
 
 ---
 
-### Step 3: Frontend Setup
+### Step 3: Frontend & Desktop App
+
+#### Chạy Giao Diện Web:
 ```bash
 cd frontend
-
-# 1. Install NPM packages
 npm install
-
-# 2. Start Vite Development Server
 npm run dev
 ```
-*Frontend will be running at:* `http://localhost:5173`
+*Giao diện Web sẽ chạy tại:* `http://localhost:3000`
 
-*(Optional) To build frontend for production served directly by FastAPI:*
+#### Chạy Ứng Dụng Desktop (Electron):
 ```bash
 cd frontend
-npm run build
+npm run electron:dev
 ```
+*Electron sẽ tự động khởi động backend FastAPI và mở cửa sổ ứng dụng Desktop.*
+
+#### Đóng Gói Bộ Cài Đặt Desktop (.dmg / .exe):
+```bash
+cd frontend
+npm run electron:build
+```
+*File cài đặt sẽ được xuất ra thư mục `frontend/release/`.*
+
 
 ---
 
