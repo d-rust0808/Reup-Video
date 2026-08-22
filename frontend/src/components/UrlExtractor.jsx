@@ -13,10 +13,19 @@ import {
   Video,
   UserCheck,
   Search,
+  ListVideo,
+  Clapperboard,
 } from 'lucide-react';
-import { extractUrls, uploadVideoFile, fetchSampleVideos, fetchLibrary, getStreamUrl } from '../services/api';
+import {
+  extractUrls,
+  extractChannel,
+  uploadVideoFile,
+  fetchSampleVideos,
+  fetchLibrary,
+  getStreamUrl,
+} from '../services/api';
 
-export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbench }) {
+export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbench, onJobsQueued }) {
   const [mode, setMode] = useState('video'); // 'video' | 'channel'
   const [inputUrl, setInputUrl] = useState('');
   const [loading, setLoading] = useState(false);
@@ -26,6 +35,12 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
   const [pasteTip, setPasteTip] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [samples, setSamples] = useState([]);
+  const [maxVideos, setMaxVideos] = useState(8);
+  const [autoReup, setAutoReup] = useState(true);
+  const [channelProfile, setChannelProfile] = useState(null);
+  const [channelHint, setChannelHint] = useState('');
+  const [channelMessage, setChannelMessage] = useState('');
+  const [queuedJobs, setQueuedJobs] = useState([]);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -78,14 +93,47 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
       setError(
         mode === 'video'
           ? 'Vui lòng nhập đường link hoặc văn bản chia sẻ của 1 video.'
-          : 'Vui lòng nhập đường link trang cá nhân / kênh để quét.'
+          : 'Dán URL kênh Douyin/Kuaishou, hoặc dán nhiều link video (mỗi dòng một link).'
       );
       return;
     }
     setError(null);
+    setChannelHint('');
+    setChannelMessage('');
     setLoading(true);
 
     try {
+      if (mode === 'channel') {
+        const result = await extractChannel({
+          url: inputUrl.trim(),
+          max_videos: Number(maxVideos) || 8,
+          auto_reup: autoReup,
+        });
+        const items = result.items || [];
+        setChannelProfile(result.profile || null);
+        setChannelHint(result.hint || '');
+        setChannelMessage(result.message || '');
+        setQueuedJobs(result.jobs || []);
+        if (items.length) {
+          setExtractedList((prev) => {
+            const map = new Map();
+            [...items, ...prev].forEach((item) => {
+              if (item?.video_id && !map.has(item.video_id)) map.set(item.video_id, item);
+            });
+            const next = Array.from(map.values());
+            onMediaExtracted?.(next);
+            return next;
+          });
+        }
+        if (!items.length && result.hint) {
+          setError(result.hint);
+        }
+        if ((result.jobs || []).length) {
+          onJobsQueued?.(result.jobs);
+        }
+        return;
+      }
+
       const result = await extractUrls([inputUrl.trim()]);
       const items = result.items || [];
       if (items.length === 0) {
@@ -263,6 +311,10 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
                 setMode('channel');
                 setInputUrl('');
                 setError(null);
+                setChannelHint('');
+                setChannelMessage('');
+                setChannelProfile(null);
+                setQueuedJobs([]);
               }}
               className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all cursor-pointer ${
                 mode === 'channel'
@@ -309,29 +361,72 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
 
         {/* Single Line Streamlined Input Form */}
         <form onSubmit={handleExtract} className="space-y-4">
-          <div className="relative flex items-center">
-            <div className="absolute left-4 text-slate-400 pointer-events-none">
+          <div className="relative flex items-start">
+            <div className="absolute left-4 top-4 text-slate-400 pointer-events-none">
               {mode === 'video' ? <Link2 className="w-5 h-5 text-blue-600" /> : <Search className="w-5 h-5 text-purple-600" />}
             </div>
 
-            <input
-              ref={inputRef}
-              type="text"
-              value={inputUrl}
-              onChange={(e) => setInputUrl(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-300 focus:border-blue-500 focus:bg-white rounded-2xl pl-12 pr-4 py-3.5 text-sm text-slate-900 placeholder-slate-400 focus:ring-3 focus:ring-blue-500/10 outline-none font-mono transition shadow-inner"
-              placeholder={
-                mode === 'video'
-                  ? 'Dán 1 link video tại đây (ví dụ: https://v.douyin.com/xyz123/ hoặc đoạn chia sẻ)...'
-                  : 'Dán 1 link kênh/profile tại đây (ví dụ: https://www.douyin.com/user/MS4wLjAB...)...'
-              }
-            />
+            {mode === 'channel' ? (
+              <textarea
+                ref={inputRef}
+                value={inputUrl}
+                onChange={(e) => setInputUrl(e.target.value)}
+                rows={5}
+                className="w-full bg-slate-50 border border-slate-300 focus:border-blue-500 focus:bg-white rounded-2xl pl-12 pr-4 py-3.5 text-sm text-slate-900 placeholder-slate-400 focus:ring-3 focus:ring-blue-500/10 outline-none font-mono transition shadow-inner resize-y min-h-[120px]"
+                placeholder={'Dán URL kênh + (nếu cần) vài link video, mỗi dòng một link:\nhttps://www.douyin.com/user/MS4wLjAB...\nhttps://www.douyin.com/jingxuan?modal_id=7671...\nhttps://v.douyin.com/xxxx/'}
+              />
+            ) : (
+              <input
+                ref={inputRef}
+                type="text"
+                value={inputUrl}
+                onChange={(e) => setInputUrl(e.target.value)}
+                className="w-full bg-slate-50 border border-slate-300 focus:border-blue-500 focus:bg-white rounded-2xl pl-12 pr-4 py-3.5 text-sm text-slate-900 placeholder-slate-400 focus:ring-3 focus:ring-blue-500/10 outline-none font-mono transition shadow-inner"
+                placeholder="Dán 1 link video tại đây (ví dụ: https://v.douyin.com/xyz123/ hoặc đoạn chia sẻ)..."
+              />
+            )}
           </div>
+
+          {mode === 'channel' && (
+            <div className="flex flex-wrap items-center gap-3 p-3 rounded-2xl bg-purple-50/70 border border-purple-100">
+              <label className="flex items-center gap-2 text-xs font-bold text-slate-700">
+                <ListVideo className="w-4 h-4 text-purple-600" />
+                Tối đa
+                <select
+                  value={maxVideos}
+                  onChange={(e) => setMaxVideos(Number(e.target.value))}
+                  className="bg-white border border-slate-300 rounded-lg px-2 py-1 text-xs font-bold text-slate-800"
+                >
+                  <option value={4}>4 video</option>
+                  <option value={8}>8 video</option>
+                  <option value={12}>12 video</option>
+                  <option value={20}>20 video</option>
+                </select>
+              </label>
+              <label className="flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoReup}
+                  onChange={(e) => setAutoReup(e.target.checked)}
+                  className="w-4 h-4 accent-blue-600"
+                />
+                <Clapperboard className="w-4 h-4 text-blue-600" />
+                Reup luôn cả kênh (vietsub + lồng tiếng + khung)
+              </label>
+            </div>
+          )}
 
           {error && (
             <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-2xl flex items-center gap-2.5 text-rose-700 text-xs font-bold">
               <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
               <span>{error}</span>
+            </div>
+          )}
+
+          {channelMessage && !error && (
+            <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center gap-2.5 text-emerald-800 text-xs font-bold">
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+              <span>{channelMessage}</span>
             </div>
           )}
 
@@ -379,7 +474,8 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
               >
                 {loading ? (
                   <>
-                    <Loader2 className="w-4 h-4 animate-spin" /> Đang bóc tách...
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    {mode === 'channel' ? 'Đang quét kênh...' : 'Đang bóc tách...'}
                   </>
                 ) : mode === 'video' ? (
                   <>
@@ -387,7 +483,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
                   </>
                 ) : (
                   <>
-                    <Search className="w-4 h-4" /> Quét & Tải Toàn Bộ Kênh
+                    <Search className="w-4 h-4" /> {autoReup ? 'Quét & Reup Cả Kênh' : 'Quét & Tải Kênh'}
                   </>
                 )}
               </button>
@@ -395,6 +491,35 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
           </div>
         </form>
       </div>
+
+      {channelProfile && (channelProfile.nickname || channelProfile.sec_user_id) && (
+        <div className="clean-panel rounded-3xl p-5 sm:p-6 flex flex-col sm:flex-row sm:items-center gap-4 border border-purple-100">
+          <div className="w-16 h-16 rounded-2xl overflow-hidden bg-slate-200 shrink-0">
+            {channelProfile.avatar ? (
+              <img src={channelProfile.avatar} alt="" className="w-full h-full object-cover" />
+            ) : (
+              <div className="w-full h-full flex items-center justify-center text-slate-400">
+                <UserCheck className="w-7 h-7" />
+              </div>
+            )}
+          </div>
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-base font-black text-slate-900 truncate">
+                {channelProfile.nickname || 'Kênh Douyin'}
+              </h3>
+              {getPlatformBadge(channelProfile.platform || 'douyin')}
+            </div>
+            <p className="text-xs text-slate-500 font-medium line-clamp-2">
+              {channelProfile.signature || channelProfile.url}
+            </p>
+            <p className="text-[11px] font-bold text-slate-600">
+              {channelProfile.aweme_count ? `${channelProfile.aweme_count} video trên kênh` : 'Đã nhận kênh'}
+              {queuedJobs.length ? ` · đã xếp ${queuedJobs.length} job reup` : ''}
+            </p>
+          </div>
+        </div>
+      )}
 
       {samples.length > 0 && (
         <div className="clean-panel rounded-3xl p-6 sm:p-8 space-y-4">
@@ -437,8 +562,8 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
         </div>
       )}
 
-      {/* Extracted Cards Results (Only displays when multiple videos are extracted from a channel) */}
-      {extractedList.length > 1 && (
+      {/* Extracted Cards Results (channel clone or multi-video extract) */}
+      {(extractedList.length > 1 || (mode === 'channel' && extractedList.length > 0)) && (
         <div className="clean-panel rounded-3xl p-6 sm:p-8 space-y-4 animate-in fade-in duration-300">
           <div className="flex items-center justify-between pb-2 border-b border-slate-100">
             <h4 className="text-xs font-black text-slate-500 uppercase tracking-wider">

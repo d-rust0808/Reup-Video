@@ -63,6 +63,19 @@ export async function extractUrls(urls) {
   return res.json();
 }
 
+export async function extractChannel(payload) {
+  const res = await fetch(`${API_BASE}/extract/channel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Không clone được kênh');
+  }
+  return res.json();
+}
+
 export async function uploadVideoFile(file) {
   const formData = new FormData();
   formData.append('file', file);

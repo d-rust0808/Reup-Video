@@ -175,6 +175,7 @@ export default function App() {
               initialMedia={extractedMediaList}
               onMediaExtracted={setExtractedMediaList}
               onSelectForWorkbench={handleSelectForWorkbench}
+              onJobsQueued={() => setActiveTab('queue')}
             />
           </div>
 

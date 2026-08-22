@@ -6,19 +6,194 @@ Target Path: app/api/extract.py
 
 import os
 import shutil
-from typing import List
+import uuid
+import json
+import logging
+from datetime import datetime, timezone
+from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.scraper.base import BaseScraper, VideoMetadata
 from app.scraper.manager import ScraperManager
+from app.scraper.channel import (
+    ChannelCloneService,
+    is_channel_url,
+    video_page_url,
+)
+from app.models.job import WatermarkConfig, ReupConfig
+from app.core.database import get_db_connection
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 class ExtractRequest(BaseModel):
     urls: List[str]
+
+
+class ChannelExtractRequest(BaseModel):
+    url: str = ""
+    urls: Optional[List[str]] = None
+    max_videos: int = Field(default=8, ge=1, le=40)
+    auto_reup: bool = True
+    reup: Optional[Dict[str, Any]] = None
+
+
+def _studio_reup_defaults(platform: str, overrides: Optional[dict] = None) -> ReupConfig:
+    payload = {
+        "hflip": True,
+        "speed_factor": 1.03,
+        "pitch_shift": True,
+        "crop_percent": 0.02,
+        "brightness": 0.01,
+        "contrast": 1.02,
+        "saturation": 1.03,
+        "film_grain": 3.0,
+        "modify_md5": True,
+        "enable_vocal_mute": True,
+        "enable_tts": True,
+        "enable_lipsync": True,
+        "vietsub_style": "auto",
+        "burn_subtitles": True,
+        "tts_voice": "en-US-AvaMultilingualNeural",
+        "tts_engine": "edge-tts",
+        "target_lang": "vi",
+        "source_lang": "zh" if platform in ("douyin", "kuaishou", "xiaohongshu") else "auto",
+        "frame_enabled": True,
+        "frame_color": "black",
+        "frame_thickness": 16,
+        "publish_status": "READY",
+    }
+    if overrides:
+        for k, v in overrides.items():
+            if v is not None:
+                payload[k] = v
+    valid = set(ReupConfig.model_fields.keys())
+    clean = {k: v for k, v in payload.items() if k in valid or k == "speed_ratio"}
+    return ReupConfig(**clean)
+
+
+async def _enqueue_file(
+    request: Request,
+    input_file: str,
+    platform: str,
+    reup_cfg: ReupConfig,
+    wm_algorithm: str = "all",
+) -> str:
+    from app.services.queue_manager import BatchQueueManager
+    from app.core.ws_manager import ws_manager
+
+    qm: Optional[BatchQueueManager] = getattr(request.app.state, "queue_manager", None)
+    if qm is None:
+        qm = BatchQueueManager(db_path=settings.DB_PATH, max_concurrent_jobs=settings.MAX_CONCURRENT_JOBS)
+        qm.register_callback(ws_manager.on_queue_update)
+        request.app.state.queue_manager = qm
+
+    job_id = f"job_{uuid.uuid4().hex[:8]}"
+    out_file = os.path.join(settings.OUTPUT_DIR, f"{job_id}.mp4")
+    wm_cfg = WatermarkConfig(enabled=True, algorithm=wm_algorithm or "all")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with qm._get_conn() as conn:
+        conn.execute(
+            """INSERT INTO jobs (
+                job_id, source_url, platform, status, progress_percent,
+                input_file_path, output_file_path, watermark_config, reup_config,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, 'PENDING', 0.0, ?, ?, ?, ?, ?, ?)""",
+            (
+                job_id,
+                input_file,
+                platform or "auto",
+                input_file,
+                out_file,
+                wm_cfg.model_dump_json(),
+                reup_cfg.model_dump_json(),
+                now_iso,
+                now_iso,
+            ),
+        )
+        conn.commit()
+    qm.ensure_workers()
+    await qm.queue.put(job_id)
+    return job_id
+
+
+def _ensure_content_channel(profile: dict) -> Optional[str]:
+    nickname = (profile or {}).get("nickname") or ""
+    if not nickname:
+        return None
+    platform = (profile.get("platform") or "douyin").lower()
+    handle = profile.get("unique_id") or profile.get("sec_user_id") or ""
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with get_db_connection(settings.DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT channel_id FROM channels WHERE handle = ? AND platform = ? LIMIT 1",
+                (handle, platform),
+            ).fetchone()
+            if row:
+                return row["channel_id"]
+            channel_id = f"chan_{uuid.uuid4().hex[:8]}"
+            conn.execute(
+                """INSERT INTO channels (
+                    channel_id, name, platform, handle, tags, description, color, overlays, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)""",
+                (
+                    channel_id,
+                    nickname[:100],
+                    platform,
+                    handle[:120],
+                    json.dumps(["clone", "reup"], ensure_ascii=False),
+                    (profile.get("signature") or profile.get("url") or "")[:500],
+                    "pink" if platform == "douyin" else "amber",
+                    "[]",
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            return channel_id
+    except Exception as e:
+        logger.warning(f"auto-create channel skipped: {e}")
+        return None
+
+
+def _items_from_metadatas(metadatas: List[VideoMetadata]) -> List[dict]:
+    sample_mp4_bytes = (
+        b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp41isom"
+        b"\x00\x00\x00\x08free" + b"\x00" * 4096 + b"END_OF_MP4_SAMPLE"
+    )
+    items = []
+    for meta in metadatas:
+        meta.direct_stream_url = f"/api/v1/videos/stream/{meta.video_id}"
+        id_path = os.path.join(settings.RAW_INPUT_DIR, f"{meta.video_id}.mp4")
+        if meta.file_path and os.path.exists(meta.file_path):
+            try:
+                if os.path.abspath(meta.file_path) != os.path.abspath(id_path):
+                    shutil.copy2(meta.file_path, id_path)
+            except Exception:
+                pass
+            meta.file_path = id_path
+        elif not os.path.exists(id_path):
+            try:
+                with open(id_path, "wb") as f:
+                    f.write(sample_mp4_bytes)
+            except Exception:
+                pass
+            meta.file_path = id_path
+        items.append({
+            "video_id": meta.video_id,
+            "platform": meta.platform,
+            "title": meta.title,
+            "author": getattr(meta, "author", None),
+            "file_path": meta.file_path,
+            "direct_stream_url": meta.direct_stream_url,
+            "cover_url": getattr(meta, "cover_url", None),
+            "duration": getattr(meta, "duration", None),
+        })
+    return items
 
 
 @router.post("/extract", response_model=dict)
@@ -53,41 +228,112 @@ async def extract_urls(req: ExtractRequest, request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    sample_mp4_bytes = (
-        b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp41isom"
-        b"\x00\x00\x00\x08free" + b"\x00" * 4096 + b"END_OF_MP4_SAMPLE"
-    )
-
-    items = []
-    for meta in metadatas:
-        meta.direct_stream_url = f"/api/v1/videos/stream/{meta.video_id}"
-        id_path = os.path.join(settings.RAW_INPUT_DIR, f"{meta.video_id}.mp4")
-        if meta.file_path and os.path.exists(meta.file_path):
-            try:
-                shutil.copy2(meta.file_path, id_path)
-            except Exception:
-                pass
-            meta.file_path = id_path
-        elif not os.path.exists(id_path):
-            try:
-                with open(id_path, "wb") as f:
-                    f.write(sample_mp4_bytes)
-            except Exception:
-                pass
-            meta.file_path = id_path
-
-        items.append({
-            "video_id": meta.video_id,
-            "platform": meta.platform,
-            "title": meta.title,
-            "author": getattr(meta, "author", None),
-            "file_path": meta.file_path,
-            "direct_stream_url": meta.direct_stream_url,
-            "cover_url": getattr(meta, "cover_url", None),
-            "duration": getattr(meta, "duration", None),
-        })
-
+    items = _items_from_metadatas(metadatas)
     return {"items": items, "count": len(items)}
+
+
+@router.post("/extract/channel", response_model=dict)
+async def extract_channel(req: ChannelExtractRequest, request: Request):
+    """Clone a Douyin/Kuaishou creator: resolve profile, download videos, optionally queue reup."""
+    chunks = [req.url or ""]
+    if req.urls:
+        chunks.extend(req.urls)
+    blob = "\n".join(c for c in chunks if c and str(c).strip()).strip()
+    if not blob:
+        raise HTTPException(status_code=400, detail="Dán URL kênh hoặc danh sách link video")
+
+    settings.ensure_directories()
+    service = ChannelCloneService()
+    try:
+        collected = await service.collect(blob, max_videos=req.max_videos)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("channel collect failed")
+        raise HTTPException(status_code=400, detail=f"Không đọc được kênh: {e}")
+
+    profile = collected.get("profile") or {}
+    platform = collected.get("platform") or profile.get("platform") or "douyin"
+    video_ids: List[str] = collected.get("video_ids") or []
+    hint = collected.get("hint") or ""
+
+    channel_id = _ensure_content_channel(profile) if profile else None
+
+    scraper_mgr = getattr(request.app.state, "scraper_manager", None)
+    if scraper_mgr is None:
+        scraper_mgr = ScraperManager(output_dir=settings.RAW_INPUT_DIR)
+
+    download_urls = [video_page_url(vid, platform) for vid in video_ids]
+    metadatas: List[VideoMetadata] = []
+    if download_urls:
+        try:
+            metadatas = await scraper_mgr.download_batch(
+                download_urls,
+                output_dir=settings.RAW_INPUT_DIR,
+                ignore_errors=True,
+            )
+        except Exception as e:
+            logger.warning(f"channel download_batch failed: {e}")
+            metadatas = []
+
+    items = _items_from_metadatas(metadatas)
+    playable = []
+    for item in items:
+        path = item.get("file_path") or ""
+        try:
+            if path and os.path.isfile(path) and os.path.getsize(path) >= 80_000:
+                playable.append(item)
+        except OSError:
+            continue
+
+    jobs: List[dict] = []
+    if req.auto_reup and playable:
+        overrides = dict(req.reup or {})
+        if channel_id:
+            overrides.setdefault("channel_id", channel_id)
+        reup_base = _studio_reup_defaults(platform, overrides)
+        for item in playable:
+            cfg = reup_base.model_copy(deep=True)
+            title = item.get("title") or item.get("video_id")
+            cfg.post_title = title
+            cfg.post_caption = f"{title}\n\n#reup #douyin #vietsub"
+            cfg.channel_id = channel_id or cfg.channel_id
+            try:
+                job_id = await _enqueue_file(
+                    request,
+                    item["file_path"],
+                    item.get("platform") or platform,
+                    cfg,
+                )
+                jobs.append({"job_id": job_id, "video_id": item.get("video_id"), "title": title})
+            except Exception as e:
+                logger.warning(f"enqueue failed for {item.get('video_id')}: {e}")
+
+    message = ""
+    if jobs:
+        message = f"Đã tải {len(playable)} video và xếp {len(jobs)} job reup vào hàng chờ."
+    elif playable:
+        message = f"Đã tải {len(playable)} video từ kênh. Bật «Reup luôn» để xếp hàng xử lý."
+    elif video_ids:
+        message = "Đã thấy ID video nhưng chưa tải được file. Thử dán link ngắn v.douyin.com."
+    else:
+        message = hint or "Chưa lấy được danh sách video của kênh."
+
+    return {
+        "profile": profile,
+        "channel_id": channel_id,
+        "channel_url": collected.get("channel_url"),
+        "platform": platform,
+        "video_ids": video_ids,
+        "items": playable or items,
+        "count": len(playable or items),
+        "jobs": jobs,
+        "job_count": len(jobs),
+        "hint": hint,
+        "message": message,
+        "auto_reup": req.auto_reup,
+        "is_channel": is_channel_url(blob) or bool(profile.get("sec_user_id")),
+    }
 
 
 @router.get("/library")
@@ -226,4 +472,3 @@ async def get_studio_overlay(filename: str):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Overlay not found")
     return FileResponse(path)
-

@@ -8,6 +8,7 @@ from app.scraper.kuaishou import KuaishouScraper
 from app.scraper.xiaohongshu import XiaohongshuScraper
 from app.scraper.downloader import StreamDownloader, AsyncStreamDownloader, VideoDownloader
 from app.scraper.manager import ScraperManager
+from app.scraper.channel import ChannelCloneService, is_channel_url, extract_sec_user_id, extract_video_ids
 
 __all__ = [
     "VideoMetadata",
@@ -20,4 +21,8 @@ __all__ = [
     "AsyncStreamDownloader",
     "VideoDownloader",
     "ScraperManager",
+    "ChannelCloneService",
+    "is_channel_url",
+    "extract_sec_user_id",
+    "extract_video_ids",
 ]
