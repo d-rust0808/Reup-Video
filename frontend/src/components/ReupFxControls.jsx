@@ -97,7 +97,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
           {[
             { id: 'all', label: '🚀 Siêu Cấp Toàn Năng (All-In-One)', desc: 'Vừa cắt sạch 100% phụ đề đáy vừa inpaint quét xóa sạch logo/text ở giữa và đỉnh (Khuyên dùng)' },
             { id: 'auto', label: '🔮 Inpaint Nét Chữ AI + OpenCV', desc: 'Tự động quét & xóa sạch chữ/logo trên mọi vị trí (Giữ nguyên 100% khung hình)' },
-            { id: 'crop', label: '🌟 Cắt Bỏ Phụ Đề Đáy (Crop 10%)', desc: 'Cắt mỏng dải phụ đề đáy, không nuốt khung hình' },
+            { id: 'crop', label: '🌟 Cắt Bỏ Phụ Đề Đáy (Crop 6%)', desc: 'Chỉ cắt mỏng đáy nếu phụ đề gốc dính cứng — mặc định không cắt' },
             { id: 'boxblur', label: '🎬 Dải Mờ Điện Ảnh (Blur Bar)', desc: 'Làm mờ mịn dải phụ đề phong cách điện ảnh' },
             { id: 'telea', label: '⚡ OpenCV Telea (Nhanh)', desc: 'Xóa mượt mà theo vùng ROI đã chọn' },
             { id: 'none', label: '🚫 Giữ Nguyên Khung Hình', desc: 'Không can thiệp phụ đề/watermark' },

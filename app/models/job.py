@@ -135,7 +135,7 @@ class ReupConfig(BaseModel):
     )
     text_cover_vf: str = Field(default="", description="Extra ffmpeg vf nodes to cover mid-frame source text")
     burn_subtitles: bool = Field(default=True, description="Burns translated Vietnamese SRT as hardsub onto the video")
-    tts_voice: str = Field(default="vi-VN-HoaiMyNeural", description="Voice model/role for TTS synthesis")
+    tts_voice: str = Field(default="vi-VN-HoaiMy-Warm", description="Voice model/role for TTS synthesis")
     target_lang: str = Field(default="vi", description="Target language code for TTS dubbing")
     tts_engine: str = Field(default="edge-tts", description="TTS engine name ('edge-tts', 'gtts', 'coqui-tts', 'kokoro')")
     source_lang: str = Field(default="auto", description="Source language code for STT/translation")

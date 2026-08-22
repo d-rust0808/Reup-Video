@@ -43,7 +43,7 @@ class ReupPayload(BaseModel):
     enable_lipsync: Optional[bool] = True
     vietsub_style: Optional[str] = "auto"
     burn_subtitles: Optional[bool] = True
-    tts_voice: Optional[str] = "vi-VN-HoaiMyNeural"
+    tts_voice: Optional[str] = "vi-VN-HoaiMy-Warm"
     tts_engine: Optional[str] = "edge-tts"
     target_lang: Optional[str] = "vi"
     source_lang: Optional[str] = "auto"
@@ -84,7 +84,7 @@ class ProcessJobRequest(BaseModel):
     enable_lipsync: Optional[bool] = True
     vietsub_style: Optional[str] = "auto"
     burn_subtitles: Optional[bool] = True
-    tts_voice: Optional[str] = "vi-VN-HoaiMyNeural"
+    tts_voice: Optional[str] = "vi-VN-HoaiMy-Warm"
     tts_engine: Optional[str] = "edge-tts"
     target_lang: Optional[str] = "vi"
     source_lang: Optional[str] = "auto"
@@ -231,7 +231,7 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         reup_burn = req.reup.burn_subtitles
     elif getattr(req, "burn_subtitles", None) is not None:
         reup_burn = req.burn_subtitles
-    reup_tts_voice = (req.reup.tts_voice if req.reup and req.reup.tts_voice else req.tts_voice) or "vi-VN-HoaiMyNeural"
+    reup_tts_voice = (req.reup.tts_voice if req.reup and req.reup.tts_voice else req.tts_voice) or "vi-VN-HoaiMy-Warm"
     reup_tts_engine = "edge-tts"
     if req.reup and getattr(req.reup, "tts_engine", None):
         reup_tts_engine = req.reup.tts_engine

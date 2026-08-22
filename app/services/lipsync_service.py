@@ -60,7 +60,7 @@ def edge_rate_tag(natural_dur: float, target_dur: float) -> str:
     td = max(0.18, float(target_dur))
     nd = max(0.18, float(natural_dur))
     pct = (nd / td - 1.0) * 100.0
-    pct = max(-35.0, min(85.0, pct))
+    pct = max(-18.0, min(18.0, pct))
     return f"{pct:+.0f}%"
 
 
@@ -150,7 +150,8 @@ def rubberband_fit(input_path: str, output_path: str, target_dur: float) -> bool
     if actual <= 0.05:
         return False
     tempo = actual / td
-    tempo = max(0.70, min(1.60, tempo))
+    # Keep voice human — stretching past ~12% sounds like "mắc ỉa"
+    tempo = max(0.92, min(1.12, tempo))
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
     af = (
         f"rubberband=tempo={tempo:.4f}:pitch=1:formant=preserved:transients=smooth,"

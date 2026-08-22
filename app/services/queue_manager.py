@@ -833,11 +833,10 @@ class BatchQueueManager:
             fold_algo = (algo_name or "auto").lower()
             fold_fast = fold_algo in ("crop", "none", "off", "disabled", "all", "auto", "all_in_one", "hybrid")
             if fold_fast:
-                if fold_algo in ("crop", "all", "auto", "all_in_one", "hybrid"):
-                    # Thin bottom crop — 10% is enough once mid-text is delogo'd
+                if fold_algo == "crop":
                     reup_config.subtitle_bottom_crop = max(
                         float(getattr(reup_config, "subtitle_bottom_crop", 0.0) or 0.0),
-                        0.10,
+                        0.06,
                     )
                     try:
                         from app.services.subtitle_detector import persistent_text_cover_filters
@@ -852,9 +851,23 @@ class BatchQueueManager:
                             )
                     except Exception as e:
                         logger.warning(f"mid-text cover detect failed: {e}")
+                elif fold_algo in ("all", "auto", "all_in_one", "hybrid"):
+                    try:
+                        from app.services.subtitle_detector import persistent_text_cover_filters
+                        covers = persistent_text_cover_filters(current_video_path)
+                        if covers:
+                            reup_config.text_cover_vf = ",".join(covers)
+                            self.append_job_log(
+                                job_id,
+                                f"🧽 Che {len(covers)} vùng chữ giữa khung — giữ nguyên đáy hình",
+                                level="INFO",
+                                stage="WATERMARK_REMOVAL",
+                            )
+                    except Exception as e:
+                        logger.warning(f"mid-text cover detect failed: {e}")
                 self.append_job_log(
                     job_id,
-                    "⚡ Gộp cắt phụ đề đáy mỏng 10% + che chữ giữa vào 1 pass Reup",
+                    "⚡ Gộp xóa chữ vào 1 pass Reup — không cắt dày đáy hình",
                     level="INFO",
                     stage="WATERMARK_REMOVAL",
                     progress=0.60,

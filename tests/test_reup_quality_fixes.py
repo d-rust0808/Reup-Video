@@ -123,10 +123,8 @@ def test_hardsub_filter_uses_original_timestamps_before_setpts(tmp_path):
     cfg = ReupConfig(speed_factor=1.03, film_grain=0.0)
     _, _, vf, _ = build_reup_filtergraph(cfg, has_audio=False, burn_srt_path=str(srt))
     assert "subtitles=" in vf
-    assert "drawbox=" in vf
-    assert vf.index("drawbox=") < vf.index("subtitles=")
+    assert "drawbox=" not in vf
     assert vf.index("subtitles=") < vf.index("setpts=")
-    assert "ih*0.11" in vf
 
 
 def test_lipsync_compacts_and_rates():

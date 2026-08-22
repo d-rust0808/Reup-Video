@@ -177,13 +177,10 @@ def build_reup_filtergraph(
 
     # Burn Vietsub on original timestamps BEFORE setpts so SRT does not need rescaling
     if burn_srt_path and os.path.exists(burn_srt_path):
-        # Cover leftover source hardsub (Chinese Douyin captions sit higher than a 13–18% crop)
-        vf_nodes.append(
-            "drawbox=x=0:y=ih-trunc(ih*0.11/2)*2:w=iw:h=trunc(ih*0.11/2)*2:color=black@0.62:t=fill"
-        )
+        # Outline-only hardsub (no black bar) so the picture stays full-frame
         style = (
-            "FontName=DejaVu Sans,FontSize=18,Outline=2,Shadow=1,Alignment=2,"
-            "MarginV=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H80000000,BorderStyle=1"
+            "FontName=DejaVu Sans,FontSize=16,Bold=1,Outline=3,Shadow=0,Alignment=2,"
+            "MarginV=14,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1"
         )
         sub_path = _ffmpeg_subtitles_path(burn_srt_path)
         vf_nodes.append(f"subtitles='{sub_path}':force_style='{style}'")
@@ -772,8 +769,6 @@ class ReupService:
                     cfg.text_cover_vf = ",".join(covers)
             except Exception as e:
                 logger.warning(f"mid-text cover detect skipped: {e}")
-        if float(getattr(cfg, "subtitle_bottom_crop", 0) or 0) <= 0:
-            cfg.subtitle_bottom_crop = 0.10
         if not output_path:
             base, ext = os.path.splitext(video_path)
             output_path = f"{base}_reup{ext}"

@@ -252,10 +252,21 @@ class TTSService:
     ) -> str:
         """Generates speech using Edge-TTS provider."""
         try:
-            provider = get_tts_provider("edge-tts")
-            return await provider.generate(
-                text=text, voice=voice, output_path=output_path, rate=rate, pitch=pitch, volume=volume
-            )
+            import asyncio as _asyncio
+            last_err = None
+            for attempt in range(3):
+                try:
+                    provider = get_tts_provider("edge-tts")
+                    return await provider.generate(
+                        text=text, voice=voice, output_path=output_path, rate=rate, pitch=pitch, volume=volume
+                    )
+                except Exception as e:
+                    last_err = e
+                    logger.warning(f"Edge-TTS attempt {attempt + 1}/3 failed: {e}")
+                    await _asyncio.sleep(0.5 * (attempt + 1))
+            raise TTSServiceError(f"Edge-TTS failed: {last_err}") from last_err
+        except TTSServiceError:
+            raise
         except Exception as e:
             raise TTSServiceError(f"Edge-TTS failed: {e}") from e
 
