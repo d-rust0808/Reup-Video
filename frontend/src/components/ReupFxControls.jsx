@@ -16,7 +16,9 @@ import {
   Loader2,
   Layers,
   ImagePlus,
-  Frame,
+  BookOpen,
+  Smile,
+  Captions,
 } from 'lucide-react';
 
 import { fetchChannels, getMediaUrl, uploadStudioOverlay } from '../services/api';
@@ -426,8 +428,66 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
             />
           </div>
 
+          <div>
+            <label className="block text-[11px] font-extrabold text-purple-950 mb-1.5">
+              Chế độ Vietsub
+            </label>
+            <p className="text-[10px] text-purple-700 font-medium mb-2">
+              Chọn cách viết lời Việt — vẫn khớp timeline từng đoạn video, không đè chữ gốc.
+            </p>
+            <div className="grid grid-cols-3 gap-1.5">
+              {[
+                {
+                  id: 'dub',
+                  icon: Captions,
+                  title: 'Gốc',
+                  desc: 'Tuân theo đúng lời / chữ trên video. Dịch sát, không thêm.',
+                },
+                {
+                  id: 'narrator',
+                  icon: BookOpen,
+                  title: 'Kể chuyện',
+                  desc: 'Kể lại nội dung ngôi 3, vẫn đúng cảnh đang chạy.',
+                },
+                {
+                  id: 'funny',
+                  icon: Smile,
+                  title: 'Vui nhộn',
+                  desc: 'Viết hài dí dỏm trên đúng cảnh, không lạc đề.',
+                },
+              ].map((mode) => {
+                const active = (options.vietsub_style || 'dub') === mode.id;
+                const Icon = mode.icon;
+                return (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    onClick={() => {
+                      const patch = { vietsub_style: mode.id };
+                      if (mode.id !== 'dub') patch.enable_lipsync = false;
+                      else patch.enable_lipsync = options.enable_lipsync !== false;
+                      onChange({ ...options, ...patch });
+                    }}
+                    className={`text-left rounded-xl border px-2 py-2.5 transition-all ${
+                      active
+                        ? 'bg-purple-600 border-purple-700 text-white shadow-sm'
+                        : 'bg-white border-purple-200 text-purple-950 hover:border-purple-400'
+                    }`}
+                  >
+                    <Icon className={`w-3.5 h-3.5 mb-1 ${active ? 'text-white' : 'text-purple-600'}`} />
+                    <div className="text-[11px] font-extrabold leading-tight">{mode.title}</div>
+                    <div className={`text-[9px] leading-snug mt-0.5 ${active ? 'text-purple-100' : 'text-purple-700'}`}>
+                      {mode.desc}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           {options.enable_tts && (
             <div className="space-y-3 pt-2.5 border-t border-purple-200/70 animate-fadeIn">
+              {(options.vietsub_style || 'dub') === 'dub' && (
               <div className="flex items-center justify-between">
                 <div>
                   <label className="text-xs font-extrabold text-purple-950 cursor-pointer block" htmlFor="lipsync-toggle">
@@ -445,20 +505,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                   className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-purple-300 shrink-0 cursor-pointer"
                 />
               </div>
-              <div>
-                <label className="block text-[11px] font-bold text-purple-900 mb-1.5">Kiểu Vietsub / lồng tiếng</label>
-                <select
-                  value={options.vietsub_style || 'auto'}
-                  onChange={(e) => handleChange('vietsub_style', e.target.value)}
-                  className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2.5 text-xs text-slate-900 font-bold outline-none focus:ring-2 focus:ring-purple-400 cursor-pointer shadow-2xs"
-                >
-                  <option value="auto">Tự chọn — clip ngắn lồng tiếng, clip dài kể lại</option>
-                  <option value="dub">Lồng tiếng khớp khẩu hình (từng câu)</option>
-                  <option value="narrator">Kể lại (người dẫn chuyện, ngôi 3)</option>
-                  <option value="recap">Tóm tắt voice-over (clip dài 10–45 phút)</option>
-                  <option value="funny">Bản hài / văn phong mạng</option>
-                </select>
-              </div>
+              )}
               <div>
                 <label className="block text-[11px] font-bold text-purple-900 mb-1.5">Ngôn ngữ đích</label>
                 <select
@@ -517,7 +564,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
               <div className="bg-purple-100/60 p-2.5 rounded-xl border border-purple-200/60 flex items-start gap-2">
                 <Sparkles className="w-3.5 h-3.5 text-purple-600 shrink-0 mt-0.5" />
                 <p className="text-[10px] text-purple-900 leading-relaxed font-medium">
-                  Hệ thống tự động nhận lời thoại → dịch Việt ngắn khớp nhịp miệng → TTS đúng cửa sổ thời gian (lip-sync), mix nhạc nền.
+                  Hệ thống nhận lời thoại → viết Việt theo chế độ đã chọn (Gốc / Kể chuyện / Vui nhộn) → đốt chữ đáy khung, lồng tiếng khớp timestamp, tắt thoại gốc để không đè giọng.
                 </p>
               </div>
             </div>

@@ -41,7 +41,7 @@ class ReupPayload(BaseModel):
     enable_vocal_mute: Optional[bool] = True
     enable_tts: Optional[bool] = False
     enable_lipsync: Optional[bool] = True
-    vietsub_style: Optional[str] = "auto"
+    vietsub_style: Optional[str] = "dub"
     burn_subtitles: Optional[bool] = True
     tts_voice: Optional[str] = "en-US-AvaMultilingualNeural"
     tts_engine: Optional[str] = "edge-tts"
@@ -85,7 +85,7 @@ class ProcessJobRequest(BaseModel):
     enable_vocal_mute: Optional[bool] = True
     enable_tts: Optional[bool] = False
     enable_lipsync: Optional[bool] = True
-    vietsub_style: Optional[str] = "auto"
+    vietsub_style: Optional[str] = "dub"
     burn_subtitles: Optional[bool] = True
     tts_voice: Optional[str] = "en-US-AvaMultilingualNeural"
     tts_engine: Optional[str] = "edge-tts"

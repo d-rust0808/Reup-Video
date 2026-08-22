@@ -371,8 +371,8 @@ def burn_vietnamese_hardsub(video_path: str, srt_path: str, output_path: str, sp
 
     fontfile = _find_subtitle_font()
     style = (
-        "FontName=DejaVu Sans,FontSize=18,Outline=2,Shadow=1,Alignment=2,"
-        "MarginV=42,PrimaryColour=&H00FFFFFF,OutlineColour=&H80000000,BorderStyle=1"
+        "FontName=DejaVu Sans,FontSize=16,Bold=1,Outline=3,Shadow=0,Alignment=2,"
+        "MarginV=16,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1"
     )
     sub_path = _ffmpeg_subtitles_path(work_srt)
     if fontfile:
@@ -422,7 +422,8 @@ def build_tts_bgm_mix_filter() -> str:
         "[1:a]volume=1.28,highpass=f=70,asplit=2[sc][voice];"
         "[0:a]lowpass=f=180:poles=2,volume=0.80[bgraw];"
         "[bgraw][sc]sidechaincompress=threshold=0.005:ratio=20:attack=6:release=70:makeup=1:knee=1[bg];"
-        "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
+        "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amixed];"
+        "[amixed]loudnorm=I=-14:LRA=11:TP=-1.5[aout]"
     )
 
 
@@ -486,7 +487,8 @@ def mix_tts_with_background(video_path: str, tts_audio_path: str, output_path: s
             fc2 = (
                 "[0:a]lowpass=f=180,volume=0.55[bg];"
                 "[1:a]volume=1.20[voice];"
-                "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
+                "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amixed];"
+                "[amixed]loudnorm=I=-14:LRA=11:TP=-1.5[aout]"
             )
             cmd[cmd.index("-filter_complex") + 1] = fc2
             res2 = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -749,6 +751,78 @@ def process_reup_video(
     }
 
 
+def source_clip_title(video_path: str, cfg: Optional[ReupConfig] = None) -> str:
+    """Title from job config or sidecar JSON (Douyin desc), stripped of hashtags."""
+    import json
+    import re
+
+    raw = ""
+    if cfg is not None:
+        raw = (getattr(cfg, "post_title", None) or "") or ""
+    if not raw:
+        jpath = os.path.splitext(video_path)[0] + ".json"
+        if os.path.isfile(jpath):
+            try:
+                with open(jpath, "r", encoding="utf-8") as f:
+                    meta = json.load(f) or {}
+                raw = meta.get("title") or meta.get("desc") or ""
+            except Exception:
+                raw = ""
+    text = re.sub(r"#\S+", " ", raw or "")
+    text = re.sub(r"https?://\S+", " ", text)
+    cleaned = []
+    for ch in text:
+        if "\u4e00" <= ch <= "\u9fff" or ch.isalnum() or ch in " ，。！？、,.!? ":
+            cleaned.append(ch)
+        elif ch.isspace():
+            cleaned.append(" ")
+    text = re.sub(r"\s+", " ", "".join(cleaned)).strip(" ，。！？、,.!?-～")
+    return text[:80]
+
+
+def write_single_cue_srt(path: str, text: str, duration: float) -> str:
+    dur = max(1.2, float(duration or 4.0))
+    h = int(dur // 3600)
+    m = int((dur % 3600) // 60)
+    s = int(dur % 60)
+    ms = int((dur % 1) * 1000)
+    body = f"1\n00:00:00,000 --> {h:02d}:{m:02d}:{s:02d},{ms:03d}\n{text.strip()}\n\n"
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(body)
+    return path
+
+
+def srt_looks_like_bgm_lyrics(srt_path: str, title: str) -> bool:
+    """True when STT is a song dump that barely overlaps the on-screen title."""
+    import re
+
+    if not srt_path or not os.path.isfile(srt_path):
+        return False
+    try:
+        blob = open(srt_path, encoding="utf-8").read()
+    except Exception:
+        return False
+    lines = [
+        ln.strip()
+        for ln in blob.splitlines()
+        if ln.strip() and "-->" not in ln and not ln.strip().isdigit()
+    ]
+    text = "".join(lines)
+    cjk_title = "".join(re.findall(r"[\u4e00-\u9fff]", title or ""))
+    cjk_stt = "".join(re.findall(r"[\u4e00-\u9fff]", text))
+    if len(cjk_title) >= 4 and cjk_stt:
+        overlap = sum(1 for ch in set(cjk_title) if ch in cjk_stt)
+        if overlap <= max(1, len(set(cjk_title)) // 3) and len(cjk_stt) > len(cjk_title) * 1.5:
+            return True
+    latin = len(re.findall(r"[A-Za-z]", text))
+    if len(cjk_stt) < 4 and latin > 24:
+        return True
+    return False
+
+
 class ReupService:
     """Unified Orchestrator for Reup Video Transformations, Vocal Muting, and TTS Dubbing/Sync."""
 
@@ -818,13 +892,37 @@ class ReupService:
                 voice = cfg.tts_voice or ""
                 if lang != "vi" and (not voice or voice.startswith("vi-")):
                     cfg.tts_voice = LANG_DEFAULT_VOICE.get(lang, voice)
+
+                clip_title = source_clip_title(video_path, cfg)
+                import re as _re
+                title_cjk = "".join(_re.findall(r"[\u4e00-\u9fff]", clip_title or ""))
+                use_title_cue = bool((vid_dur or 0) < 22 and len(title_cjk) >= 4)
+
                 stt_max = 90.0 if style == "recap" and (vid_dur or 0) > 180 else None
-                stt_res = pyvideotrans.speech_to_text(
-                    video_path,
-                    detect_lang=src_lang,
-                    model_name="base",
-                    max_seconds=stt_max,
-                )
+                if use_title_cue:
+                    title_srt = os.path.splitext(video_path)[0] + ".title.srt"
+                    srt_path = write_single_cue_srt(title_srt, clip_title, vid_dur or 8.0)
+                    stt_res = {"status": "success", "srt_path": srt_path}
+                    logger.info(f"Short meme clip — vietsub from title, skip BGM STT: {clip_title}")
+                else:
+                    stt_res = pyvideotrans.speech_to_text(
+                        video_path,
+                        detect_lang=src_lang,
+                        model_name="base",
+                        max_seconds=stt_max,
+                    )
+                    srt_path = stt_res.get("srt_path")
+                    if (
+                        isinstance(srt_path, str)
+                        and os.path.exists(srt_path)
+                        and srt_looks_like_bgm_lyrics(srt_path, clip_title)
+                        and len(title_cjk) >= 4
+                    ):
+                        title_srt = os.path.splitext(video_path)[0] + ".title.srt"
+                        srt_path = write_single_cue_srt(title_srt, clip_title, vid_dur or 8.0)
+                        stt_res = {"status": "success", "srt_path": srt_path}
+                        logger.info(f"STT looked like BGM lyrics — using title: {clip_title}")
+
                 srt_path = stt_res.get("srt_path")
                 is_fallback = stt_res.get("status") in ("fallback", "empty")
 

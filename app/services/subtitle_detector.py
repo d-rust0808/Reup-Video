@@ -566,8 +566,9 @@ def detect_subtitle_roi(video_path: str, padding: int = 8) -> Tuple[int, int, in
 
 def persistent_text_cover_filters(video_path: str, max_boxes: int = 4) -> List[str]:
     """
-    Sample a few frames, find caption-like boxes in the MID of the frame
-    (not the bottom band we crop), and return ffmpeg delogo filters.
+    Sample a few frames, find caption-like boxes anywhere except tiny corners,
+    and return ffmpeg delogo filters. Bottom Chinese hardsub is included because
+    we no longer thick-crop the lower band.
     """
     if not HAS_OPENCV or not video_path or not os.path.exists(video_path):
         return []
@@ -582,7 +583,7 @@ def persistent_text_cover_filters(video_path: str, max_boxes: int = 4) -> List[s
         return []
     indices = [max(0, int(n * f)) for f in (0.12, 0.28, 0.45, 0.62, 0.80)] if n > 10 else [0]
     raw_boxes: List[Tuple[int, int, int, int]] = []
-    y_lo, y_hi = int(h * 0.10), int(h * 0.78)
+    y_lo, y_hi = int(h * 0.02), int(h * 0.98)
     try:
         for idx in indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
@@ -596,7 +597,12 @@ def persistent_text_cover_filters(video_path: str, max_boxes: int = 4) -> List[s
                 if cy < y_lo or cy > y_hi:
                     continue
                 ar = bw / float(bh)
-                if ar < 1.6 or bw < w * 0.18:
+                near_bottom = cy >= h * 0.72
+                min_ar = 1.15 if near_bottom else 1.45
+                min_frac = 0.10 if near_bottom else 0.16
+                if ar < min_ar or bw < w * min_frac:
+                    continue
+                if bh > h * 0.28:
                     continue
                 if bw * bh > w * h * 0.16:
                     continue

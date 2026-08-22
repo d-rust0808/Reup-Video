@@ -155,7 +155,7 @@ def test_lipsync_compacts_and_rates():
 def test_lipsync_default_on():
     cfg = ReupConfig()
     assert cfg.enable_lipsync is True
-    assert cfg.vietsub_style == "auto"
+    assert cfg.vietsub_style == "dub"
 
 
 def test_tts_mix_ducks_only_during_speech():
@@ -164,16 +164,24 @@ def test_tts_mix_ducks_only_during_speech():
     fc = build_tts_bgm_mix_filter()
     assert "sidechaincompress" in fc
     assert "volume=0.22" not in fc
+    assert "loudnorm=I=-14" in fc
     mute = build_vocal_mute_ffmpeg_filter(preserve_bgm=True)
     assert "lowpass=f=180" in mute
 
 
 def test_vietsub_style_auto_picks_recap_for_long_clips():
-    from app.services.xai_media_service import resolve_vietsub_style
+    from app.services.xai_media_service import resolve_vietsub_style, compact_vi_cue
     assert resolve_vietsub_style("auto", 60) == "dub"
     assert resolve_vietsub_style("auto", 200) == "narrator"
     assert resolve_vietsub_style("auto", 900) == "recap"
     assert resolve_vietsub_style("funny", 900) == "funny"
+    assert resolve_vietsub_style("goc", 60) == "dub"
+    assert resolve_vietsub_style("kechuyen", 90) == "narrator"
+    assert resolve_vietsub_style("vuinhon", 900) == "funny"
+    short = compact_vi_cue("Mau đưa khô cá cho tôi")
+    assert "\n" not in short
+    wrapped = compact_vi_cue("Đây là một câu vietsub rất dài lê thê sẽ đè hết phần hình mèo đang chạy")
+    assert "\n" in wrapped or len(wrapped) <= 42
 
 
 def test_mid_text_cover_appended_to_filtergraph():
@@ -194,4 +202,24 @@ def test_cinematic_frame_is_burned():
     _, _, vf, _ = build_reup_filtergraph(cfg, has_audio=False)
     assert "drawbox=" in vf
     assert "t=16" in vf
+
+
+def test_bgm_lyric_stt_is_detected():
+    from app.services.reup_service import srt_looks_like_bgm_lyrics, source_clip_title
+    import tempfile, os
+    fd, path = tempfile.mkstemp(suffix=".srt")
+    os.close(fd)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("1\n00:00:00,000 --> 00:00:02,000\n人生破破烂烂的我活的与往单单的好事哪有护梦\n")
+        assert srt_looks_like_bgm_lyrics(path, "好饿好困也好累") is True
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("1\n00:00:00,000 --> 00:00:02,000\n好饿好困也好累\n")
+        assert srt_looks_like_bgm_lyrics(path, "好饿好困也好累") is False
+    finally:
+        os.remove(path)
+    assert "好饿" in source_clip_title(
+        "/no/such.mp4",
+        ReupConfig(post_title="好饿好困也好累～ #猫咪 #萌宠"),
+    )
 

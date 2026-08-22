@@ -34,6 +34,29 @@ def _clean_cue(text: str) -> str:
     return t
 
 
+def compact_vi_cue(text: str, max_chars: int = 42) -> str:
+    """Keep burned-in lines short so they sit at the bottom without covering the picture."""
+    t = _clean_cue(text)
+    if len(t) <= max_chars:
+        return t
+    words = t.split()
+    if not words:
+        return t[:max_chars]
+    line1, line2 = [], []
+    budget = max(12, max_chars // 2)
+    for w in words:
+        if sum(len(x) for x in line1) + len(line1) + len(w) <= budget:
+            line1.append(w)
+        else:
+            line2.append(w)
+    if not line1:
+        return t[:max_chars]
+    rest = " ".join(line2)
+    if len(rest) > budget:
+        rest = rest[: budget - 1].rstrip() + "…"
+    return (" ".join(line1) + ("\n" + rest if rest else "")).strip()
+
+
 def translate_cues(
     texts: List[str],
     target_lang: str = "vi",
@@ -59,26 +82,30 @@ def translate_cues(
     }.get((target_lang or "vi").lower(), target_lang)
 
     style_n = (style or "dub").lower()
+    style_n = resolve_vietsub_style(style_n, 0)
     if style_n == "narrator":
         vibe = (
-            "- Viết lời KỂ LẠI (người dẫn chuyện, ngôi 3), không dịch word-by-word.\n"
-            "- Nghe như vlog/tài liệu: 'Rồi tụi nó...', 'Lúc này...'\n"
-            "- Vẫn đúng N câu, mỗi câu 1 dòng, ngắn gọn.\n"
+            "- CHẾ ĐỘ KỂ CHUYỆN: viết lời người dẫn chuyện ngôi 3, diễn đạt LẠI ý câu đó.\n"
+            "- Câu i phải nói đúng khoảnh khắc câu i gốc (khớp video, không nhảy cảnh).\n"
+            "- Nghe như kể: 'Lúc này…', 'Rồi nó…'. Không dịch word-by-word, không bịa thêm tình tiết.\n"
+            "- Mỗi câu 1 dòng, ngắn (tối đa ~12 từ) để không đè hình.\n"
         )
     elif style_n == "funny":
         vibe = (
-            "- Văn phong mạng, hài, gen Z Việt (nếu tiếng Việt), dí dỏm nhưng không thô.\n"
-            "- Giữ nghĩa, được phép thêm 1 nhịp hài ngắn.\n"
+            "- CHẾ ĐỘ VUI NHỘN: dí dỏm, văn mạng Việt, mặn vừa — hài trên ĐÚNG cảnh đang xảy ra.\n"
+            "- Câu i phải khớp nội dung câu i gốc, không lạc đề, không tục.\n"
+            "- Được thêm 1 nhịp hài ngắn, không kéo dài, không bịa tình tiết mới.\n"
+            "- Mỗi câu 1 dòng, ngắn (tối đa ~12 từ).\n"
         )
     elif style_n == "recap":
         vibe = (
-            "- Đây là thoại gốc để bạn NẮM CỐT TRUYỆN, vẫn dịch N câu ngắn.\n"
-            "- Rõ nghĩa, dễ kể lại.\n"
+            "- Đây là thoại gốc để nắm cốt truyện, vẫn dịch N câu ngắn, đúng nghĩa.\n"
         )
     else:
         vibe = (
-            "- Văn phong mạng xã hội, tự nhiên, đúng ngữ cảnh.\n"
-            "- Dịch NGẮN GỌN bằng hoặc ngắn hơn câu gốc để khớp khẩu hình / timeline.\n"
+            "- CHẾ ĐỘ GỐC: tuân theo ĐÚNG lời thoại / chữ trên video.\n"
+            "- Dịch sát ý, giữ ngôi gốc (tôi/mày nếu là hội thoại). Không kể lại, không thêm hài, không bịa.\n"
+            "- Ngắn bằng hoặc ngắn hơn câu gốc để khớp khẩu hình / timeline, không đè hình.\n"
         )
 
     extra = f"Ngữ cảnh video: {title}\n" if title else ""
@@ -140,7 +167,7 @@ def translate_cues(
         if parsed is None:
             logger.warning("Grok translate returned unparsable numbered lines")
             return None
-        out.extend(parsed)
+        out.extend(compact_vi_cue(p) for p in parsed)
 
     return out if len(out) == len(texts) else None
 
@@ -224,9 +251,26 @@ def recap_to_srt(lines: List[str], duration: float, srt_path: str) -> str:
 
 
 def resolve_vietsub_style(style: str, duration: float) -> str:
-    s = (style or "auto").lower().strip()
-    if s in ("dub", "narrator", "recap", "funny"):
-        return s
+    raw = (style or "auto").lower().strip()
+    aliases = {
+        "goc": "dub",
+        "gốc": "dub",
+        "original": "dub",
+        "faithful": "dub",
+        "dub": "dub",
+        "kechuyen": "narrator",
+        "ke_chuyen": "narrator",
+        "kể chuyện": "narrator",
+        "story": "narrator",
+        "narrator": "narrator",
+        "vuinhon": "funny",
+        "vui": "funny",
+        "vui_nhon": "funny",
+        "funny": "funny",
+        "recap": "recap",
+    }
+    if raw in aliases:
+        return aliases[raw]
     if duration >= 480:
         return "recap"
     if duration >= 180:

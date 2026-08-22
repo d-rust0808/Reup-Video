@@ -31,7 +31,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     enable_vocal_mute: true,
     enable_tts: true,
     enable_lipsync: true,
-    vietsub_style: 'auto',
+    vietsub_style: 'dub',
     burn_subtitles: true,
     tts_voice: 'en-US-AvaMultilingualNeural',
     tts_engine: 'edge-tts',

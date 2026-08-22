@@ -130,8 +130,8 @@ class ReupConfig(BaseModel):
         description="Isochronous lip-sync: TTS rate + rubberband fitted to original mouth windows",
     )
     vietsub_style: str = Field(
-        default="auto",
-        description="dub | narrator | recap | funny | auto (auto picks recap for long clips)",
+        default="dub",
+        description="dub (gốc) | narrator (kể chuyện) | funny (vui nhộn) | recap | auto",
     )
     text_cover_vf: str = Field(default="", description="Extra ffmpeg vf nodes to cover mid-frame source text")
     burn_subtitles: bool = Field(default=True, description="Burns translated Vietnamese SRT as hardsub onto the video")
