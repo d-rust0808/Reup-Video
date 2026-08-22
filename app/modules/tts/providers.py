@@ -60,7 +60,7 @@ class EdgeTTSProvider(BaseTTSProvider):
             raise RuntimeError("edge-tts package is not installed.") from e
 
         if not voice:
-            voice = "vi-VN-HoaiMyNeural" if lang == "vi" else "en-US-AvaNeural"
+            voice = "en-US-AvaMultilingualNeural" if lang == "vi" else "en-US-AvaNeural"
 
         # Voice style presets mapping for Vietnamese
         actual_voice = voice
@@ -68,31 +68,29 @@ class EdgeTTSProvider(BaseTTSProvider):
         actual_pitch = pitch
         caller_forced_rate = bool(rate and rate != "+0%")
 
-        if actual_voice == "gtts-vi":
-            gtts_prov = GTTSProvider()
-            return await gtts_prov.generate(text=text, lang="vi", output_path=output_path)
-        elif actual_voice and str(actual_voice).lower().startswith("kokoro"):
-            actual_voice = "vi-VN-HoaiMyNeural"
-        elif actual_voice == "vi-VN-HoaiMy-Fast":
-            actual_voice = "vi-VN-HoaiMyNeural"
+        vlow = str(actual_voice or "").lower()
+        # Hoài My / gTTS / Kokoro-on-Vietnamese all sound bad for VI dubs.
+        # Multilingual Ava/Andrew speak Vietnamese with natural intonation.
+        if (
+            actual_voice == "gtts-vi"
+            or vlow.startswith("kokoro")
+            or "hoaimy" in vlow
+            or actual_voice in ("vi-VN-HoaiMyNeural", "vi-VN-HoaiMy-Fast", "vi-VN-HoaiMy-Warm")
+        ):
+            actual_voice = "en-US-AvaMultilingualNeural"
             if not caller_forced_rate:
-                actual_rate = "+15%"
-            actual_pitch = actual_pitch if caller_forced_rate else "+1Hz"
-        elif actual_voice == "vi-VN-HoaiMy-Warm":
-            actual_voice = "vi-VN-HoaiMyNeural"
-            if not caller_forced_rate:
-                actual_rate = "-5%"
-            actual_pitch = actual_pitch if caller_forced_rate else "-1Hz"
+                actual_rate = "-3%"
         elif actual_voice == "vi-VN-NamMinh-Fast":
-            actual_voice = "vi-VN-NamMinhNeural"
+            actual_voice = "en-US-AndrewMultilingualNeural"
             if not caller_forced_rate:
-                actual_rate = "+14%"
-            actual_pitch = actual_pitch if caller_forced_rate else "+1Hz"
+                actual_rate = "+8%"
         elif actual_voice == "vi-VN-NamMinh-Deep":
-            actual_voice = "vi-VN-NamMinhNeural"
+            actual_voice = "en-US-AndrewMultilingualNeural"
             if not caller_forced_rate:
-                actual_rate = "-8%"
-            actual_pitch = actual_pitch if caller_forced_rate else "-2Hz"
+                actual_rate = "-6%"
+                actual_pitch = actual_pitch if caller_forced_rate else "-1Hz"
+        elif actual_voice == "vi-VN-NamMinhNeural":
+            actual_voice = "en-US-AndrewMultilingualNeural"
 
         if not output_path:
             filename = f"edge_{hash(text) & 0xffffffff:08x}.mp3"
@@ -233,7 +231,7 @@ class KokoroTTSProvider(BaseTTSProvider):
         except ImportError as e:
             logger.warning(f"Kokoro package not available ({e}). Falling back to Edge-TTS.")
             edge_prov = EdgeTTSProvider()
-            return await edge_prov.generate(text=text, lang="vi", voice="vi-VN-HoaiMyNeural", output_path=output_path)
+            return await edge_prov.generate(text=text, lang="vi", voice="en-US-AvaMultilingualNeural", output_path=output_path)
 
         if not output_path:
             filename = f"kokoro_{hash(text) & 0xffffffff:08x}.wav"
@@ -266,7 +264,7 @@ class KokoroTTSProvider(BaseTTSProvider):
         except Exception as e:
             logger.warning(f"Kokoro-82M synthesis error ({e}). Falling back to Edge-TTS.")
             edge_prov = EdgeTTSProvider()
-            return await edge_prov.generate(text=text, lang="vi", voice="vi-VN-HoaiMyNeural", output_path=output_path)
+            return await edge_prov.generate(text=text, lang="vi", voice="en-US-AvaMultilingualNeural", output_path=output_path)
 
         return output_path
 

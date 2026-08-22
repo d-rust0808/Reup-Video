@@ -21,7 +21,7 @@ SUPPORTED_ENGINES = ["edge-tts", "kokoro", "kokoro-tts", "kokoro-82m", "gtts", "
 
 
 DEFAULT_VOICES = {
-    "vi": {"female": "vi-VN-HoaiMyNeural", "male": "vi-VN-NamMinhNeural"},
+    "vi": {"female": "en-US-AvaMultilingualNeural", "male": "en-US-AndrewMultilingualNeural"},
     "en": {"female": "en-US-AvaNeural", "male": "en-US-AndrewNeural"},
     "zh": {"female": "zh-CN-XiaoxiaoNeural", "male": "zh-CN-YunjianNeural"},
     "ja": {"female": "ja-JP-NanamiNeural", "male": "ja-JP-KeitaNeural"},
@@ -244,7 +244,7 @@ class TTSService:
     async def generate_speech_edge_tts(
         self,
         text: str,
-        voice: str = "vi-VN-HoaiMyNeural",
+        voice: str = "en-US-AvaMultilingualNeural",
         output_path: Optional[str] = None,
         rate: str = "+0%",
         pitch: str = "+0Hz",
@@ -309,7 +309,7 @@ class TTSService:
     ) -> str:
         """Main method to synthesize speech based on engine selection with fallback strategy."""
         target_engine = (engine or self.default_engine or "edge-tts").lower()
-        selected_voice = voice or DEFAULT_VOICES.get(lang, {}).get("female", "vi-VN-HoaiMyNeural")
+        selected_voice = voice or DEFAULT_VOICES.get(lang, {}).get("female", "en-US-AvaMultilingualNeural")
 
         # Voice id implies engine
         vlow = (selected_voice or "").lower()
@@ -323,8 +323,8 @@ class TTSService:
         # Unknown Edge voice ids (kokoro-af_heart, HoaiMy-Fast already mapped in provider)
         EDGE_PREFIXES = ("vi-vn-", "en-us-", "en-gb-", "zh-cn-", "ja-jp-", "ko-kr-", "th-th-", "fr-fr-", "es-es-", "de-de-", "ru-ru-", "id-id-")
         if target_engine == "edge-tts" and selected_voice and not any(vlow.startswith(p) for p in EDGE_PREFIXES) and vlow not in ("gtts-vi",):
-            logger.warning(f"Unknown Edge-TTS voice '{selected_voice}', remapping to vi-VN-HoaiMyNeural")
-            selected_voice = "vi-VN-HoaiMyNeural"
+            logger.warning(f"Unknown Edge-TTS voice '{selected_voice}', remapping to Ava multilingual")
+            selected_voice = "en-US-AvaMultilingualNeural"
 
         if target_engine in ("kokoro", "kokoro-tts", "kokoro-82m"):
             try:
@@ -333,7 +333,7 @@ class TTSService:
             except Exception as e:
                 logger.warning(f"Kokoro TTS failed ({e}), falling back to Edge-TTS Hoài My")
                 target_engine = "edge-tts"
-                selected_voice = DEFAULT_VOICES.get(lang, {}).get("female", "vi-VN-HoaiMyNeural")
+                selected_voice = DEFAULT_VOICES.get(lang, {}).get("female", "en-US-AvaMultilingualNeural")
 
         if target_engine in ("melo", "melo-tts"):
             try:
@@ -342,7 +342,7 @@ class TTSService:
             except Exception as e:
                 logger.warning(f"Melo TTS failed ({e}), falling back to Edge-TTS")
                 target_engine = "edge-tts"
-                selected_voice = DEFAULT_VOICES.get(lang, {}).get("female", "vi-VN-HoaiMyNeural")
+                selected_voice = DEFAULT_VOICES.get(lang, {}).get("female", "en-US-AvaMultilingualNeural")
 
         if target_engine == "edge-tts":
             try:
@@ -430,7 +430,7 @@ class TTSService:
         self,
         srt_path: str,
         output_audio_path: str,
-        voice: str = "vi-VN-HoaiMyNeural",
+        voice: str = "en-US-AvaMultilingualNeural",
         lang: str = "vi",
         engine: Optional[str] = None,
         total_duration: Optional[float] = None,

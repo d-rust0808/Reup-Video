@@ -254,7 +254,7 @@ def apply_vietnamese_dubbing(video_path: str, text_to_translate: str, output_pat
         tts_file = video_path + ".vi_voice.mp3"
         
         async def _gen_tts():
-            communicator = edge_tts.Communicate(vi_text, "vi-VN-HoaiMyNeural")
+            communicator = edge_tts.Communicate(vi_text, "en-US-AvaMultilingualNeural")
             await communicator.save(tts_file)
             
         try:

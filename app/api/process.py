@@ -43,7 +43,7 @@ class ReupPayload(BaseModel):
     enable_lipsync: Optional[bool] = True
     vietsub_style: Optional[str] = "auto"
     burn_subtitles: Optional[bool] = True
-    tts_voice: Optional[str] = "vi-VN-HoaiMy-Warm"
+    tts_voice: Optional[str] = "en-US-AvaMultilingualNeural"
     tts_engine: Optional[str] = "edge-tts"
     target_lang: Optional[str] = "vi"
     source_lang: Optional[str] = "auto"
@@ -84,7 +84,7 @@ class ProcessJobRequest(BaseModel):
     enable_lipsync: Optional[bool] = True
     vietsub_style: Optional[str] = "auto"
     burn_subtitles: Optional[bool] = True
-    tts_voice: Optional[str] = "vi-VN-HoaiMy-Warm"
+    tts_voice: Optional[str] = "en-US-AvaMultilingualNeural"
     tts_engine: Optional[str] = "edge-tts"
     target_lang: Optional[str] = "vi"
     source_lang: Optional[str] = "auto"
@@ -231,7 +231,7 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         reup_burn = req.reup.burn_subtitles
     elif getattr(req, "burn_subtitles", None) is not None:
         reup_burn = req.burn_subtitles
-    reup_tts_voice = (req.reup.tts_voice if req.reup and req.reup.tts_voice else req.tts_voice) or "vi-VN-HoaiMy-Warm"
+    reup_tts_voice = (req.reup.tts_voice if req.reup and req.reup.tts_voice else req.tts_voice) or "en-US-AvaMultilingualNeural"
     reup_tts_engine = "edge-tts"
     if req.reup and getattr(req.reup, "tts_engine", None):
         reup_tts_engine = req.reup.tts_engine
@@ -353,10 +353,11 @@ async def get_supported_voices():
     ]
 
     voices = [
-        # Tiếng Việt VIP Pro
-        {"id": "vi-VN-HoaiMyNeural", "lang": "vi", "name": "Hoài My (Nữ Bắc)", "gender": "Female", "desc": "Giọng ngọt ngào, truyền cảm, thích hợp đọc truyện, kể chuyện & review sản phẩm", "tag": "VIP"},
-        {"id": "vi-VN-NamMinhNeural", "lang": "vi", "name": "Nam Minh (Nam Bắc)", "gender": "Male", "desc": "Giọng trầm ấm, chuyên nghiệp, quyền lực, chuẩn review phim & tin tức", "tag": "VIP PRO"},
-        {"id": "gtts-vi", "lang": "vi", "name": "Google Neural Vi", "gender": "Female", "desc": "Giọng đọc phổ thông, tự nhiên, rõ ràng từng âm tiết", "tag": "STABLE"},
+        # Tiếng Việt — multilingual neural (Hoài My/gTTS đã bỏ vì nghe dở)
+        {"id": "en-US-AvaMultilingualNeural", "lang": "vi", "name": "Ava (nữ, tự nhiên)", "gender": "Female", "desc": "Nói tiếng Việt rõ, không ngọng — mặc định reup", "tag": "BEST"},
+        {"id": "en-US-EmmaMultilingualNeural", "lang": "vi", "name": "Emma (nữ, trẻ)", "gender": "Female", "desc": "Nhẹ, vlog, review", "tag": "HOT"},
+        {"id": "en-US-AndrewMultilingualNeural", "lang": "vi", "name": "Andrew (nam, dẫn chuyện)", "gender": "Male", "desc": "Trầm, tài liệu / kể lại", "tag": "PRO"},
+        {"id": "en-US-BrianMultilingualNeural", "lang": "vi", "name": "Brian (nam, ấm)", "gender": "Male", "desc": "Ấm, review", "tag": "PRO"},
 
         # Tiếng Anh Global
         {"id": "en-US-GuyNeural", "lang": "en", "name": "Guy (Nam US)", "gender": "Male", "desc": "Giọng nam trầm cuốn hút, cực kỳ viral trên TikTok & Shorts", "tag": "HOT"},
@@ -392,6 +393,6 @@ async def get_supported_voices():
     return {
         "languages": languages,
         "voices": voices,
-        "default_voice": "vi-VN-HoaiMyNeural",
+        "default_voice": "en-US-AvaMultilingualNeural",
         "default_lang": "vi"
     }

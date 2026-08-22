@@ -33,7 +33,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     enable_lipsync: true,
     vietsub_style: 'auto',
     burn_subtitles: true,
-    tts_voice: 'vi-VN-HoaiMy-Warm',
+    tts_voice: 'en-US-AvaMultilingualNeural',
     tts_engine: 'edge-tts',
     target_lang: 'vi',
     source_lang: 'auto',
@@ -157,7 +157,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     // Slider is always percent (0–5). Never send 0.4 as 40% crop.
     const normCrop = Number(options.crop_percent || 0) / 100.0;
     const cleanMethod = options.wm_method === 'opencv_telea' ? 'telea' : (options.wm_method === 'opencv_ns' ? 'ns' : options.wm_method);
-    const voice = options.tts_voice || 'vi-VN-HoaiMy-Warm';
+    const voice = options.tts_voice || 'en-US-AvaMultilingualNeural';
     let ttsEngine = options.tts_engine || 'edge-tts';
     if (String(voice).toLowerCase().startsWith('kokoro')) ttsEngine = 'kokoro';
     if (String(voice).toLowerCase().startsWith('gtts')) ttsEngine = 'gtts';

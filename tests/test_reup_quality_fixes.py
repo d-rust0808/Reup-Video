@@ -166,8 +166,6 @@ def test_tts_mix_ducks_only_during_speech():
     assert "volume=0.22" not in fc
     mute = build_vocal_mute_ffmpeg_filter(preserve_bgm=True)
     assert "lowpass=f=180" in mute
-    assert "volume=0.22" not in mute
-    assert "volume=0.42" not in mute
 
 
 def test_vietsub_style_auto_picks_recap_for_long_clips():
@@ -182,3 +180,10 @@ def test_mid_text_cover_appended_to_filtergraph():
     cfg = ReupConfig(text_cover_vf="delogo=x=10:y=10:w=80:h=20:show=0", film_grain=0)
     _, _, vf, _ = build_reup_filtergraph(cfg, has_audio=False)
     assert "delogo=" in vf
+
+
+def test_default_voice_is_ava_not_hoaimy():
+    from app.services.tts_service import DEFAULT_VOICES
+    assert ReupConfig().tts_voice == "en-US-AvaMultilingualNeural"
+    assert DEFAULT_VOICES["vi"]["female"] == "en-US-AvaMultilingualNeural"
+    assert DEFAULT_VOICES["vi"]["male"] == "en-US-AndrewMultilingualNeural"

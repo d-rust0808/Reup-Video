@@ -362,8 +362,8 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                   onChange={(e) => {
                     const lang = e.target.value;
                     const voices = {
-                      vi: 'vi-VN-HoaiMyNeural',
-                      en: 'en-US-AriaNeural',
+                      vi: 'en-US-AvaMultilingualNeural',
+                      en: 'en-US-AvaMultilingualNeural',
                       th: 'th-TH-PremwadeeNeural',
                       id: 'id-ID-GadisNeural',
                       ja: 'ja-JP-NanamiNeural',
@@ -392,28 +392,19 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                   </span>
                 </label>
                 <select
-                  value={options.tts_voice || 'vi-VN-HoaiMyNeural'}
+                  value={options.tts_voice || 'en-US-AvaMultilingualNeural'}
                   onChange={(e) => {
                     handleChange('tts_voice', e.target.value);
-                    handleChange('target_lang', 'vi');
                   }}
                   className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2.5 text-xs text-slate-900 font-bold outline-none focus:ring-2 focus:ring-purple-400 cursor-pointer shadow-2xs"
                 >
-                  <optgroup label="🌟 Giọng Đọc Nữ Tiếng Việt (Truyền Cảm & Tự Nhiên)">
-                    <option value="vi-VN-HoaiMyNeural">🎙️ Nữ Hoài My (Ngọt ngào, truyền cảm, tâm sự, review ẩm thực)</option>
-                    <option value="vi-VN-HoaiMy-Fast">⚡ Nữ Hoài My - Tiết Tấu Nhanh (Review TikTok/Shorts cuốn hút, sôi nổi)</option>
-                    <option value="vi-VN-HoaiMy-Warm">🍵 Nữ Hoài My - Trầm Ấm (Đọc truyện, vlog đời sống, chữa lành)</option>
+                  <optgroup label="Nữ — hay, tự nhiên (khuyên dùng)">
+                    <option value="en-US-AvaMultilingualNeural">Ava — rõ, không ngọng, hợp reup</option>
+                    <option value="en-US-EmmaMultilingualNeural">Emma — trẻ, nhẹ, vlog</option>
                   </optgroup>
-                  <optgroup label="🔥 Giọng Đọc Nam Tiếng Việt (Cuốn Hút & Chuẩn Phóng Sự)">
-                    <option value="vi-VN-NamMinhNeural">🎙️ Nam Nam Minh (Trầm ấm, lịch lãm, review phim, tài liệu chuẩn VTV)</option>
-                    <option value="vi-VN-NamMinh-Fast">⚡ Nam Nam Minh - Tốc Độ Cao (Tóm tắt phim kịch tính, tin tức nóng)</option>
-                    <option value="vi-VN-NamMinh-Deep">🌙 Nam Nam Minh - Trầm Sâu (Kể chuyện đêm khuya, truyện ma, bí ẩn)</option>
-                  </optgroup>
-                  <optgroup label="🚀 Kokoro-82M AI Thế Hệ Mới (24kHz Studio)">
-                    <option value="kokoro-af_heart">💎 Kokoro-82M Neural (Âm thanh 24kHz trong trẻo, tự nhiên)</option>
-                  </optgroup>
-                  <optgroup label="🤖 Giọng Phổ Thông & Meme">
-                    <option value="gtts-vi">🤖 Chị Google (Giọng chuẩn meme, review hài hước viral)</option>
+                  <optgroup label="Nam — dẫn chuyện">
+                    <option value="en-US-AndrewMultilingualNeural">Andrew — trầm, tài liệu / kể lại</option>
+                    <option value="en-US-BrianMultilingualNeural">Brian — ấm, review</option>
                   </optgroup>
                 </select>
               </div>
