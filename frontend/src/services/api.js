@@ -44,6 +44,12 @@ export async function fetchSampleVideos() {
   return res.json();
 }
 
+export async function fetchLibrary() {
+  const res = await fetch(`${API_BASE}/library`);
+  if (!res.ok) throw new Error('Failed to fetch video library');
+  return res.json();
+}
+
 export async function extractUrls(urls) {
   const res = await fetch(`${API_BASE}/extract`, {
     method: 'POST',

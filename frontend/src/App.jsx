@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
 import { UrlExtractor } from './components/UrlExtractor';
@@ -6,22 +6,58 @@ import { VideoWorkbench } from './components/VideoWorkbench';
 import { BatchQueue } from './components/BatchQueue';
 import { OutputGallery } from './components/OutputGallery';
 import { ChannelManager } from './components/ChannelManager';
-import { fetchJobs, fetchOutputs } from './services/api';
+import { fetchJobs, fetchOutputs, fetchLibrary } from './services/api';
 import { WebSocketClient } from './services/websocket';
+import { loadSession, saveSession } from './services/session';
+
+function mergeMedia(a = [], b = []) {
+  const map = new Map();
+  [...b, ...a].forEach((item) => {
+    if (item?.video_id && !map.has(item.video_id)) map.set(item.video_id, item);
+  });
+  return Array.from(map.values());
+}
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('extract');
-  const [collapsed, setCollapsed] = useState(false);
+  const boot = useRef(loadSession()).current;
+  const [activeTab, setActiveTab] = useState(boot.activeTab || 'extract');
+  const [collapsed, setCollapsed] = useState(!!boot.collapsed);
   const [serverOnline, setServerOnline] = useState(false);
   const [wsStatus, setWsStatus] = useState('disconnected');
   const [wsUpdate, setWsUpdate] = useState(null);
 
-  const [extractedMediaList, setExtractedMediaList] = useState([]);
-  const [selectedMedia, setSelectedMedia] = useState(null);
+  const [extractedMediaList, setExtractedMediaList] = useState(boot.extractedMediaList || []);
+  const [selectedMedia, setSelectedMedia] = useState(boot.selectedMedia || null);
   const [queueCount, setQueueCount] = useState(0);
   const [outputCount, setOutputCount] = useState(0);
 
-  // Fetch job and output counts for Sidebar badges & server online status
+  useEffect(() => {
+    saveSession({
+      activeTab,
+      collapsed,
+      selectedMedia,
+      extractedMediaList,
+    });
+  }, [activeTab, collapsed, selectedMedia, extractedMediaList]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await fetchLibrary();
+        const items = data.items || [];
+        if (cancelled || !items.length) return;
+        setExtractedMediaList((prev) => mergeMedia(prev, items));
+        setSelectedMedia((prev) => prev || items[0]);
+      } catch {
+        /* keep local session */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const updateCounts = useCallback(async () => {
     try {
       const jobsData = await fetchJobs();
@@ -46,7 +82,6 @@ export default function App() {
     return () => clearInterval(interval);
   }, [updateCounts]);
 
-  // WebSocket client initialization
   useEffect(() => {
     const client = new WebSocketClient(
       (data) => setWsUpdate(data),
@@ -56,13 +91,9 @@ export default function App() {
     return () => client.close();
   }, []);
 
-  // Global Keyboard Shortcuts (Ctrl/Cmd + 1, 2, 3, 4, 5)
   useEffect(() => {
     const handleKeyDown = (e) => {
-      // Only trigger if modifier key Ctrl or Cmd is held
       if (!(e.ctrlKey || e.metaKey)) return;
-
-      // Ignore when typing inside input / textarea
       if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
 
       if (e.key === '1') {
@@ -118,7 +149,6 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-slate-50 text-slate-900 antialiased font-sans overflow-hidden selection:bg-blue-600 selection:text-white">
-      {/* Redesigned Clean Light Sidebar Navigation */}
       <Sidebar
         activeTab={activeTab}
         setActiveTab={setActiveTab}
@@ -131,7 +161,6 @@ export default function App() {
         setCollapsed={setCollapsed}
       />
 
-      {/* Main Right Content Clean Workspace */}
       <div className="flex-1 flex flex-col min-w-0 overflow-y-auto bg-slate-50/60">
         <Header
           activeTabTitle={getActiveTabTitle()}
@@ -141,28 +170,34 @@ export default function App() {
         />
 
         <main className="p-6 md:p-8 max-w-7xl w-full mx-auto space-y-6">
-          {activeTab === 'extract' && (
+          <div className={activeTab === 'extract' ? '' : 'hidden'}>
             <UrlExtractor
+              initialMedia={extractedMediaList}
               onMediaExtracted={setExtractedMediaList}
               onSelectForWorkbench={handleSelectForWorkbench}
             />
-          )}
+          </div>
 
-          {activeTab === 'workbench' && (
+          <div className={activeTab === 'workbench' ? '' : 'hidden'}>
             <VideoWorkbench
               selectedMedia={selectedMedia}
               onJobSubmitted={handleJobSubmitted}
             />
-          )}
+          </div>
 
-          {activeTab === 'queue' && <BatchQueue wsUpdates={wsUpdate} />}
+          <div className={activeTab === 'queue' ? '' : 'hidden'}>
+            <BatchQueue wsUpdates={wsUpdate} />
+          </div>
 
-          {activeTab === 'gallery' && <OutputGallery />}
+          <div className={activeTab === 'gallery' ? '' : 'hidden'}>
+            <OutputGallery />
+          </div>
 
-          {activeTab === 'channels' && <ChannelManager />}
+          <div className={activeTab === 'channels' ? '' : 'hidden'}>
+            <ChannelManager />
+          </div>
         </main>
       </div>
     </div>
   );
 }
-

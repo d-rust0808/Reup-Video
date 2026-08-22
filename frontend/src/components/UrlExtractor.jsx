@@ -14,15 +14,15 @@ import {
   UserCheck,
   Search,
 } from 'lucide-react';
-import { extractUrls, uploadVideoFile, fetchSampleVideos, getStreamUrl } from '../services/api';
+import { extractUrls, uploadVideoFile, fetchSampleVideos, fetchLibrary, getStreamUrl } from '../services/api';
 
-export function UrlExtractor({ onMediaExtracted, onSelectForWorkbench }) {
+export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbench }) {
   const [mode, setMode] = useState('video'); // 'video' | 'channel'
   const [inputUrl, setInputUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState(null);
-  const [extractedList, setExtractedList] = useState([]);
+  const [extractedList, setExtractedList] = useState(initialMedia || []);
   const [pasteTip, setPasteTip] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [samples, setSamples] = useState([]);
@@ -30,9 +30,36 @@ export function UrlExtractor({ onMediaExtracted, onSelectForWorkbench }) {
   const fileInputRef = useRef(null);
 
   useEffect(() => {
+    if (Array.isArray(initialMedia) && initialMedia.length) {
+      setExtractedList((prev) => {
+        const map = new Map();
+        [...initialMedia, ...prev].forEach((item) => {
+          if (item?.video_id && !map.has(item.video_id)) map.set(item.video_id, item);
+        });
+        return Array.from(map.values());
+      });
+    }
+  }, [initialMedia]);
+
+  useEffect(() => {
     fetchSampleVideos()
       .then((data) => setSamples(data.items || []))
       .catch(() => setSamples([]));
+    fetchLibrary()
+      .then((data) => {
+        const items = data.items || [];
+        if (!items.length) return;
+        setExtractedList((prev) => {
+          const map = new Map();
+          [...items, ...prev].forEach((item) => {
+            if (item?.video_id && !map.has(item.video_id)) map.set(item.video_id, item);
+          });
+          const next = Array.from(map.values());
+          onMediaExtracted?.(next);
+          return next;
+        });
+      })
+      .catch(() => {});
   }, []);
 
   // Focus input and show in-app paste shortcut tip WITHOUT calling restricted navigator.clipboard.readText()

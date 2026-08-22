@@ -2,6 +2,7 @@ import React, { useRef, useState, useEffect } from 'react';
 import { RoiCanvas } from './RoiCanvas';
 import { ReupFxControls } from './ReupFxControls';
 import { getStreamUrl, submitJob, uploadVideoFile, fetchChannels } from '../services/api';
+import { loadSession, saveSession } from '../services/session';
 import { Video, AlertCircle, CheckCircle2, Upload, Loader2 } from 'lucide-react';
 
 export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
@@ -14,7 +15,9 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
   const [msg, setMsg] = useState(null);
   const [isDragOver, setIsDragOver] = useState(false);
 
-  const [options, setOptions] = useState({
+  const [options, setOptions] = useState(() => {
+    const saved = loadSession().workbenchOptions;
+    return {
     wm_method: 'crop',
     hflip: true,
     speed_ratio: 1.03,
@@ -39,8 +42,14 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     post_caption: '',
     post_tags: [],
     publish_status: 'READY',
+    ...(saved || {}),
+    };
   });
   const [channelOverlays, setChannelOverlays] = useState([]);
+
+  useEffect(() => {
+    saveSession({ workbenchOptions: options });
+  }, [options]);
 
   useEffect(() => {
     if (selectedMedia) {

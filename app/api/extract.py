@@ -90,6 +90,58 @@ async def extract_urls(req: ExtractRequest, request: Request):
     return {"items": items, "count": len(items)}
 
 
+@router.get("/library")
+async def list_library():
+    """Lists every downloaded source video so a reload keeps the working session."""
+    import json
+    import re
+
+    raw_dir = settings.RAW_INPUT_DIR
+    items = []
+    if not os.path.isdir(raw_dir):
+        return {"items": [], "count": 0}
+
+    names = [n for n in os.listdir(raw_dir) if n.endswith(".mp4")]
+    names.sort(key=lambda n: os.path.getmtime(os.path.join(raw_dir, n)), reverse=True)
+    seen = set()
+    for name in names:
+        stem = name[:-4]
+        m = re.search(r"(?:^|_)(\d{8,})", stem)
+        canonical = m.group(1) if m else stem
+        fpath_canon = os.path.join(raw_dir, f"{canonical}.mp4")
+        fpath = fpath_canon if os.path.isfile(fpath_canon) else os.path.join(raw_dir, name)
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        vid = canonical
+        try:
+            size = os.path.getsize(fpath)
+        except OSError:
+            continue
+        if size < 80_000:
+            continue
+        meta = {}
+        jpath = os.path.join(raw_dir, f"{vid}.json")
+        if os.path.isfile(jpath):
+            try:
+                with open(jpath, "r", encoding="utf-8") as f:
+                    meta = json.load(f) or {}
+            except Exception:
+                meta = {}
+        items.append({
+            "video_id": vid,
+            "platform": meta.get("platform") or "douyin",
+            "title": meta.get("title") or vid,
+            "author": meta.get("author"),
+            "file_path": os.path.abspath(fpath),
+            "file_size": size,
+            "original_url": meta.get("original_url"),
+            "direct_stream_url": f"/api/v1/videos/stream/{vid}",
+            "has_vietsub": os.path.exists(os.path.join(raw_dir, f"{vid}.vi.srt")),
+        })
+    return {"items": items, "count": len(items)}
+
+
 @router.get("/samples")
 async def list_sample_videos():
     """Returns seeded studio sample clips the UI can load in one click."""
