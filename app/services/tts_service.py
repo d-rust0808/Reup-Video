@@ -369,20 +369,31 @@ class TTSService:
             logger.warning("TTS assemble skipped: no ffmpeg or no clips")
             return False
 
+        clips_sorted = sorted(clips, key=lambda c: float(c["segment"]["start_time"]))
         inputs = []
         filter_nodes = []
         map_labels = []
 
-        for idx, item in enumerate(clips):
+        for idx, item in enumerate(clips_sorted):
             clip_path = item["clip_path"]
-            start_ms = int(item["segment"]["start_time"] * 1000)
+            start = float(item["segment"]["start_time"])
+            dur = float(item.get("final_dur") or item["segment"].get("duration") or 0.3)
+            if idx + 1 < len(clips_sorted):
+                nxt = float(clips_sorted[idx + 1]["segment"]["start_time"])
+                dur = min(dur, max(0.10, nxt - start - 0.05))
+            start_ms = max(0, int(start * 1000))
             inputs.extend(["-i", clip_path])
             label = f"a{idx}"
-            filter_nodes.append(f"[{idx}:a]adelay={start_ms}|{start_ms}[{label}]")
+            filter_nodes.append(
+                f"[{idx}:a]atrim=0:{dur:.3f},asetpts=PTS-STARTPTS,adelay={start_ms}|{start_ms}:all=1[{label}]"
+            )
             map_labels.append(f"[{label}]")
 
-        # amix + EBU R128 broadcast loudnorm (-14 LUFS) to ensure punchy, audible, professional voice volume
-        mix_filter = "".join(map_labels) + f"amix=inputs={len(clips)}:dropout_transition=0:normalize=0,loudnorm=I=-14:LRA=7:TP=-1.0:measured_I=-20,volume=1.5,apad[aout]"
+        # No loudnorm here — stacking + loudnorm is what made voices echo/double.
+        mix_filter = (
+            "".join(map_labels)
+            + f"amix=inputs={len(clips_sorted)}:dropout_transition=0:normalize=0:duration=longest[aout]"
+        )
         filter_complex = ";".join(filter_nodes + [mix_filter])
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)

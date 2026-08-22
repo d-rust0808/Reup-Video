@@ -406,12 +406,12 @@ def burn_vietnamese_hardsub(video_path: str, srt_path: str, output_path: str, sp
 
 
 def build_tts_bgm_mix_filter() -> str:
-    """BGM stays full in silent gaps; ducks only while TTS is speaking."""
+    """Bass-only BGM; crush it whenever Vietnamese TTS is speaking so voices never stack."""
     return (
-        "[1:a]volume=1.22,asplit=2[sc][voice];"
-        "[0:a]volume=1.00[bgraw];"
-        "[bgraw][sc]sidechaincompress=threshold=0.02:ratio=9:attack=25:release=450:makeup=1:knee=2.5[bg];"
-        "[bg][voice]amix=inputs=2:duration=first:dropout_transition=3:normalize=0[aout]"
+        "[1:a]volume=1.28,highpass=f=70,asplit=2[sc][voice];"
+        "[0:a]lowpass=f=180:poles=2,volume=0.80[bgraw];"
+        "[bgraw][sc]sidechaincompress=threshold=0.005:ratio=20:attack=6:release=70:makeup=1:knee=1[bg];"
+        "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
     )
 
 
@@ -473,9 +473,9 @@ def mix_tts_with_background(video_path: str, tts_audio_path: str, output_path: s
         if has_audio:
             # Fallback: keep BGM loud instead of crushing it
             fc2 = (
-                "[0:a]volume=0.78[bg];"
-                "[1:a]volume=1.15[voice];"
-                "[bg][voice]amix=inputs=2:duration=first:dropout_transition=3:normalize=0[aout]"
+                "[0:a]lowpass=f=180,volume=0.55[bg];"
+                "[1:a]volume=1.20[voice];"
+                "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
             )
             cmd[cmd.index("-filter_complex") + 1] = fc2
             res2 = subprocess.run(cmd, capture_output=True, text=True, check=False)

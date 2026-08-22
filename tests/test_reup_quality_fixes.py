@@ -167,8 +167,9 @@ def test_tts_mix_ducks_only_during_speech():
     assert "sidechaincompress" in fc
     assert "volume=0.22" not in fc
     mute = build_vocal_mute_ffmpeg_filter(preserve_bgm=True)
-    assert "volume=0.42" in mute
-    assert "volume=0.30" not in mute
+    assert "lowpass=f=180" in mute
+    assert "volume=0.22" not in mute
+    assert "volume=0.42" not in mute
 
 
 def test_vietsub_style_auto_picks_recap_for_long_clips():

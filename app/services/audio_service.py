@@ -185,17 +185,9 @@ def build_vocal_mute_ffmpeg_filter(
     if vocal_mute_strategy == "mute_all" or not preserve_bgm:
         return "volume=0"
 
-    filters: List[str] = []
-
-    # Kill speech band (Chinese leak) but keep bass + air so BGM isn't empty.
-    # Mid-range 300–4000 Hz is where dialogue lives.
-    filters.append("equalizer=f=350:t=q:w=1.0:g=-16")
-    filters.append("equalizer=f=1000:t=q:w=1.3:g=-20")
-    filters.append("equalizer=f=2000:t=q:w=1.3:g=-20")
-    filters.append("equalizer=f=3200:t=q:w=1.1:g=-14")
-    filters.append("volume=0.42")
-
-    return ",".join(filters)
+    # Dialogue lives ~200–4000 Hz. Keep only sub-bass so BGM thump remains
+    # but original Chinese cannot stack on top of the Vietnamese dub.
+    return "lowpass=f=180:poles=2,volume=0.80"
 
 
 

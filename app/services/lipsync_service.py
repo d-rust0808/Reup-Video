@@ -154,7 +154,7 @@ def rubberband_fit(input_path: str, output_path: str, target_dur: float) -> bool
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
     af = (
         f"rubberband=tempo={tempo:.4f}:pitch=1:formant=preserved:transients=smooth,"
-        f"atrim=0:{td:.3f},apad=pad_dur=0.02"
+        f"atrim=0:{td:.3f}"
     )
     cmd = [
         ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
