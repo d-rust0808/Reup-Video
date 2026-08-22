@@ -269,7 +269,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
               <label className="text-xs font-bold text-slate-700 cursor-pointer block" htmlFor="vocal-mute-toggle">
                 Khử Giọng Nói Gốc (Giữ Nhạc Nền BGM)
               </label>
-              <span className="text-[10px] text-slate-500 block">Tự động loại bỏ tiếng nói ngoại ngữ gốc</span>
+              <span className="text-[10px] text-slate-500 block">Giữ nhạc nền đầy ở đoạn không lời, chỉ hạ khi có thoại Việt</span>
             </div>
           </div>
           <input

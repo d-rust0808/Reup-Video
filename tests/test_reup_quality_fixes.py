@@ -157,3 +157,14 @@ def test_lipsync_compacts_and_rates():
 def test_lipsync_default_on():
     cfg = ReupConfig()
     assert cfg.enable_lipsync is True
+
+
+def test_tts_mix_ducks_only_during_speech():
+    from app.services.reup_service import build_tts_bgm_mix_filter
+    from app.services.audio_service import build_vocal_mute_ffmpeg_filter
+    fc = build_tts_bgm_mix_filter()
+    assert "sidechaincompress" in fc
+    assert "volume=0.22" not in fc
+    mute = build_vocal_mute_ffmpeg_filter(preserve_bgm=True)
+    assert "volume=0.78" in mute
+    assert "volume=0.30" not in mute

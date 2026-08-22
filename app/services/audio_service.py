@@ -187,12 +187,10 @@ def build_vocal_mute_ffmpeg_filter(
 
     filters: List[str] = []
 
-    # 1. Soft vocal resonance attenuation (mild speech notch without phase inversion)
-    filters.append("equalizer=f=1200:t=q:w=1.5:g=-8")
-    filters.append("equalizer=f=2800:t=q:w=1.5:g=-6")
-
-    # 2. Clean background music attenuation (gentle ducking so BGM stays smooth and clear)
-    filters.append("volume=0.30")
+    # Keep BGM body in silent gaps; only notch speech so dubbed voice can sit on top.
+    filters.append("equalizer=f=1200:t=q:w=1.2:g=-6")
+    filters.append("equalizer=f=2800:t=q:w=1.2:g=-5")
+    filters.append("volume=0.78")
 
     return ",".join(filters)
 

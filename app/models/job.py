@@ -123,7 +123,7 @@ class ReupConfig(BaseModel):
     enable_vocal_mute: bool = Field(default=True, description="Enables original vocal extraction and muting pass")
     vocal_mute_strategy: str = Field(default="auto", description="Strategy for vocal muting: 'auto', 'demucs', 'ffmpeg_filter', 'mute_all'")
     preserve_bgm: bool = Field(default=True, description="Preserves background audio/music after vocal muting")
-    audio_ducking: bool = Field(default=False, description="Enables audio ducking when overlaying new audio tracks")
+    audio_ducking: bool = Field(default=True, description="Ducks BGM under TTS; silent gaps keep full music")
     enable_tts: bool = Field(default=False, description="Enables TTS synthesis and dubbing pass")
     enable_lipsync: bool = Field(
         default=True,

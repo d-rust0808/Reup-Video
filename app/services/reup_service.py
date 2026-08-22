@@ -400,9 +400,20 @@ def burn_vietnamese_hardsub(video_path: str, srt_path: str, output_path: str, sp
     return False
 
 
+def build_tts_bgm_mix_filter() -> str:
+    """BGM stays full in silent gaps; ducks only while TTS is speaking."""
+    return (
+        "[1:a]volume=1.22,asplit=2[sc][voice];"
+        "[0:a]volume=1.00[bgraw];"
+        "[bgraw][sc]sidechaincompress=threshold=0.02:ratio=9:attack=25:release=450:makeup=1:knee=2.5[bg];"
+        "[bg][voice]amix=inputs=2:duration=first:dropout_transition=3:normalize=0[aout]"
+    )
+
+
 def mix_tts_with_background(video_path: str, tts_audio_path: str, output_path: str) -> bool:
     """
     Mix TTS voiceover with original (possibly vocal-muted) audio.
+    Sidechain-ducks BGM under speech so silent stretches keep music body.
     Does NOT replace BGM. Pads TTS to video length. Never uses -shortest.
     """
     ffmpeg_bin = find_ffmpeg_binary()
@@ -427,11 +438,7 @@ def mix_tts_with_background(video_path: str, tts_audio_path: str, output_path: s
     tmp_out = output_path + ".tmp_tts_mix.mp4"
     has_audio = detect_audio_stream(video_path)
     if has_audio:
-        fc = (
-            "[0:a]volume=0.22[bg];"
-            "[1:a]volume=1.15[voice];"
-            "[bg][voice]amix=inputs=2:duration=first:dropout_transition=2[aout]"
-        )
+        fc = build_tts_bgm_mix_filter()
         cmd = [
             ffmpeg_bin, "-y",
             "-i", video_path,
@@ -439,7 +446,7 @@ def mix_tts_with_background(video_path: str, tts_audio_path: str, output_path: s
             "-filter_complex", fc,
             "-map", "0:v:0", "-map", "[aout]",
             "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "128k",
+            "-c:a", "aac", "-b:a", "192k",
             tmp_out,
         ]
     else:
@@ -449,7 +456,7 @@ def mix_tts_with_background(video_path: str, tts_audio_path: str, output_path: s
             "-i", audio_to_use,
             "-map", "0:v:0", "-map", "1:a:0",
             "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "128k",
+            "-c:a", "aac", "-b:a", "192k",
             tmp_out,
         ]
     try:
@@ -458,6 +465,18 @@ def mix_tts_with_background(video_path: str, tts_audio_path: str, output_path: s
             os.replace(tmp_out, output_path)
             return True
         logger.warning(f"TTS+BGM mix failed ({res.returncode}): {(res.stderr or '')[-500:]}")
+        if has_audio:
+            # Fallback: keep BGM loud instead of crushing it
+            fc2 = (
+                "[0:a]volume=0.78[bg];"
+                "[1:a]volume=1.15[voice];"
+                "[bg][voice]amix=inputs=2:duration=first:dropout_transition=3:normalize=0[aout]"
+            )
+            cmd[cmd.index("-filter_complex") + 1] = fc2
+            res2 = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if res2.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 0:
+                os.replace(tmp_out, output_path)
+                return True
         return False
     finally:
         if temp_padded and os.path.exists(temp_padded):
