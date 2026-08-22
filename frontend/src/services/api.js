@@ -355,4 +355,20 @@ export async function deleteChannelOverlay(channelId, overlayId) {
   return res.json();
 }
 
+export async function uploadStudioOverlay(file, meta = {}) {
+  const form = new FormData();
+  form.append('file', file);
+  form.append('kind', meta.kind || 'logo');
+  form.append('x', String(meta.x ?? 0.78));
+  form.append('y', String(meta.y ?? 0.04));
+  form.append('w', String(meta.w ?? 0.18));
+  const res = await fetch(`${API_BASE}/studio/overlay`, { method: 'POST', body: form });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Tải logo/khung thất bại');
+  }
+  return res.json();
+}
+
+
 

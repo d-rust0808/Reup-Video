@@ -158,6 +158,9 @@ class ReupConfig(BaseModel):
         default_factory=list,
         description="Channel branding logos/frames burned onto every frame",
     )
+    frame_enabled: bool = Field(default=True, description="Burn a cinematic border onto the video")
+    frame_color: str = Field(default="black", description="Outer border color name or hex")
+    frame_thickness: int = Field(default=16, ge=0, le=80, description="Outer border thickness in pixels")
 
     @model_validator(mode="after")
 

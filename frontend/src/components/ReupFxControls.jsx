@@ -14,10 +14,12 @@ import {
   FileText,
   Sparkles,
   Loader2,
-  Layers
+  Layers,
+  ImagePlus,
+  Frame,
 } from 'lucide-react';
 
-import { fetchChannels, getMediaUrl } from '../services/api';
+import { fetchChannels, getMediaUrl, uploadStudioOverlay } from '../services/api';
 
 export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
   const [channels, setChannels] = useState([]);
@@ -258,6 +260,108 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                 {options.saturation}
               </span>
             </div>
+          </div>
+        </div>
+
+        {/* Khung viền + logo — in thẳng vào video */}
+        <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2.5">
+              <Frame className="w-4 h-4 text-slate-700 shrink-0" />
+              <div>
+                <label className="text-xs font-bold text-slate-700 block">Khung viền (in vào video)</label>
+                <span className="text-[10px] text-slate-500">Viền điện ảnh quanh clip, không che nội dung giữa</span>
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={options.frame_enabled !== false}
+              onChange={(e) => handleChange('frame_enabled', e.target.checked)}
+              className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer"
+            />
+          </div>
+          {options.frame_enabled !== false && (
+            <div className="grid grid-cols-2 gap-2">
+              <label className="text-[10px] font-bold text-slate-600">
+                Màu
+                <select
+                  value={options.frame_color || 'black'}
+                  onChange={(e) => handleChange('frame_color', e.target.value)}
+                  className="mt-1 w-full bg-white border border-slate-200 rounded-xl px-2 py-1.5 text-xs font-bold"
+                >
+                  <option value="black">Đen</option>
+                  <option value="white">Trắng</option>
+                  <option value="0xC9A227">Vàng gold</option>
+                  <option value="0x7C3AED">Tím</option>
+                </select>
+              </label>
+              <label className="text-[10px] font-bold text-slate-600">
+                Dày ({options.frame_thickness || 16}px)
+                <input
+                  type="range" min="6" max="36" step="2"
+                  value={options.frame_thickness || 16}
+                  onChange={(e) => handleChange('frame_thickness', parseInt(e.target.value, 10))}
+                  className="mt-2 w-full accent-blue-600"
+                />
+              </label>
+            </div>
+          )}
+          <div className="pt-1 border-t border-slate-200/80">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                <ImagePlus className="w-3.5 h-3.5" /> Logo / khung PNG
+              </span>
+              <span className="text-[10px] text-slate-500">In xuyên suốt video</span>
+            </div>
+            <div className="flex gap-2">
+              <label className="flex-1 text-center text-[11px] font-bold bg-white border border-slate-200 rounded-xl px-2 py-2 cursor-pointer hover:border-blue-300">
+                + Logo góc
+                <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
+                  onChange={async (e) => {
+                    const f = e.target.files?.[0];
+                    if (!f) return;
+                    try {
+                      const ov = await uploadStudioOverlay(f, { kind: 'logo', x: 0.78, y: 0.04, w: 0.16 });
+                      handleChange('overlays', [...(options.overlays || []), ov]);
+                    } catch (err) {
+                      console.error(err);
+                    }
+                    e.target.value = '';
+                  }}
+                />
+              </label>
+              <label className="flex-1 text-center text-[11px] font-bold bg-white border border-slate-200 rounded-xl px-2 py-2 cursor-pointer hover:border-blue-300">
+                + Khung full
+                <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
+                  onChange={async (e) => {
+                    const f = e.target.files?.[0];
+                    if (!f) return;
+                    try {
+                      const ov = await uploadStudioOverlay(f, { kind: 'frame' });
+                      handleChange('overlays', [...(options.overlays || []), ov]);
+                    } catch (err) {
+                      console.error(err);
+                    }
+                    e.target.value = '';
+                  }}
+                />
+              </label>
+            </div>
+            {(options.overlays || []).length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {(options.overlays || []).map((ov, i) => (
+                  <button
+                    key={ov.id || i}
+                    type="button"
+                    onClick={() => handleChange('overlays', (options.overlays || []).filter((_, j) => j !== i))}
+                    className="text-[10px] bg-white border border-slate-200 rounded-lg px-2 py-1 font-bold text-slate-600"
+                    title="Bỏ"
+                  >
+                    {ov.kind === 'frame' ? 'Khung' : 'Logo'} ×
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 

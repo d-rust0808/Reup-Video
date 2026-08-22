@@ -58,6 +58,9 @@ class ReupPayload(BaseModel):
     post_tags: Optional[List[str]] = None
     publish_status: Optional[str] = "READY"
     overlays: Optional[List[dict]] = None
+    frame_enabled: Optional[bool] = True
+    frame_color: Optional[str] = "black"
+    frame_thickness: Optional[int] = 16
 
 
 class ProcessJobRequest(BaseModel):
@@ -99,6 +102,9 @@ class ProcessJobRequest(BaseModel):
     post_tags: Optional[List[str]] = None
     publish_status: Optional[str] = "READY"
     overlays: Optional[List[dict]] = None
+    frame_enabled: Optional[bool] = True
+    frame_color: Optional[str] = "black"
+    frame_thickness: Optional[int] = 16
 
     # Nested payload fields (from React frontend)
     watermark: Optional[WatermarkPayload] = None
@@ -293,6 +299,19 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         srt_path=(req.reup.srt_path if req.reup and getattr(req.reup, "srt_path", None) else req.srt_path),
         tts_audio_path=(req.reup.tts_audio_path if req.reup and getattr(req.reup, "tts_audio_path", None) else req.tts_audio_path),
         overlays=_parse_overlays(req),
+        frame_enabled=(
+            req.reup.frame_enabled if req.reup and getattr(req.reup, "frame_enabled", None) is not None
+            else (req.frame_enabled if getattr(req, "frame_enabled", None) is not None else True)
+        ),
+        frame_color=(
+            (req.reup.frame_color if req.reup and getattr(req.reup, "frame_color", None) else None)
+            or getattr(req, "frame_color", None)
+            or "black"
+        ),
+        frame_thickness=(
+            req.reup.frame_thickness if req.reup and getattr(req.reup, "frame_thickness", None) is not None
+            else (req.frame_thickness if getattr(req, "frame_thickness", None) is not None else 16)
+        ),
     )
 
 

@@ -27,6 +27,13 @@ def is_available() -> bool:
     return bool(_api_key())
 
 
+def _clean_cue(text: str) -> str:
+    t = (text or "").strip()
+    t = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
 def translate_cues(
     texts: List[str],
     target_lang: str = "vi",
@@ -77,27 +84,32 @@ def translate_cues(
     extra = f"Ngữ cảnh video: {title}\n" if title else ""
 
     out: List[str] = []
-    chunk_size = 40
+    chunk_size = 24
     for start in range(0, len(texts), chunk_size):
-        chunk = texts[start : start + chunk_size]
+        chunk = [_clean_cue(t) for t in texts[start : start + chunk_size]]
         numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(chunk))
         prompt = (
-            f"Dịch từng câu thoại video ngắn (Douyin/TikTok) sang {lang_name}.\n"
+            f"Dịch thoại video ngắn sang {lang_name} — tiếng Việt đời thường, đúng nghĩa.\n"
             f"{extra}"
             "Yêu cầu:\n"
             f"{vibe}"
             "- GIỮ NGUYÊN số thứ tự, mỗi câu 1 dòng: N. <bản dịch>\n"
-            "- Không thêm chú thích, không gộp câu, không bỏ số thứ tự.\n\n"
+            "- Dịch Ý, không dịch word-by-word. Nói như người Việt đang xem clip.\n"
+            "- CẤM câu vô nghĩa, CẤM bịa thêm (y tế, tôn giáo, nội dung không có trong gốc).\n"
+            "- Không chú thích, không gộp câu, không bỏ số.\n\n"
             f"{numbered}"
         )
         payload = {
             "model": GROK_MODEL,
-            "temperature": 0.2,
+            "temperature": 0.35,
             "max_tokens": 1800,
             "messages": [
                 {
                     "role": "system",
-                    "content": "Bạn là biên dịch viên lồng tiếng video ngắn. Chỉ trả về các dòng đã đánh số.",
+                    "content": (
+                        "Bạn là biên dịch viên TikTok Việt. Chỉ trả về các dòng đã đánh số. "
+                        "Văn nói tự nhiên, không giọng máy."
+                    ),
                 },
                 {"role": "user", "content": prompt},
             ],

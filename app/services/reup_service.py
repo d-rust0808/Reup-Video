@@ -185,6 +185,20 @@ def build_reup_filtergraph(
         sub_path = _ffmpeg_subtitles_path(burn_srt_path)
         vf_nodes.append(f"subtitles='{sub_path}':force_style='{style}'")
 
+    # Cinematic border — printed onto every frame (after picture, under/with subs)
+    if getattr(cfg, "frame_enabled", False):
+        thick = int(getattr(cfg, "frame_thickness", 16) or 0)
+        color = str(getattr(cfg, "frame_color", "black") or "black").strip() or "black"
+        if color.startswith("#") and len(color) == 7:
+            color = color.lstrip("#")
+            color = f"0x{color}"
+        if thick > 0:
+            inner = max(2, thick // 6)
+            vf_nodes.append(f"drawbox=x=0:y=0:w=iw:h=ih:t={thick}:color={color}@1")
+            vf_nodes.append(
+                f"drawbox=x={thick}:y={thick}:w=iw-{thick*2}:h=ih-{thick*2}:t={inner}:color=white@0.88"
+            )
+
     s_ratio = cfg.speed_factor
     if s_ratio != 1.0:
         vf_nodes.append(f"setpts=PTS/{s_ratio:.4f}")

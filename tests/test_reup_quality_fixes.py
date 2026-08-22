@@ -120,7 +120,7 @@ def test_subtitle_bottom_crop_folded_into_reup():
 def test_hardsub_filter_uses_original_timestamps_before_setpts(tmp_path):
     srt = tmp_path / "vi.srt"
     srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nXin chào\n\n", encoding="utf-8")
-    cfg = ReupConfig(speed_factor=1.03, film_grain=0.0)
+    cfg = ReupConfig(speed_factor=1.03, film_grain=0.0, frame_enabled=False)
     _, _, vf, _ = build_reup_filtergraph(cfg, has_audio=False, burn_srt_path=str(srt))
     assert "subtitles=" in vf
     assert "drawbox=" not in vf
@@ -187,3 +187,11 @@ def test_default_voice_is_ava_not_hoaimy():
     assert ReupConfig().tts_voice == "en-US-AvaMultilingualNeural"
     assert DEFAULT_VOICES["vi"]["female"] == "en-US-AvaMultilingualNeural"
     assert DEFAULT_VOICES["vi"]["male"] == "en-US-AndrewMultilingualNeural"
+
+
+def test_cinematic_frame_is_burned():
+    cfg = ReupConfig(frame_enabled=True, frame_thickness=16, film_grain=0)
+    _, _, vf, _ = build_reup_filtergraph(cfg, has_audio=False)
+    assert "drawbox=" in vf
+    assert "t=16" in vf
+

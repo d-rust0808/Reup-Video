@@ -7,7 +7,7 @@ Target Path: app/api/extract.py
 import os
 import shutil
 from typing import List
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 from pydantic import BaseModel
 
 from app.config import settings
@@ -173,3 +173,57 @@ async def list_sample_videos():
             "has_vietsub": os.path.exists(os.path.splitext(fpath)[0] + ".vi.srt"),
         })
     return {"items": items, "count": len(items)}
+
+
+@router.post("/studio/overlay")
+async def upload_studio_overlay(
+    file: UploadFile = File(...),
+    kind: str = Form("logo"),
+    x: float = Form(0.78),
+    y: float = Form(0.04),
+    w: float = Form(0.18),
+):
+    """Upload a PNG/JPG logo or full-frame khung that gets burned into the next reup."""
+    import uuid
+
+    name = (file.filename or "overlay.png").lower()
+    ext = ".png"
+    for cand in (".png", ".jpg", ".jpeg", ".webp"):
+        if name.endswith(cand):
+            ext = cand
+            break
+    dest_dir = os.path.join(settings.CHANNELS_DIR, "studio")
+    os.makedirs(dest_dir, exist_ok=True)
+    ov_id = uuid.uuid4().hex[:12]
+    dest = os.path.join(dest_dir, f"{ov_id}{ext}")
+    data = await file.read()
+    if not data or len(data) < 32:
+        raise HTTPException(status_code=400, detail="File overlay trống")
+    with open(dest, "wb") as f:
+        f.write(data)
+    kind_n = "frame" if str(kind).lower() in ("frame", "khung", "border") else "logo"
+    if kind_n == "frame":
+        x, y, w = 0.0, 0.0, 1.0
+    return {
+        "id": ov_id,
+        "kind": kind_n,
+        "image_path": os.path.abspath(dest),
+        "url": f"/api/v1/studio/overlay/{ov_id}{ext}",
+        "x": x,
+        "y": y,
+        "w": w,
+        "opacity": 1.0,
+        "filename": file.filename,
+    }
+
+
+@router.get("/studio/overlay/{filename}")
+async def get_studio_overlay(filename: str):
+    from fastapi.responses import FileResponse
+
+    safe = os.path.basename(filename)
+    path = os.path.join(settings.CHANNELS_DIR, "studio", safe)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Overlay not found")
+    return FileResponse(path)
+

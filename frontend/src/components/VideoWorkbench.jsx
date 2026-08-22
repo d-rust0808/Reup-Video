@@ -43,6 +43,10 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     post_caption: '',
     post_tags: [],
     publish_status: 'READY',
+    frame_enabled: true,
+    frame_color: 'black',
+    frame_thickness: 16,
+    overlays: [],
     ...(saved || {}),
     };
   });
@@ -201,6 +205,10 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         post_caption: options.post_caption,
         post_tags: options.post_tags,
         publish_status: options.publish_status,
+        frame_enabled: options.frame_enabled !== false,
+        frame_color: options.frame_color || 'black',
+        frame_thickness: options.frame_thickness || 16,
+        overlays: options.overlays || [],
       },
     };
 
