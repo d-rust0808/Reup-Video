@@ -11,9 +11,9 @@ import subprocess
 import shutil
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
@@ -96,9 +96,13 @@ from app.api.router import api_router
 app.include_router(api_router, prefix="/api/v1")
 
 # Mount React frontend dist assets if present
-frontend_dist = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))
-if os.path.exists(frontend_dist):
-    assets_dir = os.path.join(frontend_dist, "assets")
+FRONTEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend"))
+FRONTEND_DIST = os.path.join(FRONTEND_ROOT, "dist")
+FRONTEND_PUBLIC = os.path.join(FRONTEND_ROOT, "public")
+VITE_ORIGIN = os.environ.get("VITE_ORIGIN", "http://127.0.0.1:8080")
+
+if os.path.exists(FRONTEND_DIST):
+    assets_dir = os.path.join(FRONTEND_DIST, "assets")
     if os.path.exists(assets_dir):
         app.mount("/assets", StaticFiles(directory=assets_dir), name="react-assets")
 
@@ -117,7 +121,78 @@ async def health_check():
 @app.get("/favicon.svg")
 @app.get("/favicon.ico")
 async def favicon():
+    pub = os.path.join(FRONTEND_PUBLIC, "favicon.svg")
+    if os.path.isfile(pub):
+        return FileResponse(pub)
     return Response(status_code=204)
+
+
+def _frontend_file(rel_path: str):
+    rel = (rel_path or "index.html").lstrip("/")
+    if not rel or rel.endswith("/"):
+        rel = (rel + "index.html") if rel else "index.html"
+    for root in (FRONTEND_DIST, FRONTEND_PUBLIC):
+        cand = os.path.normpath(os.path.join(root, rel))
+        if cand.startswith(root) and os.path.isfile(cand):
+            return cand
+    index = os.path.join(FRONTEND_DIST, "index.html")
+    if os.path.isfile(index) and "." not in os.path.basename(rel):
+        return index
+    return None
+
+
+async def _proxy_vite(path: str, request: Request) -> Response | None:
+    """Serve the live Vite UI so preview on :8000 is the real Studio, not a stub."""
+    import httpx
+
+    url = f"{VITE_ORIGIN}/{path.lstrip('/')}"
+    try:
+        async with httpx.AsyncClient(timeout=4.0, follow_redirects=True) as client:
+            r = await client.request(
+                request.method,
+                url,
+                params=list(request.query_params.multi_items()),
+                headers={"accept": request.headers.get("accept", "*/*")},
+            )
+        if r.status_code >= 500:
+            return None
+        skip = {"content-encoding", "transfer-encoding", "content-length", "connection"}
+        headers = {k: v for k, v in r.headers.items() if k.lower() not in skip}
+        return Response(
+            content=r.content,
+            status_code=r.status_code,
+            headers=headers,
+            media_type=r.headers.get("content-type"),
+        )
+    except Exception as e:
+        logger.debug(f"Vite proxy {path}: {e}")
+        return None
+
+
+async def _serve_frontend(path: str, request: Request) -> Response:
+    proxied = await _proxy_vite(path, request)
+    if proxied is not None:
+        return proxied
+    local = _frontend_file(path)
+    if local:
+        return FileResponse(local)
+    html = """<!DOCTYPE html>
+<html lang="vi"><head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Reup Studio AI</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+       font-family:Inter,system-ui,sans-serif;background:#0f172a;color:#e2e8f0}
+  .card{max-width:420px;padding:32px;border-radius:20px;background:#1e293b;text-align:center}
+  h1{font-size:22px;margin:0 0 8px}
+  p{color:#94a3b8;line-height:1.5}
+</style>
+</head><body><div class="card">
+<h1>Reup Studio AI</h1>
+<p>Giao diện đang khởi động. Tải lại trang sau vài giây.</p>
+</div></body></html>"""
+    return HTMLResponse(content=html, status_code=200)
 
 
 # Real-Time WebSocket Pipeline Progress Endpoint
@@ -141,37 +216,18 @@ async def websocket_jobs_endpoint(websocket: WebSocket):
         logger.warning(f"WebSocket client disconnected with exception: {e}")
         ws_mgr.disconnect(websocket)
 
-# Root Dashboard Route (SPA Entrypoint)
+# Root + SPA / Vite gateway (live preview often hits :8000, not :8080)
 @app.get("/", response_class=HTMLResponse)
-async def read_dashboard():
-    # 1. Prefer compiled React dist/index.html
-    react_index = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist", "index.html"))
-    if os.path.exists(react_index):
-        with open(react_index, "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read(), status_code=200)
+async def read_dashboard(request: Request):
+    return await _serve_frontend("", request)
 
-    template_path = os.path.join(os.path.dirname(__file__), "templates", "index.html")
-    if os.path.exists(template_path):
-        with open(template_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read(), status_code=200)
 
-    # Fallback inline SPA shell if template file is not present yet
-    html_shell = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <title>Video Downloader, Watermark Remover & Reup Processing System</title>
-        <link rel="stylesheet" href="/static/css/style.css">
-    </head>
-    <body>
-        <div id="app">
-            <header><h1>Reup Video Dashboard</h1></header>
-        </div>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_shell, status_code=200)
+@app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+async def frontend_gateway(full_path: str, request: Request):
+    blocked = ("api/", "api", "docs", "redoc", "openapi.json", "health", "ws/", "ws")
+    if full_path.startswith("api") or full_path in blocked or full_path.startswith("ws"):
+        raise HTTPException(status_code=404, detail="Not Found")
+    return await _serve_frontend(full_path, request)
 
 
 if __name__ == "__main__":
