@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Download,
   CheckCircle2,
@@ -14,7 +14,7 @@ import {
   UserCheck,
   Search,
 } from 'lucide-react';
-import { extractUrls, uploadVideoFile } from '../services/api';
+import { extractUrls, uploadVideoFile, fetchSampleVideos, getStreamUrl } from '../services/api';
 
 export function UrlExtractor({ onMediaExtracted, onSelectForWorkbench }) {
   const [mode, setMode] = useState('video'); // 'video' | 'channel'
@@ -25,8 +25,15 @@ export function UrlExtractor({ onMediaExtracted, onSelectForWorkbench }) {
   const [extractedList, setExtractedList] = useState([]);
   const [pasteTip, setPasteTip] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [samples, setSamples] = useState([]);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    fetchSampleVideos()
+      .then((data) => setSamples(data.items || []))
+      .catch(() => setSamples([]));
+  }, []);
 
   // Focus input and show in-app paste shortcut tip WITHOUT calling restricted navigator.clipboard.readText()
   const handleFocusForPaste = () => {
@@ -361,6 +368,47 @@ export function UrlExtractor({ onMediaExtracted, onSelectForWorkbench }) {
           </div>
         </form>
       </div>
+
+      {samples.length > 0 && (
+        <div className="clean-panel rounded-3xl p-6 sm:p-8 space-y-4">
+          <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+            <h4 className="text-xs font-black text-slate-500 uppercase tracking-wider">
+              Video mẫu — bấm để mở Studio & reup ngay
+            </h4>
+            <span className="text-xs font-semibold text-slate-500">{samples.length} clip sẵn sàng</span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {samples.map((item) => (
+              <div key={item.video_id} className="clean-card p-3 rounded-2xl border border-slate-200 space-y-3">
+                <div className="rounded-xl overflow-hidden bg-slate-950 aspect-video">
+                  <video
+                    src={getStreamUrl(item.video_id)}
+                    muted
+                    playsInline
+                    preload="metadata"
+                    controls
+                    className="w-full h-full object-contain"
+                  />
+                </div>
+                <div className="px-1 space-y-1">
+                  <h5 className="text-sm font-bold text-slate-900 line-clamp-2">{item.title}</h5>
+                  <p className="text-[11px] text-slate-500 font-medium">
+                    {(item.file_size / (1024 * 1024)).toFixed(2)} MB · {item.platform}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onSelectForWorkbench(item)}
+                  className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-4 py-2.5 rounded-xl transition shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <span>Mở Trong Studio</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Extracted Cards Results (Only displays when multiple videos are extracted from a channel) */}
       {extractedList.length > 1 && (

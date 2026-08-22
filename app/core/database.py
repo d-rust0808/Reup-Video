@@ -82,6 +82,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
                 tags TEXT NOT NULL DEFAULT '[]',
                 description TEXT NOT NULL DEFAULT '',
                 color TEXT NOT NULL DEFAULT 'blue',
+                overlays TEXT NOT NULL DEFAULT '[]',
                 status TEXT NOT NULL DEFAULT 'ACTIVE',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -89,6 +90,10 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_channels_platform ON channels(platform)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_channels_status ON channels(status)")
+        try:
+            conn.execute("ALTER TABLE channels ADD COLUMN overlays TEXT NOT NULL DEFAULT '[]'")
+        except Exception:
+            pass
 
         # Channel Videos Table (Content Management)
         conn.execute("""

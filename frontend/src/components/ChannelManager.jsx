@@ -14,6 +14,7 @@ import {
 import { ConfirmModal } from './ConfirmModal';
 import { Toast } from './Toast';
 import { VideoModal } from './VideoModal';
+import { ChannelOverlayEditor } from './ChannelOverlayEditor';
 import {
   Tv2,
   Plus,
@@ -515,6 +516,11 @@ export function ChannelManager() {
                         </span>
                         <div className="flex items-center gap-2">
                           <span className="text-slate-600">{chan.video_count || 0} video</span>
+                          {(chan.overlays || []).length > 0 && (
+                            <span className="text-indigo-600 bg-indigo-50 px-1.5 py-0.2 rounded font-bold">
+                              {chan.overlays.length} khung/logo
+                            </span>
+                          )}
                           {chan.ready_count > 0 && (
                             <span className="text-emerald-600 bg-emerald-50 px-1.5 py-0.2 rounded font-bold">
                               {chan.ready_count} sẵn sàng
@@ -568,6 +574,23 @@ export function ChannelManager() {
                   </button>
                 </div>
               </div>
+
+              <ChannelOverlayEditor
+                channel={activeChannel}
+                previewSrc={
+                  videos[0]?.job_id
+                    ? getMediaUrl(`/api/v1/stream/${videos[0].job_id}`)
+                    : null
+                }
+                onOverlaysChange={(overlays) => {
+                  setChannels((prev) =>
+                    prev.map((c) =>
+                      c.channel_id === activeChannel.channel_id ? { ...c, overlays } : c
+                    )
+                  );
+                }}
+                onToast={setToast}
+              />
 
               {/* Channel Tags & Search / Filter Controls */}
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">

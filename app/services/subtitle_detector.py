@@ -1,11 +1,8 @@
 """
 Subtitle & Text Region Auto-Detector Engine.
 =============================================
-Uses OpenCV morphological analysis, edge gradients, dynamic color contrast,
-and contour clustering to locate hardcoded subtitles and text overlays in video frames.
-Supports dynamic frame-by-frame and timestamp-segmented subtitle region mask generation.
-
-Target Path: app/services/subtitle_detector.py
+Uses OpenCV morphological analysis, MSER, edge gradients, and (on macOS)
+Apple Vision to locate hardcoded subtitles, Chinese overlay text, and watermarks.
 """
 
 import os
@@ -28,6 +25,7 @@ NSData: Any = None
 VNImageRequestHandler: Any = None
 VNRecognizeTextRequest: Any = None
 VNRequestTextRecognitionLevelAccurate: Any = 0
+HAS_APPLE_VISION = False
 
 try:
     import Vision as _Vision  # type: ignore[import-untyped, import-not-found]
@@ -47,6 +45,62 @@ except Exception:
     Vision = None
     NSData = None
     VNImageRequestHandler = None
+    VNRecognizeTextRequest = None
+    HAS_APPLE_VISION = False
+
+
+def _clamp_box(x: int, y: int, w: int, h: int, fw: int, fh: int, padding: int = 0) -> Tuple[int, int, int, int]:
+    x1 = max(0, x - padding)
+    y1 = max(0, y - padding)
+    x2 = min(fw, x + w + padding)
+    y2 = min(fh, y + h + padding)
+    return x1, y1, max(1, x2 - x1), max(1, y2 - y1)
+
+
+def _merge_boxes(boxes: List[Tuple[int, int, int, int]], gap: int = 12) -> List[Tuple[int, int, int, int]]:
+    """Merge overlapping / nearby boxes into text-line regions."""
+    if not boxes:
+        return []
+    items = sorted(boxes, key=lambda b: (b[1], b[0]))
+    merged: List[List[int]] = []
+    for x, y, w, h in items:
+        x2, y2 = x + w, y + h
+        attached = False
+        for m in merged:
+            mx, my, mx2, my2 = m
+            if x <= mx2 + gap and x2 >= mx - gap and y <= my2 + gap and y2 >= my - gap:
+                m[0] = min(mx, x)
+                m[1] = min(my, y)
+                m[2] = max(mx2, x2)
+                m[3] = max(my2, y2)
+                attached = True
+                break
+        if not attached:
+            merged.append([x, y, x2, y2])
+    return [(a, b, c - a, d - b) for a, b, c, d in merged]
+
+
+def detect_faces_haar(frame: np.ndarray, padding: int = 15) -> List[Tuple[int, int, int, int]]:
+    """OpenCV Haar cascade face detector (cross-platform fallback)."""
+    if not HAS_OPENCV or frame is None or frame.size == 0:
+        return []
+    try:
+        cascade_path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
+        if not os.path.exists(cascade_path):
+            return []
+        detector = cv2.CascadeClassifier(cascade_path)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape[:2]
+        faces = detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(24, 24))
+        out = []
+        for fx, fy, fw, fh in faces:
+            out.append(_clamp_box(int(fx), int(fy), int(fw), int(fh), w, h, padding))
+        return out
+    except Exception as e:
+        logger.debug(f"Haar face detection skipped: {e}")
+        return []
+
+
 def detect_faces_neural(frame: np.ndarray, padding: int = 15) -> List[Tuple[int, int, int, int]]:
     """
     Hardware-accelerated Neural Face Detector using Apple Vision Framework.
@@ -71,23 +125,27 @@ def detect_faces_neural(frame: np.ndarray, padding: int = 15) -> List[Tuple[int,
         handler.performRequests_error_([req], None)
 
         faces = []
-        if req.results():
-            for face in req.results():
+        results = req.results() if hasattr(req, "results") else None
+        if results:
+            for face in results:
                 bbox = face.boundingBox()
                 fx = int(bbox.origin.x * w)
                 fw = int(bbox.size.width * w)
                 fh = int(bbox.size.height * h)
                 fy = int((1.0 - bbox.origin.y - bbox.size.height) * h)
-
-                x1 = max(0, fx - padding)
-                y1 = max(0, fy - padding)
-                x2 = min(w, fx + fw + padding)
-                y2 = min(h, fy + fh + padding)
-                faces.append((x1, y1, x2 - x1, y2 - y1))
+                faces.append(_clamp_box(fx, fy, fw, fh, w, h, padding))
         return faces
     except Exception as e:
         logger.debug(f"Apple Vision face detection exception: {e}")
         return []
+
+
+def detect_faces(frame: np.ndarray, padding: int = 15) -> List[Tuple[int, int, int, int]]:
+    """Unified face detector: Apple Vision first, Haar cascade fallback."""
+    faces = detect_faces_neural(frame, padding=padding)
+    if faces:
+        return faces
+    return detect_faces_haar(frame, padding=padding)
 
 
 def detect_text_boxes_neural(
@@ -97,9 +155,9 @@ def detect_text_boxes_neural(
 ) -> List[Tuple[int, int, int, int]]:
     """
     Hardware-accelerated Neural Text & Subtitle Region Detector.
-    Uses Apple Vision Framework (Apple Neural Engine) on macOS to detect all text, Chinese characters,
-    brackets, labels, and subtitles with pixel-level bounding boxes.
-    Strictly filters out non-text imagery to prevent false-positive blurring on scenery or objects.
+    Uses Apple Vision Framework on macOS. Collects results both from the
+    completion handler AND req.results() after performRequests (PyObjC
+    completion handlers are not always invoked synchronously).
     """
     if (
         not HAS_APPLE_VISION
@@ -112,54 +170,177 @@ def detect_text_boxes_neural(
         return []
 
     h, w = frame.shape[:2]
+    boxes: List[Tuple[int, int, int, int]] = []
+
+    def _collect_obs(obs) -> None:
+        try:
+            cands = obs.topCandidates_(1)
+            if not cands:
+                return
+            cand = cands[0]
+            text_str = cand.string() if hasattr(cand, "string") else ""
+            conf = cand.confidence() if hasattr(cand, "confidence") else 1.0
+            if not text_str or not str(text_str).strip() or conf < min_confidence:
+                return
+            bbox = obs.boundingBox()
+            bx = int(bbox.origin.x * w)
+            bw = int(bbox.size.width * w)
+            bh = int(bbox.size.height * h)
+            by = int((1.0 - bbox.origin.y - bbox.size.height) * h)
+            if bh > int(h * 0.40) or bw > int(w * 0.98):
+                return
+            boxes.append(_clamp_box(bx, by, bw, bh, w, h, padding))
+        except Exception:
+            return
+
     try:
         _, buf = cv2.imencode('.png', frame)
         ns_data = NSData.dataWithBytes_length_(buf.tobytes(), len(buf))
         handler = VNImageRequestHandler.alloc().initWithData_options_(ns_data, {})
 
-        boxes = []
-
         def on_complete(req, err):
-            if not err and req.results():
-                for obs in req.results():
-                    cands = obs.topCandidates_(1)
-                    if not cands:
-                        continue
-                    cand = cands[0]
-                    text_str = cand.string()
-                    conf = cand.confidence() if hasattr(cand, "confidence") else 1.0
-
-                    # Strictly ignore non-text/empty patterns or low-confidence noise
-                    if not text_str or not text_str.strip() or conf < min_confidence:
-                        continue
-
-                    bbox = obs.boundingBox()
-                    bx = int(bbox.origin.x * w)
-                    bw = int(bbox.size.width * w)
-                    bh = int(bbox.size.height * h)
-                    by = int((1.0 - bbox.origin.y - bbox.size.height) * h)
-
-                    # Discard oversized background regions (anything taller than 35% frame height is scenery/person)
-                    if bh > int(h * 0.35) or bw > int(w * 0.98):
-                        continue
-
-                    x1 = max(0, bx - padding)
-                    y1 = max(0, by - padding)
-                    x2 = min(w, bx + bw + padding)
-                    y2 = min(h, by + bh + padding)
-                    boxes.append((x1, y1, x2 - x1, y2 - y1))
+            if err or not req.results():
+                return
+            for obs in req.results():
+                _collect_obs(obs)
 
         req = VNRecognizeTextRequest.alloc().initWithCompletionHandler_(on_complete)
-        req.setRecognitionLanguages_(['zh-Hans', 'zh-Hant', 'en-US', 'vi-VN'])
-        req.setRecognitionLevel_(VNRequestTextRecognitionLevelAccurate)
-        req.setUsesLanguageCorrection_(False)
+        try:
+            req.setRecognitionLanguages_(['zh-Hans', 'zh-Hant', 'en-US'])
+        except Exception:
+            try:
+                req.setRecognitionLanguages_(['zh-Hans', 'en-US'])
+            except Exception:
+                pass
+        try:
+            req.setRecognitionLevel_(VNRequestTextRecognitionLevelAccurate)
+            req.setUsesLanguageCorrection_(False)
+        except Exception:
+            pass
         handler.performRequests_error_([req], None)
-        return boxes
+
+        # Always drain req.results() — completion handler is racy in PyObjC
+        results = req.results() if hasattr(req, "results") else None
+        if results:
+            for obs in results:
+                _collect_obs(obs)
+
+        return _merge_boxes(boxes, gap=8)
     except Exception as e:
         logger.warning(f"Apple Vision text detection exception: {e}")
         return []
 
 
+def detect_text_boxes_opencv(
+    frame: np.ndarray,
+    padding: int = 6
+) -> List[Tuple[int, int, int, int]]:
+    """
+    Cross-platform CJK/Latin text detector.
+    Combines MSER character blobs with morphological subtitle-line extraction.
+    Tuned for Douyin/Kuaishou hardcoded Chinese subtitles and corner watermarks.
+    """
+    if not HAS_OPENCV or frame is None or frame.size == 0:
+        return []
+
+    h, w = frame.shape[:2]
+    if h < 16 or w < 16:
+        return []
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    try:
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
+    except Exception:
+        pass
+
+    candidate: List[Tuple[int, int, int, int]] = []
+    min_area = max(24, int(w * h * 0.00012))
+    max_area = int(w * h * 0.18)
+    max_box_h = int(h * 0.32)
+    max_box_w = int(w * 0.95)
+
+    # --- MSER character-like regions (works well on CJK strokes) ---
+    try:
+        mser = cv2.MSER_create()
+        try:
+            mser.setDelta(5)
+            mser.setMinArea(max(20, min_area // 4))
+            mser.setMaxArea(max_area)
+        except Exception:
+            pass
+        regions, _ = mser.detectRegions(gray)
+        for pts in regions:
+            x, y, bw, bh = cv2.boundingRect(pts.reshape(-1, 1, 2))
+            area = bw * bh
+            if area < min_area or area > max_area:
+                continue
+            if bh < 8 or bw < 8 or bh > max_box_h or bw > max_box_w:
+                continue
+            ar = bw / float(bh)
+            if ar < 0.15 or ar > 18.0:
+                continue
+            candidate.append((x, y, bw, bh))
+    except Exception as e:
+        logger.debug(f"MSER text detect skipped: {e}")
+
+    # --- Morphological subtitle lines (bottom band + full-frame) ---
+    try:
+        kernel_grad = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 3))
+        grad = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, kernel_grad)
+        _, th = cv2.threshold(grad, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 5))
+        closed = cv2.morphologyEx(th, cv2.MORPH_CLOSE, close_k)
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            x, y, bw, bh = cv2.boundingRect(cnt)
+            area = bw * bh
+            if area < min_area or bh < 8 or bh > max_box_h or bw < int(w * 0.06):
+                continue
+            ar = bw / float(bh) if bh else 0
+            if ar < 0.8 or ar > 35.0:
+                continue
+            candidate.append((x, y, bw, bh))
+    except Exception as e:
+        logger.debug(f"Morph text detect skipped: {e}")
+
+    # --- High-contrast white/yellow hardsub (typical Chinese burn-in) ---
+    try:
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        # White / light-gray text
+        white = cv2.inRange(hsv, (0, 0, 180), (180, 60, 255))
+        # Yellow hardsub
+        yellow = cv2.inRange(hsv, (18, 80, 160), (40, 255, 255))
+        hi = cv2.bitwise_or(white, yellow)
+        hi = cv2.morphologyEx(hi, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3)))
+        contours, _ = cv2.findContours(hi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            x, y, bw, bh = cv2.boundingRect(cnt)
+            if bw * bh < min_area or bh < 8 or bh > max_box_h:
+                continue
+            if bw < 12:
+                continue
+            candidate.append((x, y, bw, bh))
+    except Exception:
+        pass
+
+    padded = [_clamp_box(x, y, bw, bh, w, h, padding) for x, y, bw, bh in candidate]
+    return _merge_boxes(padded, gap=10)
+
+
+def detect_text_boxes(
+    frame: np.ndarray,
+    min_confidence: float = 0.25,
+    padding: int = 6
+) -> List[Tuple[int, int, int, int]]:
+    """
+    Unified text detector. Apple Vision first; OpenCV MSER/morph fallback so
+    Chinese overlay text is still found on Linux / when Vision misses stylized fonts.
+    """
+    boxes = detect_text_boxes_neural(frame, min_confidence=min_confidence, padding=padding)
+    if boxes:
+        return boxes
+    return detect_text_boxes_opencv(frame, padding=padding)
 
 
 class SubtitleDetectorError(Exception):
@@ -204,14 +385,10 @@ class SubtitleDetector:
         """
         gray = cv2.cvtColor(crop_zone, cv2.COLOR_BGR2GRAY)
 
-        # 1. Morphological Gradient for text edge extraction
         kernel_grad = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
         grad = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, kernel_grad)
-
-        # 2. Otsu thresholding on gradient
         _, thresh_grad = cv2.threshold(grad, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        # 3. Dynamic color contrast across BGR channels
         c_max = np.max(crop_zone, axis=2)
         c_min = np.min(crop_zone, axis=2)
         c_diff = (c_max - c_min).astype(np.uint8)
@@ -220,26 +397,18 @@ class SubtitleDetector:
         else:
             thresh_color = np.zeros_like(gray)
 
-        # Combine edge & color features
         combined_features = cv2.bitwise_or(thresh_grad, thresh_color)
-
-        # 4. Horizontal morphological closing to connect adjacent characters into text lines
         close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 5))
         closed = cv2.morphologyEx(combined_features, cv2.MORPH_CLOSE, close_kernel)
-
-        # Find contours
         contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         candidate_boxes = []
         for cnt in contours:
             x, y, w, h_cnt = cv2.boundingRect(cnt)
             aspect_ratio = w / float(h_cnt) if h_cnt > 0 else 0
-
-            # Filter candidates based on typical text line aspect ratio & size
             if w > frame_width * 0.05 and h_cnt >= 4 and h_cnt <= crop_h * 0.7 and (aspect_ratio >= 0.8 and aspect_ratio <= 35.0):
                 real_y = min_y_offset + y
                 candidate_boxes.append((x, real_y, w, h_cnt))
-
         return candidate_boxes
 
     def detect_frame_subtitle_roi(
@@ -247,61 +416,46 @@ class SubtitleDetector:
         frame: np.ndarray,
         padding: int = 8
     ) -> Optional[Tuple[int, int, int, int]]:
-        """
-        Detects subtitle bounding box (x, y, w, h) for a single frame.
-
-        Args:
-            frame: Input BGR numpy image array.
-            padding: Additional pixel padding around detected bounding box.
-
-        Returns:
-            Tuple of (x, y, w, h) in pixels, or None if no subtitle detected.
-        """
+        """Detects subtitle bounding box (x, y, w, h) for a single frame."""
         if not HAS_OPENCV or frame is None or frame.size == 0:
             return None
 
         height, width = frame.shape[:2]
+        neural = detect_text_boxes(frame, padding=padding)
+        if neural:
+            # Prefer boxes in the configured search band (usually bottom subtitles)
+            min_y, max_y = self._get_search_bounds(height)
+            band = [b for b in neural if (b[1] + b[3] / 2) >= min_y and (b[1] + b[3] / 2) <= max_y]
+            use = band or neural
+            fx1 = min(b[0] for b in use)
+            fy1 = min(b[1] for b in use)
+            fx2 = max(b[0] + b[2] for b in use)
+            fy2 = max(b[1] + b[3] for b in use)
+            return _clamp_box(fx1, fy1, fx2 - fx1, fy2 - fy1, width, height, 0)
+
         min_y, max_y = self._get_search_bounds(height)
         crop_zone = frame[min_y:max_y, :]
-
         boxes = self._detect_contours_in_crop(crop_zone, min_y, width, max_y - min_y)
         if not boxes:
             return None
 
-        # Merge boxes for this frame only
         fx1 = min(b[0] for b in boxes)
         fy1 = min(b[1] for b in boxes)
         fx2 = max(b[0] + b[2] for b in boxes)
         fy2 = max(b[1] + b[3] for b in boxes)
-
-        pad_x = max(0, fx1 - padding)
-        pad_y = max(0, fy1 - padding)
-        pad_w = min(width - pad_x, (fx2 - fx1) + 2 * padding)
-        pad_h = min(height - pad_y, (fy2 - fy1) + 2 * padding)
-
-        return (pad_x, pad_y, pad_w, pad_h)
+        return _clamp_box(fx1, fy1, fx2 - fx1, fy2 - fy1, width, height, padding)
 
     def generate_frame_mask(
         self,
         frame: np.ndarray,
         padding: int = 8
     ) -> np.ndarray:
-        """
-        Generates a dynamic 2D binary uint8 mask (0 or 255) for subtitles in a single frame.
-
-        Args:
-            frame: Input BGR numpy image array.
-            padding: Additional pixel padding around detected bounding box.
-
-        Returns:
-            2D uint8 numpy array of shape (height, width).
-        """
+        """Generates a dynamic 2D binary uint8 mask (0 or 255) for subtitles in a single frame."""
         if not HAS_OPENCV or frame is None or frame.size == 0:
             return np.zeros((0, 0), dtype=np.uint8)
 
         height, width = frame.shape[:2]
         mask = np.zeros((height, width), dtype=np.uint8)
-
         roi = self.detect_frame_subtitle_roi(frame, padding=padding)
         if roi is None:
             return mask
@@ -311,15 +465,14 @@ class SubtitleDetector:
         if roi_slice.size == 0:
             return mask
 
-        # Extract character stroke detail inside ROI slice
         gray_slice = cv2.cvtColor(roi_slice, cv2.COLOR_BGR2GRAY)
         kernel_grad = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         grad = cv2.morphologyEx(gray_slice, cv2.MORPH_GRADIENT, kernel_grad)
         _, thresh_grad = cv2.threshold(grad, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         stroke_mask = cv2.dilate(thresh_grad, kernel_dilate, iterations=1)
-
+        close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        stroke_mask = cv2.morphologyEx(stroke_mask, cv2.MORPH_CLOSE, close_k)
         mask[y:y+h, x:x+w] = stroke_mask
         return mask
 
@@ -330,14 +483,6 @@ class SubtitleDetector:
     ) -> Tuple[int, int, int, int]:
         """
         Detects consolidated bounding box (x, y, w, h) of hardcoded subtitles across sampled video frames.
-        Eliminates the global static union box bug by using statistical consensus clustering across frames.
-
-        Args:
-            video_path: Path to input video file.
-            padding: Additional pixel padding added around detected bounding box.
-
-        Returns:
-            Tuple of (x, y, w, h) in pixels.
         """
         if not HAS_OPENCV:
             raise SubtitleDetectorError("OpenCV library (cv2) is not installed.")
@@ -370,7 +515,6 @@ class SubtitleDetector:
             ret, frame = cap.read()
             if not ret or frame is None:
                 continue
-
             roi = self.detect_frame_subtitle_roi(frame, padding=0)
             if roi is not None:
                 frame_rois.append(roi)
@@ -381,27 +525,21 @@ class SubtitleDetector:
             logger.info("No subtitle text bounding box detected across sampled frames.")
             return (0, 0, 0, 0)
 
-        # Eliminate global static union box bug:
-        # Filter outlier frame ROIs whose horizontal center deviates significantly from median subtitle center
         centers_x = [r[0] + r[2] / 2.0 for r in frame_rois]
         median_center_x = float(np.median(centers_x))
         max_allowed_dev = width * 0.35
-
         filtered_rois = [
             r for r in frame_rois
             if abs((r[0] + r[2] / 2.0) - median_center_x) <= max_allowed_dev
         ]
-
         if not filtered_rois:
             filtered_rois = frame_rois
 
-        # Use 10th and 90th percentiles for X boundaries to avoid single outlier expansion
         min_x = int(np.percentile([r[0] for r in filtered_rois], 10))
         max_x = int(np.percentile([r[0] + r[2] for r in filtered_rois], 90))
         min_y = int(min(r[1] for r in filtered_rois))
         max_y = int(max(r[1] + r[3] for r in filtered_rois))
 
-        # Ensure valid positive dimensions
         if max_x <= min_x:
             min_x = min(r[0] for r in filtered_rois)
             max_x = max(r[0] + r[2] for r in filtered_rois)
@@ -409,143 +547,18 @@ class SubtitleDetector:
             min_y = min(r[1] for r in filtered_rois)
             max_y = max(r[1] + r[3] for r in filtered_rois)
 
-        # Add safety padding
         pad_x = max(0, min_x - padding)
         pad_y = max(0, min_y - padding)
         pad_w = min(width - pad_x, (max_x - min_x) + 2 * padding)
         pad_h = min(height - pad_y, (max_y - min_y) + 2 * padding)
 
-        # Safety cap: Subtitle ROI must never exceed 30% of video height
         if pad_h > int(height * 0.30):
-            pad_h = int(height * 0.22)
-            pad_y = max(0, height - pad_h - padding)
+            pad_h = int(height * 0.30)
+            pad_y = min(pad_y, height - pad_h)
 
-        merged_roi = (pad_x, pad_y, pad_w, pad_h)
-        logger.info(f"Auto-detected subtitle ROI: {merged_roi} (video size: {width}x{height})")
-        return merged_roi
-
-    def detect_timestamp_segments(
-        self,
-        video_path: str,
-        padding: int = 8,
-        min_duration_sec: float = 0.2
-    ) -> List[Dict[str, Any]]:
-        """
-        Scans video and detects timestamp segments where subtitles appear.
-
-        Returns:
-            List of dictionaries containing segment details:
-            [{"start_sec": float, "end_sec": float, "start_frame": int, "end_frame": int, "roi": (x, y, w, h)}]
-        """
-        if not HAS_OPENCV or not os.path.exists(video_path):
-            return []
-
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            return []
-
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps <= 0 or np.isnan(fps):
-            fps = 30.0
-
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total_frames <= 0:
-            total_frames = 100
-
-        segments: List[Dict[str, Any]] = []
-        current_segment: Optional[Dict[str, Any]] = None
-
-        frame_idx = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                break
-
-            roi = self.detect_frame_subtitle_roi(frame, padding=padding)
-            if roi is not None:
-                if current_segment is None:
-                    current_segment = {
-                        "start_frame": frame_idx,
-                        "end_frame": frame_idx,
-                        "start_sec": round(frame_idx / fps, 3),
-                        "end_sec": round((frame_idx + 1) / fps, 3),
-                        "rois": [roi]
-                    }
-                else:
-                    current_segment["end_frame"] = frame_idx
-                    current_segment["end_sec"] = round((frame_idx + 1) / fps, 3)
-                    current_segment["rois"].append(roi)
-            else:
-                if current_segment is not None:
-                    duration = current_segment["end_sec"] - current_segment["start_sec"]
-                    if duration >= min_duration_sec:
-                        # Consolidate ROI for this segment
-                        s_rois = current_segment["rois"]
-                        s_x = int(min(r[0] for r in s_rois))
-                        s_y = int(min(r[1] for r in s_rois))
-                        s_w = int(max(r[0] + r[2] for r in s_rois) - s_x)
-                        s_h = int(max(r[1] + r[3] for r in s_rois) - s_y)
-                        current_segment["roi"] = (s_x, s_y, s_w, s_h)
-                        del current_segment["rois"]
-                        segments.append(current_segment)
-                    current_segment = None
-
-            frame_idx += 1
-
-        if current_segment is not None:
-            duration = current_segment["end_sec"] - current_segment["start_sec"]
-            if duration >= min_duration_sec:
-                s_rois = current_segment["rois"]
-                s_x = int(min(r[0] for r in s_rois))
-                s_y = int(min(r[1] for r in s_rois))
-                s_w = int(max(r[0] + r[2] for r in s_rois) - s_x)
-                s_h = int(max(r[1] + r[3] for r in s_rois) - s_y)
-                current_segment["roi"] = (s_x, s_y, s_w, s_h)
-                del current_segment["rois"]
-                segments.append(current_segment)
-
-        cap.release()
-        return segments
+        return (pad_x, pad_y, pad_w, pad_h)
 
 
-def detect_subtitle_roi(
-    video_path: str,
-    sample_frames: int = 10,
-    position: str = "all",
-    padding: int = 8
-) -> Tuple[int, int, int, int]:
-    """Helper function to auto-detect video subtitle ROI."""
-    detector = SubtitleDetector(sample_frames=sample_frames, position=position)
-    return detector.detect_subtitle_roi(video_path=video_path, padding=padding)
-
-
-def detect_frame_subtitle_roi(
-    frame: np.ndarray,
-    position: str = "all",
-    padding: int = 8
-) -> Optional[Tuple[int, int, int, int]]:
-    """Helper function to detect subtitle ROI for a single frame."""
-    detector = SubtitleDetector(position=position)
-    return detector.detect_frame_subtitle_roi(frame, padding=padding)
-
-
-def generate_frame_mask(
-    frame: np.ndarray,
-    position: str = "all",
-    padding: int = 8
-) -> np.ndarray:
-    """Helper function to generate a 2D subtitle mask for a single frame."""
-    detector = SubtitleDetector(position=position)
-    return detector.generate_frame_mask(frame, padding=padding)
-
-
-def detect_timestamp_segments(
-    video_path: str,
-    sample_frames: int = 10,
-    position: str = "bottom",
-    padding: int = 8,
-    min_duration_sec: float = 0.2
-) -> List[Dict[str, Any]]:
-    """Helper function to detect timestamp segments where subtitles appear in video."""
-    detector = SubtitleDetector(sample_frames=sample_frames, position=position)
-    return detector.detect_timestamp_segments(video_path=video_path, padding=padding, min_duration_sec=min_duration_sec)
+def detect_subtitle_roi(video_path: str, padding: int = 8) -> Tuple[int, int, int, int]:
+    """Module-level helper used by WatermarkService."""
+    return SubtitleDetector().detect_subtitle_roi(video_path, padding=padding)

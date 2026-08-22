@@ -7,7 +7,10 @@ export default defineConfig({
   base: './',
   plugins: [react(), tailwindcss()],
   server: {
-    port: 3000,
+    host: '0.0.0.0',
+    port: 8080,
+    strictPort: true,
+    allowedHosts: true,
     watch: {
       ignored: [
         '**/data/**',
@@ -31,4 +34,3 @@ export default defineConfig({
     },
   },
 })
-

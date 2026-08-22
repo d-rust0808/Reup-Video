@@ -21,62 +21,17 @@ from app.core.database import init_db
 from app.core.ws_manager import ws_manager
 from app.services.queue_manager import BatchQueueManager
 from app.scraper.manager import ScraperManager
+from app.services.sample_media import seed_sample_videos
 
 logger = logging.getLogger("app.main")
 
 
 def _seed_sample_media() -> None:
-    """Seeds initial sample MP4 media files if they do not exist or are corrupt/mock files."""
-    seed_ids = ["douyin_123", "kuaishou_456", "xiaohongshu_789"]
-    ffmpeg_bin = shutil.which("ffmpeg")
-    if not ffmpeg_bin:
-        for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]:
-            if os.path.exists(candidate) and os.access(candidate, os.X_OK):
-                ffmpeg_bin = candidate
-                break
-
-    for sid in seed_ids:
-        fpath = os.path.join(settings.RAW_INPUT_DIR, f"{sid}.mp4")
-        needs_seed = True
-        if os.path.exists(fpath):
-            try:
-                size = os.path.getsize(fpath)
-                if size > 10240:
-                    with open(fpath, "rb") as f:
-                        header = f.read(100)
-                        if b"END_OF_MP4_SAMPLE" not in header:
-                            needs_seed = False
-            except Exception:
-                needs_seed = True
-
-        if needs_seed:
-            if ffmpeg_bin:
-                try:
-                    cmd = [
-                        ffmpeg_bin, "-y",
-                        "-f", "lavfi", "-i", "testsrc=duration=5:size=1280x720:rate=30",
-                        "-f", "lavfi", "-i", "sine=frequency=1000:duration=5",
-                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast",
-                        "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
-                        fpath
-                    ]
-                    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                    if res.returncode == 0 and os.path.exists(fpath) and os.path.getsize(fpath) > 0:
-                        logger.info(f"Successfully seeded sample video with FFmpeg: {fpath}")
-                        continue
-                except Exception as e:
-                    logger.warning(f"FFmpeg synthetic seeding failed for {fpath}: {e}")
-
-            sample_mp4_bytes = (
-                b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp41isom"
-                b"\x00\x00\x00\x08free" + b"\x00" * 4096 + b"END_OF_MP4_SAMPLE"
-            )
-            try:
-                with open(fpath, "wb") as f:
-                    f.write(sample_mp4_bytes)
-                logger.warning(f"Fallback seeded mock sample media file {fpath}")
-            except Exception as e:
-                logger.warning(f"Could not seed sample media file {fpath}: {e}")
+    """Seeds playable Douyin-style sample MP4s (logo + Chinese hardsub + speech)."""
+    try:
+        seed_sample_videos(settings.RAW_INPUT_DIR, force=False)
+    except Exception as e:
+        logger.warning(f"Sample media seeding failed: {e}")
 
 
 # Call directory creation & sample media seeding on module import so files exist for test setups
@@ -132,6 +87,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Range", "Accept-Ranges", "Content-Length", "Content-Type"],
 )
 
 

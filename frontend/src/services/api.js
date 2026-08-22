@@ -38,6 +38,12 @@ export async function checkHealth() {
   return res.json();
 }
 
+export async function fetchSampleVideos() {
+  const res = await fetch(`${API_BASE}/samples`);
+  if (!res.ok) throw new Error('Failed to fetch sample videos');
+  return res.json();
+}
+
 export async function extractUrls(urls) {
   const res = await fetch(`${API_BASE}/extract`, {
     method: 'POST',
@@ -296,6 +302,49 @@ export async function removeVideoFromChannel(videoId) {
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Failed to remove video from channel');
+  }
+  return res.json();
+}
+
+export async function uploadChannelOverlay(channelId, file, meta = {}) {
+  const form = new FormData();
+  form.append('file', file);
+  form.append('kind', meta.kind || 'logo');
+  form.append('x', String(meta.x ?? 0.78));
+  form.append('y', String(meta.y ?? 0.04));
+  form.append('w', String(meta.w ?? 0.18));
+  form.append('opacity', String(meta.opacity ?? 1));
+  const res = await fetch(`${API_BASE}/channels/${channelId}/overlays`, {
+    method: 'POST',
+    body: form,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Tải logo/khung kênh thất bại');
+  }
+  return res.json();
+}
+
+export async function saveChannelOverlays(channelId, overlays) {
+  const res = await fetch(`${API_BASE}/channels/${channelId}/overlays`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ overlays: overlays || [] }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Lưu vị trí logo/khung thất bại');
+  }
+  return res.json();
+}
+
+export async function deleteChannelOverlay(channelId, overlayId) {
+  const res = await fetch(`${API_BASE}/channels/${channelId}/overlays/${overlayId}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Xóa logo/khung thất bại');
   }
   return res.json();
 }

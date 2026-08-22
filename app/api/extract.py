@@ -33,14 +33,13 @@ async def extract_urls(req: ExtractRequest, request: Request):
     for idx, raw_text in enumerate(req.urls):
         if not isinstance(raw_text, str) or not raw_text.strip():
             raise HTTPException(status_code=400, detail=f"Invalid URL format at index {idx}: empty string")
-        
+
         clean_url = BaseScraper.extract_url_from_text(raw_text)
         if not (clean_url.startswith("http://") or clean_url.startswith("https://")):
             raise HTTPException(status_code=400, detail=f"Invalid URL format: {raw_text}")
-        
+
         extracted_urls.append(clean_url)
 
-    # Use ScraperManager instance
     scraper_mgr = getattr(request.app.state, "scraper_manager", None)
     if scraper_mgr is None:
         scraper_mgr = ScraperManager(output_dir=settings.RAW_INPUT_DIR)
@@ -54,8 +53,6 @@ async def extract_urls(req: ExtractRequest, request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Convert to dict representation matching VideoMetadata contract
-    import shutil
     sample_mp4_bytes = (
         b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp41isom"
         b"\x00\x00\x00\x08free" + b"\x00" * 4096 + b"END_OF_MP4_SAMPLE"
@@ -79,11 +76,48 @@ async def extract_urls(req: ExtractRequest, request: Request):
                 pass
             meta.file_path = id_path
 
-        if hasattr(meta, "model_dump"):
-            items.append(meta.model_dump())
-        elif hasattr(meta, "dict"):
-            items.append(meta.dict())
-        else:
-            items.append(meta)
+        items.append({
+            "video_id": meta.video_id,
+            "platform": meta.platform,
+            "title": meta.title,
+            "author": getattr(meta, "author", None),
+            "file_path": meta.file_path,
+            "direct_stream_url": meta.direct_stream_url,
+            "cover_url": getattr(meta, "cover_url", None),
+            "duration": getattr(meta, "duration", None),
+        })
 
-    return {"items": items}
+    return {"items": items, "count": len(items)}
+
+
+@router.get("/samples")
+async def list_sample_videos():
+    """Returns seeded studio sample clips the UI can load in one click."""
+    from app.services.sample_media import SAMPLE_IDS, is_playable_mp4
+
+    items = []
+    titles = {
+        "douyin_123": "Mẫu Douyin — Đêm đầu ở chung (12s, sẵn vietsub)",
+        "kuaishou_456": "Mẫu Kuaishou — cùng clip",
+        "xiaohongshu_789": "Mẫu Xiaohongshu — cùng clip",
+    }
+    platforms = {
+        "douyin_123": "douyin",
+        "kuaishou_456": "kuaishou",
+        "xiaohongshu_789": "xiaohongshu",
+    }
+    for sid in SAMPLE_IDS:
+        fpath = os.path.join(settings.RAW_INPUT_DIR, f"{sid}.mp4")
+        if not is_playable_mp4(fpath):
+            continue
+        items.append({
+            "video_id": sid,
+            "platform": platforms.get(sid, "douyin"),
+            "title": titles.get(sid, sid),
+            "author": "Studio Sample",
+            "file_path": fpath,
+            "file_size": os.path.getsize(fpath),
+            "direct_stream_url": f"/api/v1/videos/stream/{sid}",
+            "has_vietsub": os.path.exists(os.path.splitext(fpath)[0] + ".vi.srt"),
+        })
+    return {"items": items, "count": len(items)}

@@ -72,6 +72,10 @@ class Settings(BaseModel):
         default_factory=lambda: os.getenv("PREVIEW_DIR", "data/previews"),
         description="Directory for generated preview frame images"
     )
+    CHANNELS_DIR: str = Field(
+        default_factory=lambda: os.getenv("CHANNELS_DIR", "data/channels"),
+        description="Directory for channel branding overlays (logos, frames)"
+    )
     DB_PATH: str = Field(
         default_factory=lambda: os.getenv("DB_PATH", os.getenv("DATABASE_PATH", "data/jobs.sqlite")),
         description="SQLite database file path"
@@ -124,6 +128,7 @@ class Settings(BaseModel):
             self.CACHE_DIR,
             self.TEMP_DIR,
             self.PREVIEW_DIR,
+            self.CHANNELS_DIR,
             os.path.dirname(os.path.abspath(self.DB_PATH))
         ]
         for d in dirs_to_create:

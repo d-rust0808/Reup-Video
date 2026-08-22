@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.core.ws_manager import ws_manager
-from app.models.job import WatermarkConfig, ReupConfig, WatermarkAlgorithm
+from app.models.job import WatermarkConfig, ReupConfig, WatermarkAlgorithm, OverlayItem
 from app.services.queue_manager import BatchQueueManager
 
 logger = logging.getLogger(__name__)
@@ -39,9 +39,16 @@ class ReupPayload(BaseModel):
     saturation: Optional[float] = 1.03
     modify_md5: Optional[bool] = True
     enable_vocal_mute: Optional[bool] = True
-    enable_tts: Optional[bool] = True
+    enable_tts: Optional[bool] = False
+    enable_lipsync: Optional[bool] = True
+    burn_subtitles: Optional[bool] = True
     tts_voice: Optional[str] = "vi-VN-HoaiMyNeural"
+    tts_engine: Optional[str] = "edge-tts"
     target_lang: Optional[str] = "vi"
+    source_lang: Optional[str] = "auto"
+    film_grain: Optional[float] = 3.0
+    srt_path: Optional[str] = None
+    tts_audio_path: Optional[str] = None
 
     # Channel distribution
     channel_id: Optional[str] = None
@@ -49,6 +56,7 @@ class ReupPayload(BaseModel):
     post_caption: Optional[str] = None
     post_tags: Optional[List[str]] = None
     publish_status: Optional[str] = "READY"
+    overlays: Optional[List[dict]] = None
 
 
 class ProcessJobRequest(BaseModel):
@@ -71,9 +79,16 @@ class ProcessJobRequest(BaseModel):
     saturation: Optional[float] = 1.03
     modify_md5: Optional[bool] = True
     enable_vocal_mute: Optional[bool] = True
-    enable_tts: Optional[bool] = True
+    enable_tts: Optional[bool] = False
+    enable_lipsync: Optional[bool] = True
+    burn_subtitles: Optional[bool] = True
     tts_voice: Optional[str] = "vi-VN-HoaiMyNeural"
+    tts_engine: Optional[str] = "edge-tts"
     target_lang: Optional[str] = "vi"
+    source_lang: Optional[str] = "auto"
+    film_grain: Optional[float] = 3.0
+    srt_path: Optional[str] = None
+    tts_audio_path: Optional[str] = None
 
     # Channel distribution
     channel_id: Optional[str] = None
@@ -81,11 +96,33 @@ class ProcessJobRequest(BaseModel):
     post_caption: Optional[str] = None
     post_tags: Optional[List[str]] = None
     publish_status: Optional[str] = "READY"
+    overlays: Optional[List[dict]] = None
 
     # Nested payload fields (from React frontend)
     watermark: Optional[WatermarkPayload] = None
     reup: Optional[ReupPayload] = None
 
+
+def _parse_overlays(req: "ProcessJobRequest") -> list:
+    raw = None
+    if req.reup and getattr(req.reup, "overlays", None):
+        raw = req.reup.overlays
+    elif getattr(req, "overlays", None):
+        raw = req.overlays
+    if not raw:
+        return []
+    items = []
+    for item in raw:
+        try:
+            if isinstance(item, OverlayItem):
+                items.append(item)
+            elif isinstance(item, dict) and (item.get("image_path") or item.get("path")):
+                if "image_path" not in item and "path" in item:
+                    item = {**item, "image_path": item["path"]}
+                items.append(OverlayItem(**{k: v for k, v in item.items() if k in OverlayItem.model_fields}))
+        except Exception:
+            continue
+    return items
 
 
 @router.post("/process/job", status_code=status.HTTP_201_CREATED)
@@ -140,7 +177,7 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
             input_file = cand2
 
     if not input_file:
-        input_file = f"data/input/raw/{req.media_id or 'sample'}.mp4"
+        input_file = os.path.join(settings.RAW_INPUT_DIR, f"{req.media_id or 'sample'}.mp4")
 
     job_id = f"job_{uuid.uuid4().hex[:8]}"
     out_file = os.path.join(settings.OUTPUT_DIR, f"{job_id}.mp4")
@@ -149,8 +186,9 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
     wm_method = req.watermark_method
     if req.watermark:
         wm_method = req.watermark.method or req.watermark.algorithm or wm_method
+    wm_method = (wm_method or "auto").lower()
 
-    wm_enabled = (scaled_w > 0 and scaled_h > 0) or (wm_method not in ("none", "off", "disabled"))
+    wm_enabled = wm_method not in ("none", "off", "disabled")
     wm_cfg = WatermarkConfig(
         enabled=wm_enabled,
         algorithm=wm_method or "auto",
@@ -181,8 +219,40 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
     reup_md5 = req.reup.modify_md5 if req.reup and req.reup.modify_md5 is not None else req.modify_md5
     reup_vocal_mute = req.reup.enable_vocal_mute if req.reup and req.reup.enable_vocal_mute is not None else req.enable_vocal_mute
     reup_tts = req.reup.enable_tts if req.reup and req.reup.enable_tts is not None else req.enable_tts
+    reup_lipsync = True
+    if req.reup and getattr(req.reup, "enable_lipsync", None) is not None:
+        reup_lipsync = req.reup.enable_lipsync
+    elif getattr(req, "enable_lipsync", None) is not None:
+        reup_lipsync = req.enable_lipsync
+    reup_burn = True
+    if req.reup and getattr(req.reup, "burn_subtitles", None) is not None:
+        reup_burn = req.reup.burn_subtitles
+    elif getattr(req, "burn_subtitles", None) is not None:
+        reup_burn = req.burn_subtitles
     reup_tts_voice = (req.reup.tts_voice if req.reup and req.reup.tts_voice else req.tts_voice) or "vi-VN-HoaiMyNeural"
+    reup_tts_engine = "edge-tts"
+    if req.reup and getattr(req.reup, "tts_engine", None):
+        reup_tts_engine = req.reup.tts_engine
+    elif getattr(req, "tts_engine", None):
+        reup_tts_engine = req.tts_engine
+    if (reup_tts_voice or "").lower().startswith("kokoro"):
+        reup_tts_engine = "kokoro"
+    elif (reup_tts_voice or "").lower().startswith("gtts"):
+        reup_tts_engine = "gtts"
     reup_target_lang = (req.reup.target_lang if req.reup and req.reup.target_lang else req.target_lang) or "vi"
+    platform = (req.platform or "auto").lower()
+    reup_source_lang = "auto"
+    if req.reup and getattr(req.reup, "source_lang", None):
+        reup_source_lang = req.reup.source_lang
+    elif getattr(req, "source_lang", None):
+        reup_source_lang = req.source_lang
+    if reup_source_lang in (None, "", "auto") and platform in ("douyin", "kuaishou", "xiaohongshu"):
+        reup_source_lang = "zh"
+    reup_grain = 3.0
+    if req.reup and getattr(req.reup, "film_grain", None) is not None:
+        reup_grain = req.reup.film_grain
+    elif getattr(req, "film_grain", None) is not None:
+        reup_grain = req.film_grain
 
     reup_chan_id = req.reup.channel_id if req.reup and req.reup.channel_id else req.channel_id
     reup_post_title = req.reup.post_title if req.reup and req.reup.post_title else req.post_title
@@ -201,14 +271,22 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         saturation=reup_sat if reup_sat is not None else 1.03,
         modify_md5=reup_md5 if reup_md5 is not None else True,
         enable_vocal_mute=reup_vocal_mute if reup_vocal_mute is not None else True,
-        enable_tts=reup_tts if reup_tts is not None else True,
+        enable_tts=reup_tts if reup_tts is not None else False,
+        enable_lipsync=reup_lipsync if reup_lipsync is not None else True,
+        burn_subtitles=reup_burn if reup_burn is not None else True,
         tts_voice=reup_tts_voice,
+        tts_engine=reup_tts_engine or "edge-tts",
         target_lang=reup_target_lang,
+        source_lang=reup_source_lang or "auto",
+        film_grain=reup_grain if reup_grain is not None else 3.0,
         channel_id=reup_chan_id,
         post_title=reup_post_title,
         post_caption=reup_post_caption,
         post_tags=reup_post_tags,
-        publish_status=reup_pub_status
+        publish_status=reup_pub_status,
+        srt_path=(req.reup.srt_path if req.reup and getattr(req.reup, "srt_path", None) else req.srt_path),
+        tts_audio_path=(req.reup.tts_audio_path if req.reup and getattr(req.reup, "tts_audio_path", None) else req.tts_audio_path),
+        overlays=_parse_overlays(req),
     )
 
 

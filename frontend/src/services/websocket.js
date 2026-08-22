@@ -30,14 +30,8 @@ class WebSocketService {
       return;
     }
 
-    // Connect directly to local backend on desktop/dev
     let wsUrl = 'ws://127.0.0.1:8000/ws/jobs';
-    if (
-      typeof window !== 'undefined' &&
-      window.location.protocol.startsWith('http') &&
-      window.location.hostname !== 'localhost' &&
-      window.location.hostname !== '127.0.0.1'
-    ) {
+    if (typeof window !== 'undefined' && window.location.protocol.startsWith('http')) {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       wsUrl = `${protocol}//${window.location.host}/ws/jobs`;
     }

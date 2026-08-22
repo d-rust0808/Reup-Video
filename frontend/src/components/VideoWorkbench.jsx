@@ -1,7 +1,7 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { RoiCanvas } from './RoiCanvas';
 import { ReupFxControls } from './ReupFxControls';
-import { getStreamUrl, submitJob, uploadVideoFile } from '../services/api';
+import { getStreamUrl, submitJob, uploadVideoFile, fetchChannels } from '../services/api';
 import { Video, AlertCircle, CheckCircle2, Upload, Loader2 } from 'lucide-react';
 
 export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
@@ -15,19 +15,24 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
   const [isDragOver, setIsDragOver] = useState(false);
 
   const [options, setOptions] = useState({
-    wm_method: 'auto',
-    hflip: false,
+    wm_method: 'crop',
+    hflip: true,
     speed_ratio: 1.03,
-    pitch_shift: false,
-    crop_percent: 0.0,
-    brightness: 0.0,
-    contrast: 1.0,
-    saturation: 1.0,
+    pitch_shift: true,
+    crop_percent: 2.0,
+    brightness: 0.01,
+    contrast: 1.02,
+    saturation: 1.03,
+    film_grain: 3,
     modify_md5: true,
-    enable_vocal_mute: false,
-    enable_tts: false,
+    enable_vocal_mute: true,
+    enable_tts: true,
+    enable_lipsync: true,
+    burn_subtitles: true,
     tts_voice: 'vi-VN-HoaiMyNeural',
+    tts_engine: 'edge-tts',
     target_lang: 'vi',
+    source_lang: 'auto',
 
     channel_id: null,
     post_title: '',
@@ -35,6 +40,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     post_tags: [],
     publish_status: 'READY',
   });
+  const [channelOverlays, setChannelOverlays] = useState([]);
 
   useEffect(() => {
     if (selectedMedia) {
@@ -54,6 +60,27 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       videoRef.current.src = getStreamUrl(currentMedia.video_id);
     }
   }, [currentMedia?.video_id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!options.channel_id) {
+        setChannelOverlays([]);
+        return;
+      }
+      try {
+        const data = await fetchChannels();
+        const list = data.channels || [];
+        const ch = list.find((c) => (c.channel_id || c.id) === options.channel_id);
+        if (!cancelled) setChannelOverlays(ch?.overlays || []);
+      } catch {
+        if (!cancelled) setChannelOverlays([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [options.channel_id]);
 
   const handleFileUpload = async (e) => {
     const file = e.target?.files?.[0] || e;
@@ -106,9 +133,9 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     setMsg(null);
 
     let pixelRoi = [0, 0, 0, 0];
+    const vw = videoRef.current?.videoWidth || 1080;
+    const vh = videoRef.current?.videoHeight || 1920;
     if (roi && videoRef.current) {
-      const vw = videoRef.current.videoWidth || 1080;
-      const vh = videoRef.current.videoHeight || 1920;
       pixelRoi = [
         Math.round(roi.x * vw),
         Math.round(roi.y * vh),
@@ -117,12 +144,19 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       ];
     }
 
-    const normCrop = options.crop_percent >= 0.5 ? options.crop_percent / 100.0 : options.crop_percent;
+    // Slider is always percent (0–5). Never send 0.4 as 40% crop.
+    const normCrop = Number(options.crop_percent || 0) / 100.0;
     const cleanMethod = options.wm_method === 'opencv_telea' ? 'telea' : (options.wm_method === 'opencv_ns' ? 'ns' : options.wm_method);
+    const voice = options.tts_voice || 'vi-VN-HoaiMyNeural';
+    let ttsEngine = options.tts_engine || 'edge-tts';
+    if (String(voice).toLowerCase().startsWith('kokoro')) ttsEngine = 'kokoro';
+    if (String(voice).toLowerCase().startsWith('gtts')) ttsEngine = 'gtts';
 
     const payload = {
-      video_path: currentMedia.file_path || `data/input/${currentMedia.video_id}.mp4`,
+      video_path: currentMedia.file_path || `data/input/raw/${currentMedia.video_id}.mp4`,
       platform: currentMedia.platform || 'douyin',
+      canvas_size: [vw, vh],
+      video_resolution: [vw, vh],
       channel_id: options.channel_id,
       post_title: options.post_title || currentMedia.title,
       post_caption: options.post_caption,
@@ -131,7 +165,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       watermark: {
         method: cleanMethod,
         roi: pixelRoi,
-        radius: 3,
+        radius: 5,
       },
       reup: {
         hflip: options.hflip,
@@ -141,11 +175,16 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         brightness: options.brightness,
         contrast: options.contrast,
         saturation: options.saturation,
+        film_grain: options.film_grain ?? 3,
         modify_md5: options.modify_md5,
         enable_vocal_mute: options.enable_vocal_mute,
         enable_tts: options.enable_tts,
-        tts_voice: options.tts_voice || 'vi-VN-HoaiMyNeural',
+        enable_lipsync: options.enable_lipsync !== false,
+        burn_subtitles: options.burn_subtitles !== false,
+        tts_voice: voice,
+        tts_engine: ttsEngine,
         target_lang: options.target_lang || 'vi',
+        source_lang: options.source_lang || (['douyin', 'kuaishou', 'xiaohongshu'].includes(currentMedia.platform) ? 'zh' : 'auto'),
         channel_id: options.channel_id,
         post_title: options.post_title || currentMedia.title,
         post_caption: options.post_caption,
@@ -268,7 +307,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
             </div>
           </div>
 
-          <RoiCanvas videoRef={videoRef} onRoiChange={setRoi} />
+          <RoiCanvas videoRef={videoRef} onRoiChange={setRoi} overlays={channelOverlays} />
         </div>
 
         {msg && (

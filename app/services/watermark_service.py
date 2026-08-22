@@ -100,29 +100,34 @@ def inpaint_video_ffmpeg(
 
     if filter_type_clean == "crop":
         if is_auto_bottom:
-            filter_str = "crop=iw:ih*0.87:0:0,scale=iw:ih:flags=lanczos"
+            # Keep even yuv420p-safe height. Do NOT scale=iw:ih after crop — those
+            # identifiers already refer to the cropped frame, so it was a no-op and
+            # odd heights (1920*0.87=1670.4) made x264 reject the encode.
+            filter_str = "crop=iw:trunc(ih*0.82/2)*2:0:0,setsar=1"
         else:
             filter_str = f"crop={w}:{h}:{x}:{y},boxblur=15:15[b];[0:v][b]overlay={x}:{y}"
     elif filter_type_clean in ("boxblur", "cinematic_blur"):
         if is_auto_bottom:
-            filter_str = "[0:v]crop=iw:ih*0.14:0:ih*0.86,boxblur=15:15[blur];[0:v][blur]overlay=0:H*0.86"
+            filter_str = "[0:v]crop=iw:trunc(ih*0.14/2)*2:0:ih-oh,boxblur=15:15[blur];[0:v][blur]overlay=0:H-h"
         else:
             r = max(1, radius)
             filter_str = f"crop={w}:{h}:{x}:{y},boxblur={r}:{r}[b];[0:v][b]overlay={x}:{y}"
     elif filter_type_clean == "delogo":
         if is_auto_bottom:
-            filter_str = "crop=iw:ih*0.87:0:0,scale=iw:ih:flags=lanczos"
+            filter_str = "crop=iw:trunc(ih*0.82/2)*2:0:0,setsar=1"
         else:
             filter_str = f"delogo=x={x}:y={y}:w={w}:h={h}"
     else:
-        filter_str = f"delogo=x={x}:y={y}:w={w}:h={h}" if not is_auto_bottom else "crop=iw:ih*0.87:0:0,scale=iw:ih:flags=lanczos"
+        filter_str = f"delogo=x={x}:y={y}:w={w}:h={h}" if not is_auto_bottom else "crop=iw:trunc(ih*0.82/2)*2:0:0,setsar=1"
 
     is_complex = ("[" in filter_str and "]" in filter_str)
     cmd = [
         ffmpeg_bin, "-loglevel", "error", "-y",
         "-i", input_path,
         "-filter_complex" if is_complex else "-vf", filter_str,
-        "-c:a", "copy",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        "-c:a", "aac", "-b:a", "128k",
         output_path
     ]
 
@@ -139,7 +144,9 @@ def inpaint_video_ffmpeg(
             ffmpeg_bin, "-loglevel", "error", "-y",
             "-i", input_path,
             "-filter_complex", filter_str,
-            "-c:a", "copy",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            "-c:a", "aac", "-b:a", "128k",
             output_path
         ]
         proc_bb = subprocess.run(cmd_boxblur, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -230,14 +237,18 @@ def remove_watermark(
                     pass
             return output_path
         except Exception as e:
-            logger.warning(f"ALL-IN-ONE hybrid chain encountered: {e}. Falling back to standard inpainting.")
+            logger.warning(f"ALL-IN-ONE hybrid chain encountered: {e}. Falling back to crop + inpaint.")
             if os.path.exists(temp_inpainted):
                 try:
                     os.remove(temp_inpainted)
                 except Exception:
                     pass
-            inpainter = OpenCVInpainter(radius=radius, method="telea")
-            return inpainter.inpaint_video(input_path, output_path, roi_tuple, progress_callback=progress_callback)
+            try:
+                return inpaint_video_ffmpeg(input_path, output_path, (0, 0, 0, 0), filter_type="crop", radius=radius)
+            except Exception as crop_err:
+                logger.warning(f"ALL-IN-ONE crop fallback failed ({crop_err}). Using Telea inpaint.")
+                inpainter = OpenCVInpainter(radius=radius, method="telea")
+                return inpainter.inpaint_video(input_path, output_path, roi_tuple, progress_callback=progress_callback)
 
     elif method_clean == "auto":
         # Default Auto: Lightning-Fast Adaptive Anti-Halo OpenCV Inpainter (~1x Real-Time, Zero White Smudge)

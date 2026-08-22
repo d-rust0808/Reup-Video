@@ -1,24 +1,133 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { Crop } from 'lucide-react';
+import { getMediaUrl } from '../services/api';
 
-export function RoiCanvas({ videoRef, onRoiChange }) {
+function getContentBox(video, canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const vw = video?.videoWidth || 0;
+  const vh = video?.videoHeight || 0;
+  if (!vw || !vh || rect.width <= 0 || rect.height <= 0) {
+    return { offsetX: 0, offsetY: 0, contentW: rect.width, contentH: rect.height, rect };
+  }
+  const scale = Math.min(rect.width / vw, rect.height / vh);
+  const contentW = vw * scale;
+  const contentH = vh * scale;
+  return {
+    offsetX: (rect.width - contentW) / 2,
+    offsetY: (rect.height - contentH) / 2,
+    contentW,
+    contentH,
+    rect,
+  };
+}
+
+function eventToNorm(e, video, canvas) {
+  const { offsetX, offsetY, contentW, contentH, rect } = getContentBox(video, canvas);
+  const px = e.clientX - rect.left - offsetX;
+  const py = e.clientY - rect.top - offsetY;
+  const x = contentW > 0 ? px / contentW : 0;
+  const y = contentH > 0 ? py / contentH : 0;
+  return {
+    x: Math.max(0, Math.min(1, x)),
+    y: Math.max(0, Math.min(1, y)),
+  };
+}
+
+function overlaySrc(ov) {
+  if (ov?.url) return getMediaUrl(ov.url);
+  return '';
+}
+
+function OverlayPreviewLayer({ videoRef, overlays }) {
+  const wrapRef = useRef(null);
+  const [box, setBox] = useState({ offsetX: 0, offsetY: 0, contentW: 0, contentH: 0 });
+
+  const measure = useCallback(() => {
+    const video = videoRef?.current;
+    const wrap = wrapRef.current;
+    if (!video || !wrap) return;
+    const rect = wrap.getBoundingClientRect();
+    const vw = video.videoWidth || 0;
+    const vh = video.videoHeight || 0;
+    if (!vw || !vh || rect.width <= 0 || rect.height <= 0) {
+      setBox({ offsetX: 0, offsetY: 0, contentW: rect.width, contentH: rect.height });
+      return;
+    }
+    const scale = Math.min(rect.width / vw, rect.height / vh);
+    const contentW = vw * scale;
+    const contentH = vh * scale;
+    setBox({
+      offsetX: (rect.width - contentW) / 2,
+      offsetY: (rect.height - contentH) / 2,
+      contentW,
+      contentH,
+    });
+  }, [videoRef]);
+
+  useEffect(() => {
+    const video = videoRef?.current;
+    measure();
+    window.addEventListener('resize', measure);
+    video?.addEventListener('loadedmetadata', measure);
+    return () => {
+      window.removeEventListener('resize', measure);
+      video?.removeEventListener('loadedmetadata', measure);
+    };
+  }, [measure, videoRef, overlays]);
+
+  if (!overlays || overlays.length === 0) return null;
+
+  return (
+    <div ref={wrapRef} className="absolute inset-0 pointer-events-none z-[9]">
+      {overlays.map((ov) => {
+        const isFrame = ov.kind === 'frame';
+        const src = overlaySrc(ov);
+        if (!src) return null;
+        const left = isFrame ? box.offsetX : box.offsetX + ov.x * box.contentW;
+        const top = isFrame ? box.offsetY : box.offsetY + ov.y * box.contentH;
+        const width = isFrame ? box.contentW : ov.w * box.contentW;
+        const height = isFrame ? box.contentH : undefined;
+        return (
+          <img
+            key={ov.id || src}
+            src={src}
+            alt=""
+            className={isFrame ? 'absolute object-cover' : 'absolute object-contain'}
+            style={{
+              left,
+              top,
+              width,
+              height,
+              opacity: ov.opacity ?? 1,
+              zIndex: isFrame ? 1 : 2,
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+export function RoiCanvas({ videoRef, onRoiChange, overlays = [] }) {
   const canvasRef = useRef(null);
-  const [roi, setRoi] = useState(null); // { x, y, w, h } normalized (0 to 1)
+  const [roi, setRoi] = useState(null); // { x, y, w, h } normalized to VIDEO content (0 to 1)
   const isDraggingRef = useRef(false);
   const startPosRef = useRef({ x: 0, y: 0 });
 
   const drawCanvas = useCallback(() => {
     const canvas = canvasRef.current;
+    const video = videoRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     if (!roi) return;
 
-    const pxX = roi.x * canvas.width;
-    const pxY = roi.y * canvas.height;
-    const pxW = roi.w * canvas.width;
-    const pxH = roi.h * canvas.height;
+    const box = video ? getContentBox(video, canvas) : { offsetX: 0, offsetY: 0, contentW: canvas.width, contentH: canvas.height };
+    const pxX = box.offsetX + roi.x * box.contentW;
+    const pxY = box.offsetY + roi.y * box.contentH;
+    const pxW = roi.w * box.contentW;
+    const pxH = roi.h * box.contentH;
 
     // Mask outside ROI
     ctx.fillStyle = 'rgba(15, 23, 42, 0.4)';
@@ -51,7 +160,7 @@ export function RoiCanvas({ videoRef, onRoiChange }) {
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 11px sans-serif';
     ctx.fillText('Vùng Xoá Logo', pxX + 8, Math.max(15, pxY - 7));
-  }, [roi]);
+  }, [roi, videoRef]);
 
   const syncCanvasSize = useCallback(() => {
     const video = videoRef.current;
@@ -85,28 +194,25 @@ export function RoiCanvas({ videoRef, onRoiChange }) {
 
   const handleMouseDown = (e) => {
     const canvas = canvasRef.current;
+    const video = videoRef.current;
     if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
-
+    const pos = eventToNorm(e, video, canvas);
     isDraggingRef.current = true;
-    startPosRef.current = { x, y };
-    setRoi({ x, y, w: 0.01, h: 0.01 });
+    startPosRef.current = pos;
+    setRoi({ x: pos.x, y: pos.y, w: 0.01, h: 0.01 });
   };
 
   const handleMouseMove = (e) => {
     if (!isDraggingRef.current) return;
     const canvas = canvasRef.current;
+    const video = videoRef.current;
     if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const currentX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const currentY = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+    const current = eventToNorm(e, video, canvas);
 
-    const x = Math.min(startPosRef.current.x, currentX);
-    const y = Math.min(startPosRef.current.y, currentY);
-    const w = Math.abs(currentX - startPosRef.current.x);
-    const h = Math.abs(currentY - startPosRef.current.y);
+    const x = Math.min(startPosRef.current.x, current.x);
+    const y = Math.min(startPosRef.current.y, current.y);
+    const w = Math.abs(current.x - startPosRef.current.x);
+    const h = Math.abs(current.y - startPosRef.current.y);
 
     const newRoi = { x, y, w, h };
     setRoi(newRoi);
@@ -159,11 +265,13 @@ export function RoiCanvas({ videoRef, onRoiChange }) {
           controls
           crossOrigin="anonymous"
         />
+        <OverlayPreviewLayer videoRef={videoRef} overlays={overlays} />
         <canvas
           ref={canvasRef}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseUp}
           className="absolute top-0 left-0 w-full h-full cursor-crosshair z-10"
         />
       </div>

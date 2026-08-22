@@ -65,6 +65,8 @@ export function VideoModal({ isOpen, onClose, video }) {
             controls
             autoPlay
             playsInline
+            preload="auto"
+            type="video/mp4"
             className="w-full h-full object-contain"
           >
             Trình duyệt của bạn không hỗ trợ phát video HTML5.

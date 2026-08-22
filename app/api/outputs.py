@@ -51,7 +51,7 @@ async def list_outputs(request: Request):
     return {"outputs": outputs}
 
 
-@router.get("/outputs/download/{job_id}")
+@router.api_route("/outputs/download/{job_id}", methods=["GET", "HEAD"])
 async def download_output(job_id: str, request: Request):
     """
     Downloads a specific processed output video file as an attachment.

@@ -13,10 +13,11 @@ import {
   CheckCircle2,
   FileText,
   Sparkles,
-  Loader2
+  Loader2,
+  Layers
 } from 'lucide-react';
 
-import { fetchChannels } from '../services/api';
+import { fetchChannels, getMediaUrl } from '../services/api';
 
 export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
   const [channels, setChannels] = useState([]);
@@ -31,7 +32,8 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
     setLoadingChannels(true);
     try {
       const data = await fetchChannels();
-      setChannels(Array.isArray(data) ? data : []);
+      const list = Array.isArray(data) ? data : (data.channels || []);
+      setChannels(list);
     } catch {
       setChannels([]);
     } finally {
@@ -51,7 +53,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
       });
       return;
     }
-    const selectedChan = channels.find((c) => c.id === channelId);
+    const selectedChan = channels.find((c) => (c.channel_id || c.id) === channelId);
     const chanTags = selectedChan?.tags || [];
     const tagString = chanTags.map((t) => (t.startsWith('#') ? t : `#${t}`)).join(' ');
 
@@ -77,7 +79,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
     }
   };
 
-  const activeChannel = channels.find((c) => c.id === options.channel_id);
+  const activeChannel = channels.find((c) => (c.channel_id || c.id) === options.channel_id);
 
   return (
     <div className="clean-panel rounded-3xl p-6 sm:p-7 shadow-xs space-y-6">
@@ -95,7 +97,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
           {[
             { id: 'all', label: '🚀 Siêu Cấp Toàn Năng (All-In-One)', desc: 'Vừa cắt sạch 100% phụ đề đáy vừa inpaint quét xóa sạch logo/text ở giữa và đỉnh (Khuyên dùng)' },
             { id: 'auto', label: '🔮 Inpaint Nét Chữ AI + OpenCV', desc: 'Tự động quét & xóa sạch chữ/logo trên mọi vị trí (Giữ nguyên 100% khung hình)' },
-            { id: 'crop', label: '🌟 Cắt Bỏ Phụ Đề Đáy (Crop 13%)', desc: 'Cắt bỏ dải phụ đề đáy video (chỉ áp dụng cho đáy video)' },
+            { id: 'crop', label: '🌟 Cắt Bỏ Phụ Đề Đáy (Crop 18%)', desc: 'Cắt bỏ dải phụ đề đáy video (chỉ áp dụng cho đáy video)' },
             { id: 'boxblur', label: '🎬 Dải Mờ Điện Ảnh (Blur Bar)', desc: 'Làm mờ mịn dải phụ đề phong cách điện ảnh' },
             { id: 'telea', label: '⚡ OpenCV Telea (Nhanh)', desc: 'Xóa mượt mà theo vùng ROI đã chọn' },
             { id: 'none', label: '🚫 Giữ Nguyên Khung Hình', desc: 'Không can thiệp phụ đề/watermark' },
@@ -286,10 +288,10 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
               <Mic className="w-4 h-4 text-purple-600 shrink-0" />
               <div>
                 <label className="text-xs font-extrabold text-purple-950 cursor-pointer block" htmlFor="tts-toggle">
-                  Lồng Tiếng AI Tiếng Việt (Neural Dubbing Studio)
+                  Tự dịch + lồng tiếng khớp video gốc
                 </label>
                 <span className="text-[10px] text-purple-700 font-medium block">
-                  Tự động dịch sang Tiếng Việt chuẩn & Lồng giọng đọc AI cảm xúc
+                  STT lời thoại → dịch Việt → TTS ghép đúng timestamp, giữ nhạc nền BGM
                 </span>
               </div>
             </div>
@@ -302,8 +304,43 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
             />
           </div>
 
+          <div className="flex items-center justify-between pt-1">
+            <div>
+              <label className="text-xs font-extrabold text-purple-950 cursor-pointer block" htmlFor="burnsub-toggle">
+                Cháy phụ đề Vietsub lên video (Hardsub)
+              </label>
+              <span className="text-[10px] text-purple-700 font-medium block">
+                Nhận lời thoại → dịch tiếng Việt → đốt chữ xuống đáy khung hình
+              </span>
+            </div>
+            <input
+              id="burnsub-toggle"
+              type="checkbox"
+              checked={options.burn_subtitles !== false}
+              onChange={(e) => handleChange('burn_subtitles', e.target.checked)}
+              className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-purple-300 shrink-0 cursor-pointer"
+            />
+          </div>
+
           {options.enable_tts && (
             <div className="space-y-3 pt-2.5 border-t border-purple-200/70 animate-fadeIn">
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-xs font-extrabold text-purple-950 cursor-pointer block" htmlFor="lipsync-toggle">
+                    Khớp khẩu hình (Lip-sync)
+                  </label>
+                  <span className="text-[10px] text-purple-700 font-medium block">
+                    Canh từng câu đúng cửa sổ miệng gốc: rút câu → chỉnh tốc TTS → rubberband giữ formant
+                  </span>
+                </div>
+                <input
+                  id="lipsync-toggle"
+                  type="checkbox"
+                  checked={options.enable_lipsync !== false}
+                  onChange={(e) => handleChange('enable_lipsync', e.target.checked)}
+                  className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-purple-300 shrink-0 cursor-pointer"
+                />
+              </div>
               <div>
                 <label className="block text-[11px] font-bold text-purple-900 mb-1.5 flex items-center justify-between">
                   <span>Chọn Giọng Đọc Thuyết Minh Tiếng Việt:</span>
@@ -342,7 +379,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
               <div className="bg-purple-100/60 p-2.5 rounded-xl border border-purple-200/60 flex items-start gap-2">
                 <Sparkles className="w-3.5 h-3.5 text-purple-600 shrink-0 mt-0.5" />
                 <p className="text-[10px] text-purple-900 leading-relaxed font-medium">
-                  Hệ thống tự động phát hiện ngôn ngữ gốc của video (Trung, Anh, Hàn, Nhật...), phiên dịch chuẩn văn phong mạng xã hội và lồng ghép giọng đọc mượt mà khớp khẩu hình video.
+                  Hệ thống tự động nhận lời thoại → dịch Việt ngắn khớp nhịp miệng → TTS đúng cửa sổ thời gian (lip-sync), mix nhạc nền.
                 </p>
               </div>
             </div>
@@ -382,12 +419,36 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
 
               <option value="none">📦 Không gán kênh (Chỉ lưu vào kho thành phẩm)</option>
               {channels.map((chan) => (
-                <option key={chan.id} value={chan.id}>
+                <option key={chan.channel_id || chan.id} value={chan.channel_id || chan.id}>
                   📺 [{chan.platform?.toUpperCase() || 'KHÁC'}] {chan.name} {chan.tags?.length ? `(${chan.tags.join(', ')})` : ''}
                 </option>
               ))}
             </select>
           </div>
+
+          {activeChannel && (activeChannel.overlays || []).length > 0 && (
+            <div className="flex items-start gap-2.5 p-2.5 rounded-xl bg-white border border-indigo-200/80">
+              <Layers className="w-3.5 h-3.5 text-indigo-600 shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <p className="text-[11px] font-extrabold text-slate-800">
+                  Gắn {activeChannel.overlays.length} logo/khung xuyên suốt video
+                </p>
+                <p className="text-[10px] text-slate-500 font-medium">
+                  Vị trí đã chỉnh trong tab Kênh — logo hiện từ đầu đến cuối video thành phẩm.
+                </p>
+                <div className="flex items-center gap-1.5 mt-1.5">
+                  {activeChannel.overlays.slice(0, 5).map((ov) => (
+                    <img
+                      key={ov.id}
+                      src={getMediaUrl(ov.url)}
+                      alt=""
+                      className="w-7 h-7 rounded-md object-contain bg-slate-900 border border-slate-200"
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* If Channel is Selected: Metadata & Caption Form */}
           {options.channel_id && options.channel_id !== 'none' && (

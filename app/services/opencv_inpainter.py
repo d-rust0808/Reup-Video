@@ -78,6 +78,14 @@ def _get_fourcc(codec: str = "mp4v") -> int:
     return int(sum(ord(c) << (i * 8) for i, c in enumerate(codec[:4])))
 
 
+def _inpaint_radius(radius: int) -> int:
+    """Clamp Telea radius. 2px leaves CJK stroke halos; 3–6 fills interiors cleanly."""
+    try:
+        r = int(radius)
+    except (TypeError, ValueError):
+        r = 3
+    return max(3, min(r, 7))
+
 
 class TemporalTextTracker:
     """
@@ -131,12 +139,10 @@ class TemporalTextTracker:
 
 
 def extract_adaptive_text_mask(roi_slice: np.ndarray) -> np.ndarray:
-
-
     """
     Extracts ultra-sharp character stroke mask from BGR ROI slice without smudging background textures.
-    Uses multi-scale morphological gradient, local luminance contrast, and 3x3 anti-halo dilation.
-    Preserves fine background details (veins, dew drops, grain).
+    Uses multi-scale morphological gradient, local luminance contrast, hole-fill for CJK interiors,
+    and anti-halo dilation.
     """
     if roi_slice is None or roi_slice.size == 0:
         return np.zeros((0, 0), dtype=np.uint8)
@@ -158,28 +164,51 @@ def extract_adaptive_text_mask(roi_slice: np.ndarray) -> np.ndarray:
     mean_local = cv2.blur(smooth, (9, 9))
     diff_local = cv2.absdiff(smooth, mean_local)
 
-    # Combine text stroke features
     feat = cv2.addWeighted(grad, 0.6, diff_local, 0.4, 0)
-
-    # Dynamic Otsu thresholding
     _, binary = cv2.threshold(feat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # 4. Minimal anti-halo dilation (3x3 ellipse = 1px radius) to prevent texture blurring
-    kernel_d = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    # Fill CJK character interiors (口/国/回 leftover if we only keep strokes)
+    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, close_k)
+
+    kernel_d = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     text_mask = cv2.dilate(binary, kernel_d, iterations=1)
 
+    return text_mask
+
+
+def _or_band_mask(text_mask: np.ndarray, sub_zone: np.ndarray, y1: int, y2: int) -> np.ndarray:
+    """OR morphological stroke mask from a horizontal band (top logo / bottom hardsub)."""
+    zh, zw = sub_zone.shape[:2]
+    y1 = max(0, min(y1, zh))
+    y2 = max(y1 + 1, min(y2, zh))
+    band = sub_zone[y1:y2, :]
+    if band.size == 0:
+        return text_mask
+    stroke = extract_adaptive_text_mask(band)
+    if stroke.size == 0 or cv2.countNonZero(stroke) == 0:
+        return text_mask
+    density = cv2.countNonZero(stroke) / float(stroke.size)
+    # Text overlays are sparse (few %). High density is texture/pattern, not glyphs.
+    if density < 0.008 or density > 0.22:
+        return text_mask
+    text_mask[y1:y2, :] = cv2.bitwise_or(text_mask[y1:y2, :], stroke)
     return text_mask
 
 
 def extract_dynamic_subtitle_mask(
     sub_zone: np.ndarray,
     tracker: Optional[TemporalTextTracker] = None,
-    run_ocr: bool = True
+    run_ocr: bool = True,
+    roi_fallback: bool = False
 ) -> np.ndarray:
     """
-    Dynamically detects and extracts masks strictly for active verified text & subtitles.
-    Guarantees 100% safety for scenery, background objects, and human faces by only
-    inpainting within OCR-confirmed bounding boxes and shielding detected faces with Zero-Mask.
+    Dynamically detects and extracts masks for active text & subtitles.
+
+    CJK hardsubs have outlined strokes + filled interiors. Stroke-only masks leave
+    ghost characters, so detected bounding boxes are FILLED (plus a dilated stroke
+    mask). If OCR/MSER finds nothing and roi_fallback is True (manual ROI), the
+    whole adaptive stroke mask of the ROI is used so user-drawn boxes still erase.
     """
     if sub_zone is None or sub_zone.size == 0:
         return np.zeros((0, 0), dtype=np.uint8)
@@ -191,49 +220,135 @@ def extract_dynamic_subtitle_mask(
     gray = cv2.cvtColor(sub_zone, cv2.COLOR_BGR2GRAY)
     text_mask = np.zeros_like(gray)
 
-    # 1. Neural OCR text bounding box detection (Apple Vision Neural Engine) + Temporal Tracking
     try:
-        from app.services.subtitle_detector import detect_text_boxes_neural, detect_faces_neural
+        from app.services.subtitle_detector import detect_text_boxes, detect_faces
 
         if run_ocr:
-            raw_boxes = detect_text_boxes_neural(sub_zone, min_confidence=0.3, padding=4)
+            raw_boxes = detect_text_boxes(sub_zone, min_confidence=0.25, padding=8)
             active_boxes = tracker.update(raw_boxes) if tracker is not None else raw_boxes
         else:
             active_boxes = tracker.get_active_boxes() if tracker is not None else []
 
         for bx, by, bw, bh in active_boxes:
-            # Clamp coordinates
             cbx = max(0, min(bx, zw - 1))
             cby = max(0, min(by, zh - 1))
             cbw = max(1, min(bw, zw - cbx))
             cbh = max(1, min(bh, zh - cby))
 
+            # Fill the whole text box — required for Chinese character interiors
+            cv2.rectangle(text_mask, (cbx, cby), (cbx + cbw, cby + cbh), 255, -1)
+
             box_slice = sub_zone[cby : cby + cbh, cbx : cbx + cbw]
             box_mask = extract_adaptive_text_mask(box_slice)
-            if cv2.countNonZero(box_mask) > 0:
+            if box_mask.size > 0 and cv2.countNonZero(box_mask) > 0:
                 text_mask[cby : cby + cbh, cbx : cbx + cbw] = cv2.bitwise_or(
                     text_mask[cby : cby + cbh, cbx : cbx + cbw], box_mask
                 )
 
-        # 2. Neural Face Shield (Guarantees zero blur/inpaint on human faces)
+        # If detectors missed, boost typical Douyin overlay bands (top logos / bottom hardsub)
+        if cv2.countNonZero(text_mask) == 0 and (run_ocr or roi_fallback):
+            text_mask = _or_band_mask(text_mask, sub_zone, 0, max(12, int(zh * 0.14)))
+            text_mask = _or_band_mask(text_mask, sub_zone, int(zh * 0.76), zh)
+
+        if cv2.countNonZero(text_mask) == 0 and roi_fallback:
+            stroke = extract_adaptive_text_mask(sub_zone)
+            if stroke.size > 0:
+                text_mask = stroke
+
+        if cv2.countNonZero(text_mask) > 0:
+            kernel_d = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            text_mask = cv2.dilate(text_mask, kernel_d, iterations=1)
+
+        # Face shield
         if run_ocr:
-            face_boxes = detect_faces_neural(sub_zone, padding=15)
+            face_boxes = detect_faces(sub_zone, padding=18)
             for fx, fy, fw, fh in face_boxes:
                 cfx = max(0, min(fx, zw - 1))
                 cfy = max(0, min(fy, zh - 1))
                 cfw = max(1, min(fw, zw - cfx))
                 cfh = max(1, min(fh, zh - cfy))
-                # Strictly zero out face region so no inpaint can touch human subjects
                 text_mask[cfy : cfy + cfh, cfx : cfx + cfw] = 0
 
     except Exception as e:
         logger.debug(f"Neural OCR text extraction skipped: {e}")
+        if roi_fallback:
+            try:
+                text_mask = extract_adaptive_text_mask(sub_zone)
+            except Exception:
+                pass
 
     return text_mask
 
 
+def _resolve_scan_region(
+    roi: Tuple[int, int, int, int],
+    width: int,
+    height: int
+) -> Tuple[int, int, int, int, bool]:
+    """
+    Returns (x1, y1, x2, y2, is_dynamic_auto).
+    Auto mode scans the FULL frame (including Douyin logos in the top 10%).
+    """
+    x, y, w, h = roi
+    is_dynamic_auto = (roi == (0, 0, 0, 0) or (x == 0 and y == 0 and (w == 0 or w == width)))
+    if is_dynamic_auto:
+        return 0, 0, width, height, True
+    x1 = max(0, min(x, width))
+    y1 = max(0, min(y, height))
+    x2 = max(0, min(x + w, width))
+    y2 = max(0, min(y + h, height))
+    return x1, y1, x2, y2, False
 
 
+def _inpaint_frame_region(
+    frame: np.ndarray,
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    tracker: TemporalTextTracker,
+    frames_processed: int,
+    radius: int,
+    flag: int,
+    is_manual_roi: bool,
+) -> int:
+    """Inpaint one frame region. Returns number of inpainted pixels."""
+    rw = x2 - x1
+    rh = y2 - y1
+    if rw <= 0 or rh <= 0:
+        return 0
+
+    height, width = frame.shape[:2]
+    run_ocr = (frames_processed % 3 == 0)
+
+    if is_manual_roi:
+        pad = max(radius * 2, 10)
+        px1 = max(0, x1 - pad)
+        py1 = max(0, y1 - pad)
+        px2 = min(width, x2 + pad)
+        py2 = min(height, y2 + pad)
+        sub_frame = frame[py1:py2, px1:px2]
+        roi_slice = sub_frame[y1 - py1 : y2 - py1, x1 - px1 : x2 - px1]
+        text_mask = extract_dynamic_subtitle_mask(
+            roi_slice, tracker=tracker, run_ocr=run_ocr, roi_fallback=True
+        )
+        if cv2.countNonZero(text_mask) == 0:
+            return 0
+        sub_mask = np.zeros((py2 - py1, px2 - px1), dtype=np.uint8)
+        sub_mask[y1 - py1 : y2 - py1, x1 - px1 : x2 - px1] = text_mask
+        inpainted_sub = cv2.inpaint(sub_frame, sub_mask, inpaintRadius=_inpaint_radius(radius), flags=flag)
+        frame[py1:py2, px1:px2] = inpainted_sub
+        return int(cv2.countNonZero(text_mask))
+
+    sub_zone = frame[y1:y2, x1:x2]
+    text_mask = extract_dynamic_subtitle_mask(
+        sub_zone, tracker=tracker, run_ocr=run_ocr, roi_fallback=False
+    )
+    if cv2.countNonZero(text_mask) == 0:
+        return 0
+    inpainted_zone = cv2.inpaint(sub_zone, text_mask, inpaintRadius=_inpaint_radius(radius), flags=flag)
+    frame[y1:y2, x1:x2] = inpainted_zone
+    return int(cv2.countNonZero(text_mask))
 
 
 def remux_audio_if_available(input_path: str, temp_video_path: str, output_path: str) -> bool:
@@ -326,6 +441,8 @@ def inpaint_video_opencv(
         raise RuntimeError(f"Invalid video dimensions probed from {input_path}: {width}x{height}")
 
     ffmpeg_bin = _find_ffmpeg()
+    x1, y1, x2, y2, is_dynamic_auto = _resolve_scan_region((int(x), int(y), int(w), int(h)), width, height)
+    is_manual_roi = not is_dynamic_auto
 
     # Strategy A: FFmpeg subprocess piping (preferred high performance, retains audio)
     if ffmpeg_bin:
@@ -339,11 +456,12 @@ def inpaint_video_opencv(
             "-f", "image2pipe", "-pix_fmt", "bgr24", "-vcodec", "rawvideo", "-"
         ]
         encoder_cmd = [
-            ffmpeg_bin, "-loglevel", "error", "-y",
+            ffmpeg_bin, "-loglevel", "warning", "-y",
             "-f", "rawvideo", "-vcodec", "rawvideo", "-s", f"{width}x{height}",
             "-pix_fmt", "bgr24", "-r", f"{fps:.3f}", "-i", "-",
             "-i", input_path, "-map", "0:v:0", "-map", "1:a:0?",
             "-c:v", encoder, *encoder_flags, "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
             "-shortest", output_path
         ]
 
@@ -351,60 +469,18 @@ def inpaint_video_opencv(
             decoder = subprocess.Popen(decoder_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             encoder_proc = subprocess.Popen(encoder_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
-            is_dynamic_auto = (roi == (0, 0, 0, 0) or (x == 0 and y == 0 and (w == 0 or w == width)))
-            tracker = TemporalTextTracker(persistence_frames=15) if is_dynamic_auto else None
-
-            if is_dynamic_auto:
-                y1 = int(height * 0.10)
-                y2 = int(height * 0.98)
-                x1 = 0
-                x2 = width
-                rw = width
-                rh = y2 - y1
-            else:
-                x1 = max(0, min(x, width))
-                y1 = max(0, min(y, height))
-                x2 = max(0, min(x + w, width))
-                y2 = max(0, min(y + h, height))
-                rw = x2 - x1
-                rh = y2 - y1
-
+            tracker = TemporalTextTracker(persistence_frames=18)
             frames_processed = 0
+            pixels_inpainted = 0
             while True:
                 raw_frame = _read_exact(decoder.stdout, frame_size)
                 if len(raw_frame) < frame_size:
                     break
 
                 frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((height, width, 3)).copy()
-
-                if rw > 0 and rh > 0:
-                    if is_dynamic_auto:
-                        sub_zone = frame[y1:y2, x1:x2]
-                        run_ocr = (frames_processed % 5 == 0)
-                        text_mask = extract_dynamic_subtitle_mask(sub_zone, tracker=tracker, run_ocr=run_ocr)
-                        if cv2.countNonZero(text_mask) > 0:
-                            inpaint_r = max(1, min(radius, 2))
-                            inpainted_zone = cv2.inpaint(sub_zone, text_mask, inpaintRadius=inpaint_r, flags=flag)
-                            frame[y1:y2, x1:x2] = inpainted_zone
-                    else:
-                        pad = max(radius * 2, 8)
-                        px1 = max(0, x1 - pad)
-                        py1 = max(0, y1 - pad)
-                        px2 = min(width, x2 + pad)
-                        py2 = min(height, y2 + pad)
-
-                        sub_frame = frame[py1:py2, px1:px2]
-                        roi_slice = sub_frame[y1 - py1 : y2 - py1, x1 - px1 : x2 - px1]
-                        run_ocr = (frames_processed % 5 == 0)
-                        text_mask = extract_dynamic_subtitle_mask(roi_slice, tracker=tracker, run_ocr=run_ocr)
-
-                        if cv2.countNonZero(text_mask) > 0:
-                            sub_mask = np.zeros((py2 - py1, px2 - px1), dtype=np.uint8)
-                            sub_mask[y1 - py1 : y2 - py1, x1 - px1 : x2 - px1] = text_mask
-                            inpaint_r = max(1, min(radius, 2))
-                            inpainted_sub = cv2.inpaint(sub_frame, sub_mask, inpaintRadius=inpaint_r, flags=flag)
-                            frame[py1:py2, px1:px2] = inpainted_sub
-
+                pixels_inpainted += _inpaint_frame_region(
+                    frame, x1, y1, x2, y2, tracker, frames_processed, radius, flag, is_manual_roi
+                )
 
                 if encoder_proc.stdin:
                     encoder_proc.stdin.write(frame.tobytes())
@@ -422,9 +498,18 @@ def inpaint_video_opencv(
             if encoder_proc.stdin:
                 encoder_proc.stdin.close()
 
-
             decoder.wait()
             encoder_proc.wait()
+
+            if encoder_proc.returncode not in (0, None):
+                logger.warning(
+                    f"FFmpeg encoder exited {encoder_proc.returncode}"
+                )
+
+            logger.info(
+                f"OpenCV inpaint: {frames_processed} frames, {pixels_inpainted} mask pixels, "
+                f"roi={'auto-fullframe' if is_dynamic_auto else (x1, y1, x2 - x1, y2 - y1)}"
+            )
 
             if frames_processed > 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 return output_path
@@ -446,58 +531,17 @@ def inpaint_video_opencv(
         raise RuntimeError(f"OpenCV VideoWriter failed to create output file: {temp_writer_out}")
 
     try:
-        is_dynamic_auto = (roi == (0, 0, 0, 0) or (x == 0 and y == 0 and (w == 0 or w == width)))
-        tracker_b = TemporalTextTracker(persistence_frames=15) if is_dynamic_auto else None
-
-        if is_dynamic_auto:
-            y1 = int(height * 0.10)
-            y2 = int(height * 0.98)
-            x1 = 0
-            x2 = width
-            rw = width
-            rh = y2 - y1
-        else:
-            x1 = max(0, min(x, width))
-            y1 = max(0, min(y, height))
-            x2 = max(0, min(x + w, width))
-            y2 = max(0, min(y + h, height))
-            rw = x2 - x1
-            rh = y2 - y1
-
+        tracker_b = TemporalTextTracker(persistence_frames=18)
+        frames_processed = 0
         while True:
             ret, frame = cap.read()
             if not ret or frame is None:
                 break
-
-            if rw > 0 and rh > 0:
-                if is_dynamic_auto:
-                    sub_zone = frame[y1:y2, x1:x2]
-                    text_mask = extract_dynamic_subtitle_mask(sub_zone, tracker=tracker_b)
-                    if cv2.countNonZero(text_mask) > 0:
-                        inpaint_r = max(1, min(radius, 2))
-                        inpainted_zone = cv2.inpaint(sub_zone, text_mask, inpaintRadius=inpaint_r, flags=flag)
-                        frame[y1:y2, x1:x2] = inpainted_zone
-                else:
-                    pad = max(radius * 2, 8)
-                    px1 = max(0, x1 - pad)
-                    py1 = max(0, y1 - pad)
-                    px2 = min(width, x2 + pad)
-                    py2 = min(height, y2 + pad)
-
-                    sub_frame = frame[py1:py2, px1:px2]
-                    roi_slice = sub_frame[y1 - py1 : y2 - py1, x1 - px1 : x2 - px1]
-                    text_mask = extract_dynamic_subtitle_mask(roi_slice, tracker=tracker_b)
-
-                    if cv2.countNonZero(text_mask) > 0:
-                        sub_mask = np.zeros((py2 - py1, px2 - px1), dtype=np.uint8)
-                        sub_mask[y1 - py1 : y2 - py1, x1 - px1 : x2 - px1] = text_mask
-                        inpaint_r = max(1, min(radius, 2))
-                        inpainted_sub = cv2.inpaint(sub_frame, sub_mask, inpaintRadius=inpaint_r, flags=flag)
-                        frame[py1:py2, px1:px2] = inpainted_sub
-
-
-
+            _inpaint_frame_region(
+                frame, x1, y1, x2, y2, tracker_b, frames_processed, radius, flag, is_manual_roi
+            )
             writer.write(frame)
+            frames_processed += 1
     finally:
         cap.release()
         writer.release()
@@ -547,4 +591,3 @@ class OpenCVInpainter:
         progress_callback: Optional[Any] = None
     ) -> str:
         return self.inpaint_video(input_path, output_path, roi, radius=radius, method=method, progress_callback=progress_callback)
-

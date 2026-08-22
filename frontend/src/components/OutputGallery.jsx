@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { fetchOutputs, getDownloadUrl, downloadBatchZip, deleteOutput, deleteBatchOutputs, clearAllOutputs } from '../services/api';
+import { fetchOutputs, getDownloadUrl, getStreamUrl, downloadBatchZip, deleteOutput, deleteBatchOutputs, clearAllOutputs } from '../services/api';
 import { ConfirmModal } from './ConfirmModal';
 import { Toast } from './Toast';
 import { VideoModal } from './VideoModal';
@@ -286,6 +286,17 @@ export function OutputGallery() {
                     : 'clean-card clean-card-hover'
                 }`}
               >
+                <div className="rounded-xl overflow-hidden bg-slate-950 aspect-video">
+                  <video
+                    src={getStreamUrl(jobId)}
+                    muted
+                    playsInline
+                    preload="metadata"
+                    controls
+                    className="w-full h-full object-contain"
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                </div>
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center space-x-2.5 min-w-0">
                     <div className="p-2.5 rounded-xl bg-blue-50 text-blue-600 shrink-0 border border-blue-100">

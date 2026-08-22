@@ -21,10 +21,29 @@ from pydantic import (
 )
 
 
-WatermarkAlgorithm = Literal["auto", "lama", "telea", "ns", "delogo", "boxblur", "crop", "opencv_telea", "opencv_ns", "none"]
+WatermarkAlgorithm = Literal["auto", "all", "lama", "telea", "ns", "delogo", "boxblur", "crop", "opencv_telea", "opencv_ns", "none"]
 JobStatusType = Literal[
     "PENDING", "DOWNLOAD", "DOWNLOADING", "WATERMARK_REMOVAL", "REUP_TRANSFORM", "PROCESSING", "COMPLETED", "FAILED", "CANCELLED"
 ]
+
+
+class OverlayItem(BaseModel):
+    """A channel branding logo or full-frame khung burned onto every output frame."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: Optional[str] = Field(default=None)
+    image_path: str = Field(default="", description="Absolute path to PNG/JPG overlay")
+    x: float = Field(default=0.04, ge=0.0, le=1.0, description="Left position as fraction of frame width")
+    y: float = Field(default=0.04, ge=0.0, le=1.0, description="Top position as fraction of frame height")
+    w: float = Field(default=0.18, ge=0.02, le=1.0, description="Overlay width as fraction of frame width")
+    opacity: float = Field(default=1.0, ge=0.05, le=1.0)
+    kind: str = Field(default="logo", description="logo (corner badge) or frame (full-frame PNG)")
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _norm_kind(cls, v: Any) -> str:
+        s = str(v or "logo").lower().strip()
+        return "frame" if s in ("frame", "khung", "border") else "logo"
 
 
 class WatermarkConfig(BaseModel):
@@ -97,7 +116,7 @@ class ReupConfig(BaseModel):
         except (ValueError, TypeError):
             return 0.02
     color_adjust: bool = Field(default=True, description="Enables or disables color equalization filter pass")
-    film_grain: float = Field(default=0.0, ge=0.0, le=20.0, description="FFmpeg noise filter amount for visual hash disruption")
+    film_grain: float = Field(default=3.0, ge=0.0, le=20.0, description="FFmpeg noise filter amount for visual hash disruption")
     dynamic_motion: bool = Field(default=False, description="Enables dynamic micro-zoom/pan to disrupt temporal match kernels (TMK)")
     meta_compliance_mode: bool = Field(default=False, description="Enables Meta Facebook strict anti-fingerprint compliance preset")
     youtube_compliance_mode: bool = Field(default=False, description="Enables YouTube Content ID and YPP strict compliance preset")
@@ -106,10 +125,23 @@ class ReupConfig(BaseModel):
     preserve_bgm: bool = Field(default=True, description="Preserves background audio/music after vocal muting")
     audio_ducking: bool = Field(default=False, description="Enables audio ducking when overlaying new audio tracks")
     enable_tts: bool = Field(default=False, description="Enables TTS synthesis and dubbing pass")
+    enable_lipsync: bool = Field(
+        default=True,
+        description="Isochronous lip-sync: TTS rate + rubberband fitted to original mouth windows",
+    )
+    burn_subtitles: bool = Field(default=True, description="Burns translated Vietnamese SRT as hardsub onto the video")
     tts_voice: str = Field(default="vi-VN-HoaiMyNeural", description="Voice model/role for TTS synthesis")
     target_lang: str = Field(default="vi", description="Target language code for TTS dubbing")
-    tts_engine: str = Field(default="edge-tts", description="TTS engine name ('edge-tts', 'gtts', 'coqui-tts')")
+    tts_engine: str = Field(default="edge-tts", description="TTS engine name ('edge-tts', 'gtts', 'coqui-tts', 'kokoro')")
     source_lang: str = Field(default="auto", description="Source language code for STT/translation")
+    srt_path: Optional[str] = Field(default=None, description="Optional pre-built SRT to burn (skips STT)")
+    tts_audio_path: Optional[str] = Field(default=None, description="Optional pre-built TTS audio to mix")
+    subtitle_bottom_crop: float = Field(
+        default=0.0,
+        ge=0.0,
+        lt=0.5,
+        description="Crop this fraction off the bottom to drop burned-in source subtitles (0.13 = 13%)",
+    )
 
     # Channel auto-distribution
     channel_id: Optional[str] = Field(default=None, description="Target distribution channel ID")
@@ -117,6 +149,10 @@ class ReupConfig(BaseModel):
     post_caption: Optional[str] = Field(default=None, description="Caption/Hashtags for post upon completion")
     post_tags: Optional[List[str]] = Field(default_factory=list, description="Tags/Labels for channel video")
     publish_status: Optional[str] = Field(default="READY", description="Publish status: DRAFT, READY, PUBLISHED")
+    overlays: List[OverlayItem] = Field(
+        default_factory=list,
+        description="Channel branding logos/frames burned onto every frame",
+    )
 
     @model_validator(mode="after")
 
@@ -134,7 +170,7 @@ class ReupConfig(BaseModel):
                 self.saturation = 1.05
             if self.brightness == 0.01 or self.brightness == 0.0:
                 self.brightness = 0.015
-            if self.film_grain == 0.0:
+            if self.film_grain == 3.0 or self.film_grain == 0.0:
                 self.film_grain = 4.0
             self.dynamic_motion = True
             self.sharpen = True
@@ -153,7 +189,7 @@ class ReupConfig(BaseModel):
                 self.contrast = 1.035
             if self.saturation == 1.03:
                 self.saturation = 1.04
-            if self.film_grain == 0.0:
+            if self.film_grain == 3.0 or self.film_grain == 0.0:
                 self.film_grain = 3.0
             self.dynamic_motion = True
             self.modify_md5 = True

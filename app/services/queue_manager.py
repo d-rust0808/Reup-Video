@@ -708,15 +708,12 @@ class BatchQueueManager:
             if not current_video_path or not os.path.exists(current_video_path):
                 raise FileNotFoundError(f"Input video file path does not exist: {current_video_path}")
 
-            # Validate input video file integrity
+            # Validate input video file integrity — never silently replace a real clip
             if os.path.getsize(current_video_path) < 5000:
-                sample_ref = "data/input/raw/douyin_123.mp4"
-                if os.path.exists(sample_ref) and os.path.getsize(sample_ref) > 5000:
-                    logger.warning(f"Input video {current_video_path} is truncated ({os.path.getsize(current_video_path)} bytes). Auto-repairing with sample video {sample_ref}.")
-                    shutil.copy2(sample_ref, current_video_path)
-                    self.append_job_log(job_id, "⚠️ File video quá ngắn hoặc thiếu moov atom, đã tự động phục hồi", level="WARN", stage="DOWNLOADING")
-                else:
-                    raise ValueError(f"Input video file '{current_video_path}' is corrupted or truncated ({os.path.getsize(current_video_path)} bytes, missing moov atom).")
+                raise ValueError(
+                    f"Input video file '{current_video_path}' is corrupted or truncated "
+                    f"({os.path.getsize(current_video_path)} bytes)."
+                )
 
             # ------------------------------------------------------------------
             # Stage 2: WATERMARK_REMOVAL
@@ -761,35 +758,6 @@ class BatchQueueManager:
                 progress=0.35
             )
 
-            self.append_job_log(
-                job_id,
-                "⚡ Đang phân tách kênh màu, dập tắt viền phấn (Anti-Halo Dilation 5x5) và tái tạo điểm ảnh...",
-                level="INFO",
-                stage="WATERMARK_REMOVAL",
-                progress=0.50
-            )
-
-            stage2_res_path = WatermarkService.remove_watermark_and_subtitles(
-                video_path=current_video_path,
-                config=wm_config,
-                output_path=stage2_out_path,
-                progress_callback=lambda p: self.update_job_progress(job_id, p, stage="WATERMARK_REMOVAL")
-            )
-
-
-            if stage2_res_path and os.path.exists(stage2_res_path):
-                current_video_path = stage2_res_path
-                self.append_job_log(
-                    job_id,
-                    f"✨ Khử sạch phụ đề và watermark thành công -> {os.path.basename(stage2_res_path)}",
-                    level="SUCCESS",
-                    stage="WATERMARK_REMOVAL",
-                    progress=0.65
-                )
-
-            # ------------------------------------------------------------------
-            # Stage 3: REUP_TRANSFORM
-            # ------------------------------------------------------------------
             raw_reup = job.get("reup_config")
             reup_config: ReupConfig
             if isinstance(raw_reup, str):
@@ -804,7 +772,6 @@ class BatchQueueManager:
             else:
                 reup_config = ReupConfig()
 
-            # Merge job params if present
             params = job.get("params") or {}
             if isinstance(params, dict) and params:
                 valid_keys = set(ReupConfig.model_fields.keys())
@@ -814,17 +781,130 @@ class BatchQueueManager:
                         if hasattr(reup_config, target_field):
                             setattr(reup_config, target_field, v)
 
+            original_base = os.path.splitext(
+                job.get("input_file_path") or job.get("input_path") or job.get("source_url") or ""
+            )[0]
+            if original_base:
+                sidecar_srt = original_base + ".vi.srt"
+                sidecar_tts = original_base + ".vi.mp3"
+                if not getattr(reup_config, "srt_path", None) and os.path.exists(sidecar_srt):
+                    reup_config.srt_path = sidecar_srt
+                if not getattr(reup_config, "tts_audio_path", None) and os.path.exists(sidecar_tts):
+                    reup_config.tts_audio_path = sidecar_tts
+                    reup_config.enable_tts = True
+
+            # Merge channel branding overlays (logos / khung) onto this job
+            chan_id = getattr(reup_config, "channel_id", None)
+            if chan_id:
+                try:
+                    with self._get_conn() as conn:
+                        crow = conn.execute(
+                            "SELECT overlays FROM channels WHERE channel_id = ?", (chan_id,)
+                        ).fetchone()
+                    if crow:
+                        raw_ov = crow["overlays"] if "overlays" in crow.keys() else "[]"
+                        parsed = json.loads(raw_ov) if isinstance(raw_ov, str) and raw_ov.strip() else (raw_ov or [])
+                        if isinstance(parsed, list) and parsed:
+                            from app.models.job import OverlayItem
+                            existing = list(getattr(reup_config, "overlays", None) or [])
+                            seen = set()
+                            merged = []
+                            for src in list(parsed) + list(existing):
+                                d = src if isinstance(src, dict) else (src.model_dump() if hasattr(src, "model_dump") else {})
+                                pth = d.get("image_path") or ""
+                                if not pth or pth in seen or not os.path.exists(pth):
+                                    continue
+                                seen.add(pth)
+                                try:
+                                    merged.append(OverlayItem(**{k: v for k, v in d.items() if k in OverlayItem.model_fields}))
+                                except Exception:
+                                    continue
+                            reup_config.overlays = merged
+                            self.append_job_log(
+                                job_id,
+                                f"🖼️ Gắn {len(merged)} logo/khung kênh xuyên suốt video",
+                                level="INFO",
+                                stage="REUP_TRANSFORM",
+                            )
+                except Exception as e:
+                    logger.warning(f"Failed to load channel overlays for {chan_id}: {e}")
+
+            stage2_res_path = None
+            fold_algo = (algo_name or "auto").lower()
+            if fold_algo in ("crop", "none", "off", "disabled"):
+                if fold_algo == "crop":
+                    reup_config.subtitle_bottom_crop = max(
+                        float(getattr(reup_config, "subtitle_bottom_crop", 0.0) or 0.0),
+                        0.18,
+                    )
+                self.append_job_log(
+                    job_id,
+                    "⚡ Gộp cắt phụ đề đáy vào 1 pass Reup — bỏ encode watermark riêng (nhanh gấp 2–3 lần)",
+                    level="INFO",
+                    stage="WATERMARK_REMOVAL",
+                    progress=0.60,
+                )
+            else:
+                self.append_job_log(
+                    job_id,
+                    "⚡ Đang phân tách kênh màu, dập tắt viền phấn (Anti-Halo Dilation 5x5) và tái tạo điểm ảnh...",
+                    level="INFO",
+                    stage="WATERMARK_REMOVAL",
+                    progress=0.50
+                )
+
+                stage2_res_path = WatermarkService.remove_watermark_and_subtitles(
+                    video_path=current_video_path,
+                    config=wm_config,
+                    output_path=stage2_out_path,
+                    progress_callback=lambda p: self.update_job_progress(job_id, p, stage="WATERMARK_REMOVAL")
+                )
+
+                if stage2_res_path and os.path.exists(stage2_res_path):
+                    current_video_path = stage2_res_path
+                    self.append_job_log(
+                        job_id,
+                        f"✨ Khử sạch phụ đề và watermark thành công -> {os.path.basename(stage2_res_path)}",
+                        level="SUCCESS",
+                        stage="WATERMARK_REMOVAL",
+                        progress=0.65
+                    )
+
+            # ------------------------------------------------------------------
+            # Stage 3: REUP_TRANSFORM
+            # ------------------------------------------------------------------
+
             hflip_val = getattr(reup_config, "hflip", True)
             speed_val = getattr(reup_config, "speed_factor", 1.0)
             md5_val = getattr(reup_config, "modify_md5", True)
+            crop_val = getattr(reup_config, "crop_percent", 0.0)
+            grain_val = getattr(reup_config, "film_grain", 0.0)
+            pitch_val = getattr(reup_config, "pitch_shift", True)
+            mute_val = getattr(reup_config, "enable_vocal_mute", False)
+            tts_val = getattr(reup_config, "enable_tts", False)
+            burn_val = getattr(reup_config, "burn_subtitles", True)
 
             self.append_job_log(
                 job_id,
-                f"🎬 [Giai đoạn 3] Áp dụng kỹ thuật biến đổi Reup (Lật ngang={hflip_val}, Tốc độ={speed_val}x, Đột biến MD5={md5_val})...",
+                (
+                    f"🎬 [Giai đoạn 3] Reup FX: hflip={hflip_val}, speed={speed_val}x, "
+                    f"pitch={pitch_val}, crop={crop_val:.2%}, grain={grain_val}, "
+                    f"mute={mute_val}, tts={tts_val}, hardsub={burn_val}, md5={md5_val}"
+                ),
                 level="INFO",
                 stage="REUP_TRANSFORM",
                 progress=0.75
             )
+
+            if getattr(reup_config, "enable_tts", False) or getattr(reup_config, "burn_subtitles", True):
+                lipsync_note = " | lip-sync rate+rubberband" if getattr(reup_config, "enable_lipsync", True) else ""
+                self.append_job_log(
+                    job_id,
+                    f"📝 Nhận lời thoại → dịch tiếng Việt → lồng tiếng khớp timeline gốc (giữ BGM){lipsync_note}",
+                    level="INFO",
+                    stage="REUP_TRANSFORM",
+                    progress=0.72
+                )
 
             if getattr(reup_config, "enable_tts", False):
                 self.append_job_log(

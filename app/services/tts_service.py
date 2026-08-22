@@ -297,10 +297,43 @@ class TTSService:
         volume: str = "+0%"
     ) -> str:
         """Main method to synthesize speech based on engine selection with fallback strategy."""
-        target_engine = engine or self.default_engine
+        target_engine = (engine or self.default_engine or "edge-tts").lower()
+        selected_voice = voice or DEFAULT_VOICES.get(lang, {}).get("female", "vi-VN-HoaiMyNeural")
+
+        # Voice id implies engine
+        vlow = (selected_voice or "").lower()
+        if vlow.startswith("kokoro"):
+            target_engine = "kokoro"
+        elif vlow.startswith("gtts") or vlow == "gtts-vi":
+            target_engine = "gtts"
+        elif vlow.startswith("melo"):
+            target_engine = "melo-tts"
+
+        # Unknown Edge voice ids (kokoro-af_heart, HoaiMy-Fast already mapped in provider)
+        EDGE_PREFIXES = ("vi-vn-", "en-us-", "en-gb-", "zh-cn-", "ja-jp-", "ko-kr-", "th-th-", "fr-fr-", "es-es-", "de-de-", "ru-ru-", "id-id-")
+        if target_engine == "edge-tts" and selected_voice and not any(vlow.startswith(p) for p in EDGE_PREFIXES) and vlow not in ("gtts-vi",):
+            logger.warning(f"Unknown Edge-TTS voice '{selected_voice}', remapping to vi-VN-HoaiMyNeural")
+            selected_voice = "vi-VN-HoaiMyNeural"
+
+        if target_engine in ("kokoro", "kokoro-tts", "kokoro-82m"):
+            try:
+                provider = get_tts_provider("kokoro")
+                return await provider.generate(text=text, lang=lang, voice=selected_voice, output_path=output_path)
+            except Exception as e:
+                logger.warning(f"Kokoro TTS failed ({e}), falling back to Edge-TTS Hoài My")
+                target_engine = "edge-tts"
+                selected_voice = DEFAULT_VOICES.get(lang, {}).get("female", "vi-VN-HoaiMyNeural")
+
+        if target_engine in ("melo", "melo-tts"):
+            try:
+                provider = get_tts_provider("melo-tts")
+                return await provider.generate(text=text, lang=lang, voice=selected_voice, output_path=output_path)
+            except Exception as e:
+                logger.warning(f"Melo TTS failed ({e}), falling back to Edge-TTS")
+                target_engine = "edge-tts"
+                selected_voice = DEFAULT_VOICES.get(lang, {}).get("female", "vi-VN-HoaiMyNeural")
 
         if target_engine == "edge-tts":
-            selected_voice = voice or DEFAULT_VOICES.get(lang, {}).get("female", "vi-VN-HoaiMyNeural")
             try:
                 return await self.generate_speech_edge_tts(
                     text, voice=selected_voice, output_path=output_path, rate=rate, pitch=pitch, volume=volume
@@ -322,19 +355,19 @@ class TTSService:
                 provider = get_tts_provider("coqui-tts")
                 return await provider.generate(text=text, output_path=output_path)
             except Exception as e:
-                logger.warning(f"Coqui TTS failed ({e}), creating silent fallback WAV")
+                logger.warning(f"Coqui TTS failed ({e})")
 
-        if output_path is None:
-            output_path = os.path.join(self.output_dir, f"fallback_{hash(text) & 0xffffffff:08x}.wav")
-        return _create_silent_wav(output_path, duration_sec=1.5)
+        raise TTSServiceError(
+            f"All TTS engines failed for voice={selected_voice} engine={engine}. Refusing silent WAV."
+        )
 
     def _assemble_synchronized_audio(self, clips: List[Dict[str, Any]], total_duration: float, output_path: str) -> bool:
         """Assembles timed audio clips using FFmpeg adelay, amix, and EBU R128 loudnorm volume mastering."""
         from app.services.audio_service import find_ffmpeg_binary
         ffmpeg_bin = find_ffmpeg_binary()
         if not ffmpeg_bin or not clips:
-            _create_silent_wav(output_path, duration_sec=max(1.0, total_duration))
-            return True
+            logger.warning("TTS assemble skipped: no ffmpeg or no clips")
+            return False
 
         inputs = []
         filter_nodes = []
@@ -368,8 +401,8 @@ class TTSService:
         if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
             return True
 
-        _create_silent_wav(output_path, duration_sec=max(1.0, total_duration))
-        return True
+        logger.warning(f"TTS mix assemble failed ({res.returncode}): {(res.stderr or '')[-400:]}")
+        return False
 
     async def synthesize_synchronized_tts(
         self,
@@ -378,7 +411,8 @@ class TTSService:
         voice: str = "vi-VN-HoaiMyNeural",
         lang: str = "vi",
         engine: Optional[str] = None,
-        total_duration: Optional[float] = None
+        total_duration: Optional[float] = None,
+        enable_lipsync: bool = True,
     ) -> Dict[str, Any]:
         """Synthesizes synchronized TTS audio with DeepSeek AI dialogue localization and emotion prosody."""
         if not os.path.exists(srt_path):
@@ -409,25 +443,38 @@ class TTSService:
             else:
                 effective_total_duration = srt_max_end
 
-            for seg in segments:
+            async def _synth_one(seg, next_start: Optional[float] = None):
                 raw_clip_path = os.path.join(temp_dir, f"seg_{seg['index']}_raw.mp3")
                 scaled_clip_path = os.path.join(temp_dir, f"seg_{seg['index']}_scaled.wav")
-
-                text_to_speak = seg.get("translated_text") or seg.get("text", "")
+                text_to_speak = (seg.get("translated_text") or seg.get("text", "")).strip()
+                if not text_to_speak or text_to_speak.startswith("["):
+                    return None
+                srt_dur = float(seg.get("duration") or 0.0)
+                if next_start is not None:
+                    srt_dur = min(srt_dur, max(0.18, float(next_start) - float(seg["start_time"]) - 0.04))
                 emotion = seg.get("emotion", "neutral")
-
-                # Dynamic emotion prosody mapping for expressive voice
                 rate_val = "+0%"
                 pitch_val = "+0Hz"
                 if emotion in ("angry", "terrified", "dramatic"):
-                    rate_val = "+5%"
                     pitch_val = "+4Hz"
                 elif emotion in ("gentle", "reassuring", "sad"):
-                    rate_val = "-3%"
                     pitch_val = "+1Hz"
                 elif emotion in ("surprised", "excited"):
-                    rate_val = "+6%"
                     pitch_val = "+6Hz"
+
+                lipsync_on = bool(enable_lipsync)
+                if lipsync_on:
+                    from app.services.lipsync_service import lipsync_prepare_segment
+                    prep = lipsync_prepare_segment(text_to_speak, srt_dur)
+                    text_to_speak = prep["text"]
+                    rate_val = prep["rate"]
+                else:
+                    if emotion in ("angry", "terrified", "dramatic"):
+                        rate_val = "+5%"
+                    elif emotion in ("gentle", "reassuring", "sad"):
+                        rate_val = "-3%"
+                    elif emotion in ("surprised", "excited"):
+                        rate_val = "+6%"
 
                 try:
                     await self.generate_speech(
@@ -441,40 +488,62 @@ class TTSService:
                     )
                 except Exception as e:
                     logger.warning(f"TTS synthesis failed for segment {seg['index']}: {e}")
-                    _create_silent_wav(raw_clip_path, duration_sec=seg["duration"])
+                    return None
+                if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 256:
+                    logger.warning(f"Skipping empty TTS clip for segment {seg['index']}")
+                    return None
 
-                if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) == 0:
-                    _create_silent_wav(raw_clip_path, duration_sec=seg["duration"])
-
-                audio_dur = get_audio_duration(raw_clip_path)
-                srt_dur = seg["duration"]
-
-                if srt_dur > 0.1 and audio_dur > 0.1:
-                    speed_factor = audio_dur / srt_dur
+                if lipsync_on:
+                    from app.services.lipsync_service import fit_clip_to_window
+                    ok = fit_clip_to_window(raw_clip_path, scaled_clip_path, srt_dur)
+                    clip_to_use = scaled_clip_path if ok else raw_clip_path
+                    clamped_speed = get_audio_duration(raw_clip_path) / max(0.18, srt_dur)
                 else:
-                    speed_factor = 1.0
-
-                # Cap speed factor within [0.85, 1.30] to maintain natural human timbre
-                clamped_speed = max(0.85, min(1.30, speed_factor))
-
-                if abs(clamped_speed - 1.0) > 0.05:
-                    success = scale_audio_speed_ffmpeg(raw_clip_path, scaled_clip_path, clamped_speed)
-                    clip_to_use = scaled_clip_path if success else raw_clip_path
-                else:
-                    clip_to_use = raw_clip_path
+                    audio_dur = get_audio_duration(raw_clip_path)
+                    if srt_dur > 0.1 and audio_dur > 0.1:
+                        speed_factor = audio_dur / srt_dur
+                    else:
+                        speed_factor = 1.0
+                    clamped_speed = max(0.85, min(1.30, speed_factor))
+                    if abs(clamped_speed - 1.0) > 0.05:
+                        success = scale_audio_speed_ffmpeg(raw_clip_path, scaled_clip_path, clamped_speed)
+                        clip_to_use = scaled_clip_path if success else raw_clip_path
+                    else:
+                        clip_to_use = raw_clip_path
 
                 final_clip_dur = get_audio_duration(clip_to_use)
-                processed_clips.append({
-                    "segment": seg,
+                return {
+                    "segment": {**seg, "text": text_to_speak, "duration": srt_dur},
                     "clip_path": clip_to_use,
-                    "audio_dur": audio_dur,
+                    "audio_dur": get_audio_duration(raw_clip_path),
                     "target_dur": srt_dur,
                     "speed_factor": clamped_speed,
                     "final_dur": final_clip_dur
-                })
+                }
+
+            batch_size = 6
+            for i in range(0, len(segments), batch_size):
+                batch = segments[i:i + batch_size]
+                coros = []
+                for j, seg in enumerate(batch):
+                    nxt = None
+                    abs_i = i + j
+                    if abs_i + 1 < len(segments):
+                        nxt = float(segments[abs_i + 1]["start_time"])
+                    coros.append(_synth_one(seg, nxt))
+                results = await asyncio.gather(*coros, return_exceptions=True)
+                for item in results:
+                    if isinstance(item, dict) and item.get("clip_path"):
+                        processed_clips.append(item)
+                    elif isinstance(item, Exception):
+                        logger.warning(f"TTS batch item failed: {item}")
 
             os.makedirs(os.path.dirname(os.path.abspath(output_audio_path)), exist_ok=True)
-            self._assemble_synchronized_audio(processed_clips, effective_total_duration, output_audio_path)
+            if not processed_clips:
+                raise TTSServiceError("No TTS clips were generated from SRT segments")
+            ok = self._assemble_synchronized_audio(processed_clips, effective_total_duration, output_audio_path)
+            if not ok:
+                raise TTSServiceError("Failed to assemble synchronized TTS audio")
 
             return {
                 "status": "completed",
