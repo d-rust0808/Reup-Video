@@ -562,3 +562,81 @@ class SubtitleDetector:
 def detect_subtitle_roi(video_path: str, padding: int = 8) -> Tuple[int, int, int, int]:
     """Module-level helper used by WatermarkService."""
     return SubtitleDetector().detect_subtitle_roi(video_path, padding=padding)
+
+
+def persistent_text_cover_filters(video_path: str, max_boxes: int = 4) -> List[str]:
+    """
+    Sample a few frames, find caption-like boxes in the MID of the frame
+    (not the bottom band we crop), and return ffmpeg delogo filters.
+    """
+    if not HAS_OPENCV or not video_path or not os.path.exists(video_path):
+        return []
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return []
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    if w < 32 or h < 32:
+        cap.release()
+        return []
+    indices = [max(0, int(n * f)) for f in (0.12, 0.28, 0.45, 0.62, 0.80)] if n > 10 else [0]
+    raw_boxes: List[Tuple[int, int, int, int]] = []
+    y_lo, y_hi = int(h * 0.10), int(h * 0.78)
+    try:
+        for idx in indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            for x, y, bw, bh in detect_text_boxes_opencv(frame, padding=4):
+                if bh <= 0 or bw <= 0:
+                    continue
+                cy = y + bh / 2.0
+                if cy < y_lo or cy > y_hi:
+                    continue
+                ar = bw / float(bh)
+                if ar < 1.6 or bw < w * 0.18:
+                    continue
+                if bw * bh > w * h * 0.16:
+                    continue
+                raw_boxes.append((x, y, bw, bh))
+    finally:
+        cap.release()
+    if not raw_boxes:
+        return []
+
+    # Cluster similar boxes across samples
+    clusters: List[List[int]] = []  # [x,y,x2,y2,count]
+    for x, y, bw, bh in raw_boxes:
+        x2, y2 = x + bw, y + bh
+        hit = False
+        for c in clusters:
+            cx, cy, cx2, cy2, cnt = c
+            if abs((x + x2) / 2 - (cx + cx2) / 2) < w * 0.12 and abs((y + y2) / 2 - (cy + cy2) / 2) < h * 0.08:
+                c[0] = min(cx, x)
+                c[1] = min(cy, y)
+                c[2] = max(cx2, x2)
+                c[3] = max(cy2, y2)
+                c[4] = cnt + 1
+                hit = True
+                break
+        if not hit:
+            clusters.append([x, y, x2, y2, 1])
+    clusters = [c for c in clusters if c[4] >= 2]
+    clusters.sort(key=lambda c: c[4], reverse=True)
+    filters: List[str] = []
+    for x, y, x2, y2, _ in clusters[:max_boxes]:
+        x = max(8, x - 4)
+        y = max(8, y - 4)
+        x2 = min(w - 8, x2 + 4)
+        y2 = min(h - 8, y2 + 4)
+        bw = (x2 - x) // 2 * 2
+        bh = (y2 - y) // 2 * 2
+        x = x // 2 * 2
+        y = y // 2 * 2
+        if bw < 24 or bh < 12:
+            continue
+        filters.append(f"delogo=x={x}:y={y}:w={bw}:h={bh}:show=0")
+    return filters
+

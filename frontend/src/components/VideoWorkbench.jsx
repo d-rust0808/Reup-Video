@@ -18,7 +18,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
   const [options, setOptions] = useState(() => {
     const saved = loadSession().workbenchOptions;
     return {
-    wm_method: 'crop',
+    wm_method: 'all',
     hflip: true,
     speed_ratio: 1.03,
     pitch_shift: true,
@@ -31,6 +31,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     enable_vocal_mute: true,
     enable_tts: true,
     enable_lipsync: true,
+    vietsub_style: 'auto',
     burn_subtitles: true,
     tts_voice: 'vi-VN-HoaiMyNeural',
     tts_engine: 'edge-tts',
@@ -189,6 +190,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         enable_vocal_mute: options.enable_vocal_mute,
         enable_tts: options.enable_tts,
         enable_lipsync: options.enable_lipsync !== false,
+        vietsub_style: options.vietsub_style || 'auto',
         burn_subtitles: options.burn_subtitles !== false,
         tts_voice: voice,
         tts_engine: ttsEngine,

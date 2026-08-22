@@ -8,6 +8,7 @@ Target Path: app/services/pyvideotrans_service.py
 """
 
 import os
+import re
 import sys
 import logging
 import subprocess
@@ -120,7 +121,7 @@ class PyVideoTransService:
         folder = os.path.join(download_root, f"models--Systran--faster-whisper-{name}")
         return os.path.isdir(folder)
 
-    def _extract_stt_wav(self, video_or_audio_path: str, target_dir: str) -> str:
+    def _extract_stt_wav(self, video_or_audio_path: str, target_dir: str, max_seconds: Optional[float] = None) -> str:
         """Extract 16 kHz mono WAV so Whisper does not decode the full video."""
         from app.services.audio_service import find_ffmpeg_binary
         ffmpeg_bin = find_ffmpeg_binary()
@@ -131,8 +132,10 @@ class PyVideoTransService:
             ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
             "-i", video_or_audio_path,
             "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
-            wav_path,
         ]
+        if max_seconds and max_seconds > 0:
+            cmd.extend(["-t", f"{float(max_seconds):.2f}"])
+        cmd.append(wav_path)
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)
             if res.returncode == 0 and os.path.exists(wav_path) and os.path.getsize(wav_path) > 1024:
@@ -177,6 +180,7 @@ class PyVideoTransService:
         with open(srt_path, "w", encoding="utf-8") as f:
             for seg in segments:
                 text = (getattr(seg, "text", None) or "").strip()
+                text = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", text)
                 if not text:
                     continue
                 start = float(getattr(seg, "start", 0.0) or 0.0)
@@ -195,7 +199,8 @@ class PyVideoTransService:
         output_dir: Optional[str] = None,
         model_name: str = "base",
         recogn_type: int = 0,
-        detect_lang: str = "auto"
+        detect_lang: str = "auto",
+        max_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Performs Speech-to-Text (STT) transcription with cached faster-whisper."""
         if not os.path.exists(video_or_audio_path):
@@ -215,7 +220,7 @@ class PyVideoTransService:
             if name not in model_candidates:
                 model_candidates.append(name)
 
-        audio_for_stt = self._extract_stt_wav(video_or_audio_path, target_dir)
+        audio_for_stt = self._extract_stt_wav(video_or_audio_path, target_dir, max_seconds=max_seconds)
         tmp_wav = audio_for_stt if audio_for_stt != video_or_audio_path else None
 
         try:
@@ -290,8 +295,11 @@ class PyVideoTransService:
         self,
         subtitle_file_path: str,
         target_lang: str = "vi",
+        translate_provider: int = 0,
         output_dir: Optional[str] = None,
-        translate_provider: int = 0
+        style: str = "dub",
+        title: str = "",
+        duration: float = 0.0,
     ) -> Dict[str, Any]:
         """Translates subtitle file (SRT/VTT) into target language using GoogleTranslator or CLI."""
         if not os.path.exists(subtitle_file_path):
@@ -308,7 +316,12 @@ class PyVideoTransService:
                 segs = parse_srt_segments(subtitle_file_path)
                 src_texts = [(s.get("text") or "").strip() for s in segs]
                 if src_texts and all(src_texts):
-                    grok_out = translate_cues(src_texts, target_lang=target_lang)
+                    grok_out = translate_cues(
+                        src_texts,
+                        target_lang=target_lang,
+                        style=style or "dub",
+                        title=title or "",
+                    )
                     if grok_out and len(grok_out) == len(segs):
                         base_stem = os.path.splitext(os.path.basename(subtitle_file_path))[0]
                         out_srt = os.path.join(target_dir, f"{base_stem}_{target_lang}.srt")

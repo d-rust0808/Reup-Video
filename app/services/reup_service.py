@@ -153,6 +153,11 @@ def build_reup_filtergraph(
         (filter_complex_str, includes_audio_stream, video_filters_str, audio_filters_str)
     """
     vf_nodes = []
+    extra_cover = (getattr(cfg, "text_cover_vf", None) or "").strip()
+    if extra_cover:
+        # delogo on the original frame BEFORE hflip/crop so pixel coords stay valid
+        vf_nodes.extend([p for p in extra_cover.split(",") if p.strip()])
+
     if cfg.hflip:
         vf_nodes.append("hflip")
 
@@ -174,7 +179,7 @@ def build_reup_filtergraph(
     if burn_srt_path and os.path.exists(burn_srt_path):
         # Cover leftover source hardsub (Chinese Douyin captions sit higher than a 13–18% crop)
         vf_nodes.append(
-            "drawbox=x=0:y=ih-trunc(ih*0.16/2)*2:w=iw:h=trunc(ih*0.16/2)*2:color=black@0.72:t=fill"
+            "drawbox=x=0:y=ih-trunc(ih*0.11/2)*2:w=iw:h=trunc(ih*0.11/2)*2:color=black@0.62:t=fill"
         )
         style = (
             "FontName=DejaVu Sans,FontSize=18,Outline=2,Shadow=1,Alignment=2,"
@@ -642,11 +647,18 @@ def process_reup_video(
                 if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     ffmpeg_success = True
                 else:
-                    logger.error(
-                        "FFmpeg reup failed (%s): %s",
-                        res.returncode,
-                        (res.stderr or res.stdout or "")[-1500:],
-                    )
+                    err = (res.stderr or res.stdout or "")
+                    logger.error("FFmpeg reup failed (%s): %s", res.returncode, err[-1500:])
+                    if "delogo" in fc and "Logo area is outside" in err:
+                        logger.warning("Retrying encode without mid-text delogo")
+                        cfg.text_cover_vf = ""
+                        filter_complex, includes_audio, vf_str, af_str = build_reup_filtergraph(
+                            cfg, has_audio=has_audio, burn_srt_path=srt_override if burn_in_graph else None
+                        )
+                        cmd[cmd.index("-filter_complex") + 1] = filter_complex
+                        res2 = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                        if res2.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                            ffmpeg_success = True
             except Exception as e:
                 logger.warning(f"FFmpeg execution skipped/failed ({e}), falling back to direct stream copy")
     finally:
@@ -752,6 +764,16 @@ class ReupService:
         6. Hash modification
         """
         cfg = config or ReupConfig()
+        if not getattr(cfg, "text_cover_vf", None):
+            try:
+                from app.services.subtitle_detector import persistent_text_cover_filters
+                covers = persistent_text_cover_filters(video_path)
+                if covers:
+                    cfg.text_cover_vf = ",".join(covers)
+            except Exception as e:
+                logger.warning(f"mid-text cover detect skipped: {e}")
+        if float(getattr(cfg, "subtitle_bottom_crop", 0) or 0) <= 0:
+            cfg.subtitle_bottom_crop = 0.10
         if not output_path:
             base, ext = os.path.splitext(video_path)
             output_path = f"{base}_reup{ext}"
@@ -778,21 +800,55 @@ class ReupService:
                 pyvideotrans = PyVideoTransService()
 
                 src_lang = cfg.source_lang or "auto"
+                from app.services.xai_media_service import resolve_vietsub_style, LANG_DEFAULT_VOICE
+                from app.services.tts_service import get_audio_duration
+                vid_dur = get_audio_duration(video_path)
+                style = resolve_vietsub_style(getattr(cfg, "vietsub_style", "auto") or "auto", vid_dur or 0)
+                cfg.vietsub_style = style
+                lang = (cfg.target_lang or "vi").lower()
+                voice = cfg.tts_voice or ""
+                if lang != "vi" and (not voice or voice.startswith("vi-")):
+                    cfg.tts_voice = LANG_DEFAULT_VOICE.get(lang, voice)
+                stt_max = 90.0 if style == "recap" and (vid_dur or 0) > 180 else None
                 stt_res = pyvideotrans.speech_to_text(
                     video_path,
                     detect_lang=src_lang,
                     model_name="base",
+                    max_seconds=stt_max,
                 )
                 srt_path = stt_res.get("srt_path")
                 is_fallback = stt_res.get("status") in ("fallback", "empty")
 
                 if isinstance(srt_path, str) and os.path.exists(srt_path) and not is_fallback:
-                    trans_res = pyvideotrans.translate_subtitles(srt_path, target_lang=cfg.target_lang)
+                    trans_res = pyvideotrans.translate_subtitles(
+                        srt_path,
+                        target_lang=cfg.target_lang,
+                        style=style,
+                        title=getattr(cfg, "post_title", "") or "",
+                        duration=vid_dur or 0,
+                    )
                     raw_trans_srt = trans_res.get("srt_path") if trans_res else None
                     translated_srt = (
                         raw_trans_srt if isinstance(raw_trans_srt, str) and raw_trans_srt else srt_path
                     )
                     logger.info(f"Vietsub SRT ready: {translated_srt}")
+                    if style == "recap" and translated_srt:
+                        try:
+                            from app.services.xai_media_service import build_recap_lines, recap_to_srt
+                            from app.services.tts_service import parse_srt_segments
+                            segs = parse_srt_segments(translated_srt)
+                            lines = build_recap_lines(
+                                title=getattr(cfg, "post_title", "") or "",
+                                texts=[s.get("text") or "" for s in segs],
+                                target_lang=cfg.target_lang,
+                                n=8,
+                            )
+                            if lines:
+                                recap_path = os.path.splitext(translated_srt)[0] + ".recap.srt"
+                                translated_srt = recap_to_srt(lines, vid_dur or 60.0, recap_path)
+                                logger.info(f"Recap narrator SRT: {translated_srt}")
+                        except Exception as e:
+                            logger.warning(f"Recap rewrite skipped: {e}")
                 else:
                     # Sidecar next to the source (e.g. douyin_123.vi.srt) so demo clips still get hardsub
                     base_noext = os.path.splitext(video_path)[0]
@@ -823,7 +879,7 @@ class ReupService:
                             lang=cfg.target_lang,
                             engine=cfg.tts_engine,
                             total_duration=vid_dur,
-                            enable_lipsync=getattr(cfg, "enable_lipsync", True),
+                            enable_lipsync=getattr(cfg, "enable_lipsync", True) and style == "dub",
                         )
 
                     try:
@@ -869,7 +925,7 @@ class ReupService:
                         lang=cfg.target_lang,
                         engine=cfg.tts_engine,
                         total_duration=vid_dur,
-                        enable_lipsync=getattr(cfg, "enable_lipsync", True),
+                        enable_lipsync=getattr(cfg, "enable_lipsync", True) and (getattr(cfg, "vietsub_style", "dub") == "dub"),
                     )
 
                 try:

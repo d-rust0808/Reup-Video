@@ -187,10 +187,13 @@ def build_vocal_mute_ffmpeg_filter(
 
     filters: List[str] = []
 
-    # Keep BGM body in silent gaps; only notch speech so dubbed voice can sit on top.
-    filters.append("equalizer=f=1200:t=q:w=1.2:g=-6")
-    filters.append("equalizer=f=2800:t=q:w=1.2:g=-5")
-    filters.append("volume=0.78")
+    # Kill speech band (Chinese leak) but keep bass + air so BGM isn't empty.
+    # Mid-range 300–4000 Hz is where dialogue lives.
+    filters.append("equalizer=f=350:t=q:w=1.0:g=-16")
+    filters.append("equalizer=f=1000:t=q:w=1.3:g=-20")
+    filters.append("equalizer=f=2000:t=q:w=1.3:g=-20")
+    filters.append("equalizer=f=3200:t=q:w=1.1:g=-14")
+    filters.append("volume=0.42")
 
     return ",".join(filters)
 

@@ -16,7 +16,6 @@ from app.services.opencv_inpainter import (
 )
 from app.services.reup_service import build_reup_filtergraph, scale_srt_timestamps
 from app.services.subtitle_detector import detect_text_boxes_opencv, HAS_APPLE_VISION
-from app.services.watermark_service import inpaint_video_ffmpeg
 
 
 def test_apple_vision_flag_defined_on_linux():
@@ -127,6 +126,7 @@ def test_hardsub_filter_uses_original_timestamps_before_setpts(tmp_path):
     assert "drawbox=" in vf
     assert vf.index("drawbox=") < vf.index("subtitles=")
     assert vf.index("subtitles=") < vf.index("setpts=")
+    assert "ih*0.11" in vf
 
 
 def test_lipsync_compacts_and_rates():
@@ -157,6 +157,7 @@ def test_lipsync_compacts_and_rates():
 def test_lipsync_default_on():
     cfg = ReupConfig()
     assert cfg.enable_lipsync is True
+    assert cfg.vietsub_style == "auto"
 
 
 def test_tts_mix_ducks_only_during_speech():
@@ -166,5 +167,19 @@ def test_tts_mix_ducks_only_during_speech():
     assert "sidechaincompress" in fc
     assert "volume=0.22" not in fc
     mute = build_vocal_mute_ffmpeg_filter(preserve_bgm=True)
-    assert "volume=0.78" in mute
+    assert "volume=0.42" in mute
     assert "volume=0.30" not in mute
+
+
+def test_vietsub_style_auto_picks_recap_for_long_clips():
+    from app.services.xai_media_service import resolve_vietsub_style
+    assert resolve_vietsub_style("auto", 60) == "dub"
+    assert resolve_vietsub_style("auto", 200) == "narrator"
+    assert resolve_vietsub_style("auto", 900) == "recap"
+    assert resolve_vietsub_style("funny", 900) == "funny"
+
+
+def test_mid_text_cover_appended_to_filtergraph():
+    cfg = ReupConfig(text_cover_vf="delogo=x=10:y=10:w=80:h=20:show=0", film_grain=0)
+    _, _, vf, _ = build_reup_filtergraph(cfg, has_audio=False)
+    assert "delogo=" in vf

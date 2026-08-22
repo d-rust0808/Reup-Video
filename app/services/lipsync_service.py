@@ -82,6 +82,7 @@ def regroup_words_to_cues(
         if end <= start:
             end = start + 0.35
         text = " ".join(w["text"] for w in buf).strip()
+        text = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", text)
         text = re.sub(r"\s+", " ", text)
         if text:
             cues.append({

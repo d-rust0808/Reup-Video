@@ -41,6 +41,7 @@ class ReupPayload(BaseModel):
     enable_vocal_mute: Optional[bool] = True
     enable_tts: Optional[bool] = False
     enable_lipsync: Optional[bool] = True
+    vietsub_style: Optional[str] = "auto"
     burn_subtitles: Optional[bool] = True
     tts_voice: Optional[str] = "vi-VN-HoaiMyNeural"
     tts_engine: Optional[str] = "edge-tts"
@@ -81,6 +82,7 @@ class ProcessJobRequest(BaseModel):
     enable_vocal_mute: Optional[bool] = True
     enable_tts: Optional[bool] = False
     enable_lipsync: Optional[bool] = True
+    vietsub_style: Optional[str] = "auto"
     burn_subtitles: Optional[bool] = True
     tts_voice: Optional[str] = "vi-VN-HoaiMyNeural"
     tts_engine: Optional[str] = "edge-tts"
@@ -273,6 +275,10 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         enable_vocal_mute=reup_vocal_mute if reup_vocal_mute is not None else True,
         enable_tts=reup_tts if reup_tts is not None else False,
         enable_lipsync=reup_lipsync if reup_lipsync is not None else True,
+        vietsub_style=(
+            (req.reup.vietsub_style if req.reup and getattr(req.reup, "vietsub_style", None) else getattr(req, "vietsub_style", None))
+            or "auto"
+        ),
         burn_subtitles=reup_burn if reup_burn is not None else True,
         tts_voice=reup_tts_voice,
         tts_engine=reup_tts_engine or "edge-tts",

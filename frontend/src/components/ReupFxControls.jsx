@@ -97,7 +97,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
           {[
             { id: 'all', label: '🚀 Siêu Cấp Toàn Năng (All-In-One)', desc: 'Vừa cắt sạch 100% phụ đề đáy vừa inpaint quét xóa sạch logo/text ở giữa và đỉnh (Khuyên dùng)' },
             { id: 'auto', label: '🔮 Inpaint Nét Chữ AI + OpenCV', desc: 'Tự động quét & xóa sạch chữ/logo trên mọi vị trí (Giữ nguyên 100% khung hình)' },
-            { id: 'crop', label: '🌟 Cắt Bỏ Phụ Đề Đáy (Crop 18%)', desc: 'Cắt bỏ dải phụ đề đáy video (chỉ áp dụng cho đáy video)' },
+            { id: 'crop', label: '🌟 Cắt Bỏ Phụ Đề Đáy (Crop 10%)', desc: 'Cắt mỏng dải phụ đề đáy, không nuốt khung hình' },
             { id: 'boxblur', label: '🎬 Dải Mờ Điện Ảnh (Blur Bar)', desc: 'Làm mờ mịn dải phụ đề phong cách điện ảnh' },
             { id: 'telea', label: '⚡ OpenCV Telea (Nhanh)', desc: 'Xóa mượt mà theo vùng ROI đã chọn' },
             { id: 'none', label: '🚫 Giữ Nguyên Khung Hình', desc: 'Không can thiệp phụ đề/watermark' },
@@ -267,9 +267,9 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
             <VolumeX className="w-4 h-4 text-rose-600 shrink-0" />
             <div>
               <label className="text-xs font-bold text-slate-700 cursor-pointer block" htmlFor="vocal-mute-toggle">
-                Khử Giọng Nói Gốc (Giữ Nhạc Nền BGM)
+                Tắt tiếng gốc (khử thoại, giữ BGM)
               </label>
-              <span className="text-[10px] text-slate-500 block">Giữ nhạc nền đầy ở đoạn không lời, chỉ hạ khi có thoại Việt</span>
+              <span className="text-[10px] text-slate-500 block">Cắt dải giọng gốc — đoạn không lời vẫn còn nhạc, không còn tiếng Trung</span>
             </div>
           </div>
           <input
@@ -340,6 +340,49 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                   onChange={(e) => handleChange('enable_lipsync', e.target.checked)}
                   className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-purple-300 shrink-0 cursor-pointer"
                 />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold text-purple-900 mb-1.5">Kiểu Vietsub / lồng tiếng</label>
+                <select
+                  value={options.vietsub_style || 'auto'}
+                  onChange={(e) => handleChange('vietsub_style', e.target.value)}
+                  className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2.5 text-xs text-slate-900 font-bold outline-none focus:ring-2 focus:ring-purple-400 cursor-pointer shadow-2xs"
+                >
+                  <option value="auto">Tự chọn — clip ngắn lồng tiếng, clip dài kể lại</option>
+                  <option value="dub">Lồng tiếng khớp khẩu hình (từng câu)</option>
+                  <option value="narrator">Kể lại (người dẫn chuyện, ngôi 3)</option>
+                  <option value="recap">Tóm tắt voice-over (clip dài 10–45 phút)</option>
+                  <option value="funny">Bản hài / văn phong mạng</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold text-purple-900 mb-1.5">Ngôn ngữ đích</label>
+                <select
+                  value={options.target_lang || 'vi'}
+                  onChange={(e) => {
+                    const lang = e.target.value;
+                    const voices = {
+                      vi: 'vi-VN-HoaiMyNeural',
+                      en: 'en-US-AriaNeural',
+                      th: 'th-TH-PremwadeeNeural',
+                      id: 'id-ID-GadisNeural',
+                      ja: 'ja-JP-NanamiNeural',
+                      ko: 'ko-KR-SunHiNeural',
+                      pt: 'pt-BR-FranciscaNeural',
+                    };
+                    handleChange('target_lang', lang);
+                    onChange({ ...options, target_lang: lang, tts_voice: voices[lang] || options.tts_voice });
+                  }}
+                  className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2.5 text-xs text-slate-900 font-bold outline-none focus:ring-2 focus:ring-purple-400 cursor-pointer shadow-2xs mb-2"
+                >
+                  <option value="vi">Tiếng Việt</option>
+                  <option value="en">English</option>
+                  <option value="th">ไทย Thai</option>
+                  <option value="id">Bahasa Indonesia</option>
+                  <option value="ja">日本語 Japanese</option>
+                  <option value="ko">한국어 Korean</option>
+                  <option value="pt">Português</option>
+                </select>
               </div>
               <div>
                 <label className="block text-[11px] font-bold text-purple-900 mb-1.5 flex items-center justify-between">
