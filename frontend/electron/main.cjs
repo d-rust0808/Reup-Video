@@ -23,6 +23,8 @@ function findPythonExecutable() {
 
   // Check local venvs first
   const candidates = [
+    path.join(ROOT_DIR, 'venv311', 'bin', 'python'),
+    path.join(ROOT_DIR, 'venv311', 'bin', 'python3'),
     path.join(ROOT_DIR, '.venv', 'bin', 'python'),
     path.join(ROOT_DIR, '.venv', 'bin', 'python3'),
     path.join(ROOT_DIR, 'venv', 'bin', 'python'),
@@ -165,8 +167,26 @@ function createMainWindow() {
     mainWindow.show();
   });
 
+  // Pipe renderer console logs to Node stdout for debugging
+  mainWindow.webContents.on('console-message', (_event, _level, message) => {
+    console.log(`[Renderer] ${message}`);
+  });
+
+  const devServerUrl = process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:3000';
+
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
+    console.warn(`[Electron] Failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
+    if (isDev && !isQuitting) {
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          console.log('[Electron] Retrying dev server load...');
+          mainWindow.loadURL(devServerUrl);
+        }
+      }, 1200);
+    }
+  });
+
   if (isDev) {
-    const devServerUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:3000';
     mainWindow.loadURL(devServerUrl);
   } else {
     const distPath = path.join(__dirname, '..', 'dist', 'index.html');

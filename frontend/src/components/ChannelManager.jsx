@@ -685,7 +685,6 @@ export function ChannelManager() {
                   </div>
                 ) : (
                   filteredVideos.map((vid) => {
-                    const videoSrc = getMediaUrl(`/api/v1/stream/${vid.job_id}`);
                     const isPublished = vid.publish_status === 'PUBLISHED';
                     const isReady = vid.publish_status === 'READY';
 

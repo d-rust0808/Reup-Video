@@ -29,6 +29,30 @@ def find_ffmpeg_binary() -> Optional[str]:
     return path
 
 
+_LIBASS_CACHE: Optional[bool] = None
+
+
+def ffmpeg_supports_libass(ffmpeg_bin: Optional[str] = None) -> bool:
+    """True if this ffmpeg has the `subtitles` filter (built with libass).
+    Slim Homebrew `ffmpeg` builds omit it; `ffmpeg-full` includes it."""
+    global _LIBASS_CACHE
+    if _LIBASS_CACHE is not None:
+        return _LIBASS_CACHE
+    binary = ffmpeg_bin or find_ffmpeg_binary()
+    if not binary:
+        _LIBASS_CACHE = False
+        return False
+    try:
+        res = subprocess.run(
+            [binary, "-hide_banner", "-filters"],
+            capture_output=True, text=True, check=False,
+        )
+        _LIBASS_CACHE = " subtitles " in (res.stdout or "")
+    except Exception:
+        _LIBASS_CACHE = False
+    return _LIBASS_CACHE
+
+
 def browser_safe_encode_args(ffmpeg_bin: str) -> list:
     """H.264/AAC flags that HTML5 players (Chrome/Safari) can actually play."""
     encoder_name, encoder_flags = detect_h264_encoder(ffmpeg_bin)
@@ -366,8 +390,58 @@ def scale_srt_timestamps(srt_path: str, factor: float, output_path: Optional[str
     return dest
 
 
+def _probe_video_size(path: str) -> Tuple[int, int]:
+    """Return (w, h) via ffprobe, defaulting to 1080x1920 on failure."""
+    from app.services.audio_service import find_ffprobe_binary
+    probe = find_ffprobe_binary()
+    if probe:
+        try:
+            res = subprocess.run(
+                [probe, "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", path],
+                capture_output=True, text=True, check=False,
+            )
+            w, h = res.stdout.strip().split("x")
+            return int(w), int(h)
+        except Exception:
+            pass
+    return 1080, 1920
+
+
+def _burn_hardsub_overlay(ffmpeg_bin: str, video_path: str, srt_path: str, output_path: str) -> bool:
+    """libass-free hardsub: render cues to PNGs (Pillow) and composite via overlay."""
+    import tempfile
+    from app.services.subtitle_overlay import render_srt_to_overlays, build_overlay_filter
+
+    w, h = _probe_video_size(video_path)
+    tmp_dir = tempfile.mkdtemp(prefix="visub_ovl_")
+    try:
+        overlays = render_srt_to_overlays(srt_path, w, h, tmp_dir)
+        if not overlays:
+            logger.warning("Subtitle overlay produced no cues; leaving video unchanged")
+            return False
+        fc, input_args = build_overlay_filter(overlays)
+        tmp_out = output_path + ".ovlsub.tmp.mp4"
+        encode_args = browser_safe_encode_args(ffmpeg_bin)
+        cmd = [ffmpeg_bin, "-y", "-i", video_path, *input_args,
+               "-filter_complex", fc, "-map", "[v_out]", "-map", "0:a?",
+               *encode_args, "-c:a", "copy", tmp_out]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 0:
+            os.replace(tmp_out, output_path)
+            logger.info("Burned Vietnamese hardsub via PIL overlay (%d cues)", len(overlays))
+            return True
+        logger.warning("Overlay hardsub failed (%s): %s", res.returncode, (res.stderr or "")[-500:])
+        if os.path.exists(tmp_out):
+            os.remove(tmp_out)
+        return False
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def burn_vietnamese_hardsub(video_path: str, srt_path: str, output_path: str, speed_factor: float = 1.0) -> bool:
-    """Burns a Vietnamese SRT onto video as hardsub. Returns True on success."""
+    """Burns a Vietnamese SRT onto video as hardsub. Returns True on success.
+    Uses native libass `subtitles=` when available, else a Pillow PNG overlay."""
     if not os.path.exists(video_path) or not os.path.exists(srt_path):
         return False
     ffmpeg_bin = find_ffmpeg_binary()
@@ -383,6 +457,15 @@ def burn_vietnamese_hardsub(video_path: str, srt_path: str, output_path: str, sp
         except Exception as e:
             logger.warning(f"SRT time-scale failed ({e}); burning original timings")
             work_srt = srt_path
+
+    if not ffmpeg_supports_libass(ffmpeg_bin):
+        ok = _burn_hardsub_overlay(ffmpeg_bin, video_path, work_srt, output_path)
+        if scaled and os.path.exists(scaled) and scaled != srt_path:
+            try:
+                os.remove(scaled)
+            except OSError:
+                pass
+        return ok
 
     fontfile = _find_subtitle_font()
     style = (
@@ -602,8 +685,12 @@ def process_reup_video(
         except Exception:
             lib_bgm_path = raw_bgm if os.path.isfile(str(raw_bgm)) else None
     srt_override = kwargs.get("srt_override")
+    # Only bake subtitles into the master graph when this ffmpeg has libass.
+    # Otherwise burn them in a second pass (native subtitles= or PIL overlay).
     burn_in_graph = bool(
-        srt_override and os.path.exists(srt_override) and getattr(cfg, "burn_subtitles", True)
+        srt_override and os.path.exists(srt_override)
+        and getattr(cfg, "burn_subtitles", True)
+        and ffmpeg_supports_libass()
     )
 
     if (not lib_bgm_path) and has_audio and cfg.enable_vocal_mute and cfg.vocal_mute_strategy in ("auto", "demucs"):

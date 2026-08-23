@@ -83,7 +83,9 @@ def get_lama_session():
     try:
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = min(4, max(1, (os.cpu_count() or 2) // 2))
-        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        # ORT_ENABLE_ALL / ORT_ENABLE_EXTENDED segfault (SIGSEGV) loading lama.onnx on
+        # onnxruntime 1.19.x. BASIC loads and runs full inference cleanly.
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
         providers = ["CPUExecutionProvider"]
         avail = ort.get_available_providers()
         if "CUDAExecutionProvider" in avail:

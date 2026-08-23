@@ -41,12 +41,13 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
   const [maxVideos, setMaxVideos] = useState(boot.maxVideos || 8);
   const [autoReup, setAutoReup] = useState(boot.autoReup !== false);
   const [channelProfile, setChannelProfile] = useState(null);
-  const [channelHint, setChannelHint] = useState('');
   const [channelMessage, setChannelMessage] = useState('');
   const [queuedJobs, setQueuedJobs] = useState([]);
   const [batchBusy, setBatchBusy] = useState(false);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
+  const onMediaExtractedRef = useRef(onMediaExtracted);
+  onMediaExtractedRef.current = onMediaExtracted;
 
   useEffect(() => {
     saveSession({
@@ -83,7 +84,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             if (item?.video_id && !map.has(item.video_id)) map.set(item.video_id, item);
           });
           const next = Array.from(map.values());
-          onMediaExtracted?.(next);
+          onMediaExtractedRef.current?.(next);
           return next;
         });
       })
@@ -111,7 +112,6 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
       return;
     }
     setError(null);
-    setChannelHint('');
     setChannelMessage('');
     setLoading(true);
 
@@ -140,7 +140,6 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
         });
         const items = result.items || [];
         setChannelProfile(result.profile || null);
-        setChannelHint(result.hint || '');
         setChannelMessage(result.message || '');
         setQueuedJobs(result.jobs || []);
         if (items.length) {
@@ -419,7 +418,6 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
                 setMode('channel');
                 setInputUrl('');
                 setError(null);
-                setChannelHint('');
                 setChannelMessage('');
                 setChannelProfile(null);
                 setQueuedJobs([]);
@@ -619,7 +617,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
               </h3>
               {getPlatformBadge(channelProfile.platform || 'douyin')}
             </div>
-            <p className="text-xs text-slate-500 font-medium line-clamp-2">
+            <p className="text-xs text-slate-500 font-medium line-clamp-2 break-words [overflow-wrap:anywhere]">
               {channelProfile.signature || channelProfile.url}
             </p>
             <p className="text-[11px] font-bold text-slate-600">
@@ -640,7 +638,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {samples.map((item) => (
-              <div key={item.video_id} className="clean-card p-3 rounded-2xl border border-slate-200 space-y-3">
+              <div key={item.video_id} className="clean-card p-3 rounded-2xl border border-slate-200 space-y-3 min-w-0">
                 <div className="rounded-xl overflow-hidden bg-slate-950 aspect-video">
                   <video
                     src={getStreamUrl(item.video_id)}
@@ -651,9 +649,9 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
                     className="w-full h-full object-contain"
                   />
                 </div>
-                <div className="px-1 space-y-1">
-                  <h5 className="text-sm font-bold text-slate-900 line-clamp-2">{item.title}</h5>
-                  <p className="text-[11px] text-slate-500 font-medium">
+                <div className="px-1 space-y-1 min-w-0">
+                  <h5 className="text-sm font-bold text-slate-900 line-clamp-2 break-words [overflow-wrap:anywhere]">{item.title}</h5>
+                  <p className="text-[11px] text-slate-500 font-medium truncate">
                     {(item.file_size / (1024 * 1024)).toFixed(2)} MB · {item.platform}
                   </p>
                 </div>
@@ -697,7 +695,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-1.5 min-w-0">
                     {getPlatformBadge(item.platform)}
-                    <h5 className="text-sm font-bold text-slate-900 line-clamp-2 mt-1 leading-snug">
+                    <h5 className="text-sm font-bold text-slate-900 line-clamp-2 break-words [overflow-wrap:anywhere] mt-1 leading-snug">
                       {item.title || 'Video Không Tiêu Đề'}
                     </h5>
                     <p className="text-xs text-slate-500 font-medium">

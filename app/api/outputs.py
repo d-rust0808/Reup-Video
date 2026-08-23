@@ -8,6 +8,7 @@ import os
 import io
 import json
 import zipfile
+import logging
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
@@ -15,6 +16,8 @@ from pydantic import BaseModel
 
 from app.config import settings
 from app.services.queue_manager import BatchQueueManager
+
+logger = logging.getLogger("api.outputs")
 
 router = APIRouter()
 
@@ -186,15 +189,41 @@ async def download_batch_outputs(
 async def delete_output(job_id: str, request: Request):
     """
     Deletes output video file from disk and purges job record from database.
+    Falls back to scanning OUTPUT_DIR for a matching file if no DB record is found
+    (handles outputs that were discovered from disk rather than from the queue).
     """
     qm = _get_queue_manager(request)
     job = qm.get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job ID not found")
 
-    deleted = qm.delete_job(job_id)
-    if not deleted:
-        raise HTTPException(status_code=400, detail="Failed to delete output file and job record")
+    deleted_any = False
+
+    if job:
+        deleted_any = qm.delete_job(job_id)
+    else:
+        from app.api.stream import _resolve_media_file_path
+        candidate = _resolve_media_file_path(job_id)
+        if candidate and os.path.exists(candidate):
+            try:
+                os.remove(candidate)
+                deleted_any = True
+            except OSError as e:
+                logger.warning(f"Could not delete orphan output file {candidate}: {e}")
+        else:
+            from app.services.platform_export import PRESETS
+            out_dir = getattr(settings, "OUTPUT_DIR", "data/outputs")
+            for fname in os.listdir(out_dir) if os.path.isdir(out_dir) else []:
+                if fname == f"{job_id}.mp4" or fname.startswith(f"{job_id}."):
+                    path = os.path.join(out_dir, fname)
+                    if os.path.isfile(path):
+                        try:
+                            os.remove(path)
+                            deleted_any = True
+                        except OSError as e:
+                            logger.warning(f"Could not delete orphan output file {path}: {e}")
+                        break
+
+    if not deleted_any:
+        raise HTTPException(status_code=404, detail="Output video file or job record not found")
 
     return {
         "job_id": job_id,
@@ -205,6 +234,43 @@ async def delete_output(job_id: str, request: Request):
 
 class BatchDeleteOutputsRequest(BaseModel):
     job_ids: List[str]
+
+
+def _purge_orphan_outputs(job_ids: List[str]) -> int:
+    """Removes any orphan output files whose stem matches the given ids but were never registered in the DB."""
+    from app.services.platform_export import PRESETS
+    out_dir = getattr(settings, "OUTPUT_DIR", "data/outputs")
+    if not os.path.isdir(out_dir):
+        return 0
+
+    stale = []
+    for jid in job_ids:
+        if not jid:
+            continue
+        try:
+            stem_parts = jid.split(".")
+            if len(stem_parts) >= 2 and stem_parts[-1] in PRESETS:
+                base = ".".join(stem_parts[:-1])
+            else:
+                base = jid
+        except Exception:
+            base = jid
+        for fname in os.listdir(out_dir):
+            if not fname.endswith(".mp4"):
+                continue
+            stem = fname[:-4]
+            if stem == jid or stem == base or stem.startswith(f"{jid}.") or stem == base.split(".")[0]:
+                stale.append(os.path.join(out_dir, fname))
+
+    purged = 0
+    for path in stale:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+                purged += 1
+        except OSError as e:
+            logger.warning(f"Could not delete orphan output file {path}: {e}")
+    return purged
 
 
 @router.delete("/outputs")
@@ -218,6 +284,9 @@ async def clear_all_outputs(request: Request):
     for j in completed:
         if qm.delete_job(j["job_id"]):
             deleted_count += 1
+
+    extras = _purge_orphan_outputs([j["job_id"] for j in completed])
+    deleted_count += extras
 
     return {
         "deleted_count": deleted_count,
@@ -235,6 +304,8 @@ async def delete_batch_outputs(req: BatchDeleteOutputsRequest, request: Request)
     for jid in req.job_ids:
         if qm.delete_job(jid):
             deleted_count += 1
+
+    deleted_count += _purge_orphan_outputs(req.job_ids)
 
     return {
         "deleted_count": deleted_count,

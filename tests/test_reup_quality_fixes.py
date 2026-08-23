@@ -256,3 +256,46 @@ def test_lama_session_optional():
     if get_lama_session() is not None:
         assert out[28, 32].mean() < 220
 
+
+def test_uniform_bright_blob_is_masked():
+    frame = np.full((40, 200, 3), 240, dtype=np.uint8)
+    mask = extract_adaptive_text_mask(frame)
+    assert int(mask.max()) == 255
+
+
+def test_libass_detection_is_boolean():
+    from app.services.reup_service import ffmpeg_supports_libass
+    assert ffmpeg_supports_libass() in (True, False)
+
+
+def test_overlay_filter_chains_per_cue():
+    from app.services.subtitle_overlay import build_overlay_filter
+    overlays = [
+        {"png": "/tmp/a.png", "start": 0.0, "end": 1.0},
+        {"png": "/tmp/b.png", "start": 1.2, "end": 2.0},
+    ]
+    fc, inputs = build_overlay_filter(overlays)
+    assert inputs == ["-i", "/tmp/a.png", "-i", "/tmp/b.png"]
+    assert fc.count("overlay=") == 2
+    assert "enable='between(t,0.000,1.000)'" in fc
+    assert fc.endswith("[v_out]")
+    assert "[1:v]" in fc and "[2:v]" in fc
+
+
+def test_srt_renders_to_overlay_pngs(tmp_path):
+    import os
+    from app.services.subtitle_overlay import render_srt_to_overlays, find_overlay_font
+    if not find_overlay_font():
+        pytest.skip("no unicode font available")
+    srt = tmp_path / "vi.srt"
+    srt.write_text(
+        "1\n00:00:00,200 --> 00:00:01,800\nXin chào các bạn\n\n"
+        "2\n00:00:02,000 --> 00:00:03,500\nĂn cơm chưa\n\n",
+        encoding="utf-8",
+    )
+    overlays = render_srt_to_overlays(str(srt), 1080, 1920, str(tmp_path / "ovl"))
+    assert len(overlays) == 2
+    for ov in overlays:
+        assert os.path.exists(ov["png"])
+        assert ov["end"] > ov["start"]
+

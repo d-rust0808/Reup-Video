@@ -167,6 +167,26 @@ def extract_adaptive_text_mask(roi_slice: np.ndarray) -> np.ndarray:
     feat = cv2.addWeighted(grad, 0.6, diff_local, 0.4, 0)
     _, binary = cv2.threshold(feat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
+    # Edge/contrast features vanish on a near-uniform solid blob (a filled caption
+    # plate or a solid-fill glyph region), so Otsu returns an all-zero mask. Recover
+    # by thresholding on absolute luminance: a bright block on dark video (or the
+    # reverse) is almost always burned-in text/plate and must be inpainted.
+    gmin, gmax = int(smooth.min()), int(smooth.max())
+    gmean = float(smooth.mean())
+    if (gmax - gmin) < 25:
+        if gmean >= 180 or gmean <= 70:
+            binary = np.full_like(gray, 255)
+    else:
+        # Contrasty region: OR in the extreme luminance band Otsu on gradients missed
+        # (solid white/near-white strokes whose interiors carry no gradient).
+        if gmean < 128:
+            _, hi = cv2.threshold(smooth, max(200, gmax - 30), 255, cv2.THRESH_BINARY)
+        else:
+            _, hi = cv2.threshold(smooth, min(60, gmin + 30), 255, cv2.THRESH_BINARY_INV)
+        dens = cv2.countNonZero(hi) / float(hi.size)
+        if 0.0 < dens < 0.6:
+            binary = cv2.bitwise_or(binary, hi)
+
     # Fill CJK character interiors (口/国/回 leftover if we only keep strokes)
     close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, close_k)

@@ -25,7 +25,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState(boot.activeTab || 'extract');
   const [collapsed, setCollapsed] = useState(!!boot.collapsed);
   const [serverOnline, setServerOnline] = useState(false);
-  const [wsStatus, setWsStatus] = useState('disconnected');
+  const [wsStatus, setWsStatus] = useState('connecting');
   const [wsUpdate, setWsUpdate] = useState(null);
 
   const [extractedMediaList, setExtractedMediaList] = useState(boot.extractedMediaList || []);

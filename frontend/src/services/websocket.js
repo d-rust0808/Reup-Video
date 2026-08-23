@@ -31,9 +31,15 @@ class WebSocketService {
     }
 
     let wsUrl = 'ws://127.0.0.1:8000/ws/jobs';
-    if (typeof window !== 'undefined' && window.location.protocol.startsWith('http')) {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      wsUrl = `${protocol}//${window.location.host}/ws/jobs`;
+    if (typeof window !== 'undefined') {
+      const proto = window.location.protocol;
+      if (proto === 'https:') {
+        wsUrl = `wss://${window.location.host}/ws/jobs`;
+      } else if (proto === 'http:' && window.electronAPI?.isDesktop) {
+        wsUrl = 'ws://127.0.0.1:8000/ws/jobs';
+      } else if (proto === 'http:') {
+        wsUrl = `${proto === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/jobs`;
+      }
     }
 
     try {

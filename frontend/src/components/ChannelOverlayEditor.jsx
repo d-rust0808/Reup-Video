@@ -68,7 +68,7 @@ export function ChannelOverlayEditor({ channel, previewSrc, onOverlaysChange, on
     setItems(Array.isArray(channel?.overlays) ? channel.overlays : []);
     setSelectedId(null);
     setSaveState('idle');
-  }, [channelId]);
+  }, [channelId, channel?.overlays]);
 
   const persist = useCallback(
     (next) => {

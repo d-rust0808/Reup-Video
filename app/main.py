@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, FileResponse
+from typing import Optional
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
@@ -141,7 +142,7 @@ def _frontend_file(rel_path: str):
     return None
 
 
-async def _proxy_vite(path: str, request: Request) -> Response | None:
+async def _proxy_vite(path: str, request: Request) -> Optional[Response]:
     """Serve the live Vite UI so preview on :8000 is the real Studio, not a stub."""
     import httpx
 
