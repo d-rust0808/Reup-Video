@@ -245,10 +245,10 @@ def extract_dynamic_subtitle_mask(
                     text_mask[cby : cby + cbh, cbx : cbx + cbw], box_mask
                 )
 
-        # If detectors missed, boost typical Douyin overlay bands (top logos / bottom hardsub)
-        if cv2.countNonZero(text_mask) == 0 and (run_ocr or roi_fallback):
-            text_mask = _or_band_mask(text_mask, sub_zone, 0, max(12, int(zh * 0.14)))
-            text_mask = _or_band_mask(text_mask, sub_zone, int(zh * 0.76), zh)
+        # Douyin captions sit mid-lower as well as the classic bottom band
+        text_mask = _or_band_mask(text_mask, sub_zone, 0, max(12, int(zh * 0.14)))
+        text_mask = _or_band_mask(text_mask, sub_zone, int(zh * 0.48), int(zh * 0.84))
+        text_mask = _or_band_mask(text_mask, sub_zone, int(zh * 0.78), zh)
 
         if cv2.countNonZero(text_mask) == 0 and roi_fallback:
             stroke = extract_adaptive_text_mask(sub_zone)
@@ -300,6 +300,27 @@ def _resolve_scan_region(
     return x1, y1, x2, y2, False
 
 
+def hybrid_inpaint_frame(frame: np.ndarray, mask: np.ndarray, radius: int = 5) -> np.ndarray:
+    """Telea fill, then LaMa neural refine on large holes (full-frame context)."""
+    if frame is None or mask is None or mask.size == 0:
+        return frame
+    if cv2.countNonZero(mask) == 0:
+        return frame
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    m = cv2.dilate(mask, k, iterations=1)
+    r = _inpaint_radius(radius)
+    out = cv2.inpaint(frame, m, r, cv2.INPAINT_TELEA)
+    h, w = out.shape[:2]
+    if cv2.countNonZero(m) / float(max(1, w * h)) >= 0.004:
+        try:
+            from app.services.lama_inpainter import lama_inpaint_bgr, get_lama_session
+            if get_lama_session() is not None:
+                out = lama_inpaint_bgr(out, m)
+        except Exception:
+            pass
+    return out
+
+
 def _inpaint_frame_region(
     frame: np.ndarray,
     x1: int,
@@ -336,7 +357,7 @@ def _inpaint_frame_region(
             return 0
         sub_mask = np.zeros((py2 - py1, px2 - px1), dtype=np.uint8)
         sub_mask[y1 - py1 : y2 - py1, x1 - px1 : x2 - px1] = text_mask
-        inpainted_sub = cv2.inpaint(sub_frame, sub_mask, inpaintRadius=_inpaint_radius(radius), flags=flag)
+        inpainted_sub = hybrid_inpaint_frame(sub_frame, sub_mask, radius)
         frame[py1:py2, px1:px2] = inpainted_sub
         return int(cv2.countNonZero(text_mask))
 
@@ -346,7 +367,7 @@ def _inpaint_frame_region(
     )
     if cv2.countNonZero(text_mask) == 0:
         return 0
-    inpainted_zone = cv2.inpaint(sub_zone, text_mask, inpaintRadius=_inpaint_radius(radius), flags=flag)
+    inpainted_zone = hybrid_inpaint_frame(sub_zone, text_mask, radius)
     frame[y1:y2, x1:x2] = inpainted_zone
     return int(cv2.countNonZero(text_mask))
 
@@ -410,7 +431,7 @@ def inpaint_video_opencv(
         raise ValueError("Inpainting radius must be strictly greater than 0")
 
     method_clean = method.lower()
-    if method_clean in ("opencv_telea", "telea"):
+    if method_clean in ("opencv_telea", "telea", "hybrid", "auto", "all"):
         flag = cv2.INPAINT_TELEA
     elif method_clean in ("opencv_ns", "ns"):
         flag = cv2.INPAINT_NS

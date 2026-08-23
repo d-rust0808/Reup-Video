@@ -18,7 +18,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
   const [options, setOptions] = useState(() => {
     const saved = loadSession().workbenchOptions;
     return {
-    wm_method: 'all',
+    wm_method: 'auto',
     hflip: true,
     speed_ratio: 1.03,
     pitch_shift: true,
@@ -167,6 +167,10 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     if (String(voice).toLowerCase().startsWith('kokoro')) ttsEngine = 'kokoro';
     if (String(voice).toLowerCase().startsWith('gtts')) ttsEngine = 'gtts';
 
+    const sess = loadSession();
+    const frameOvs = (sess.workbenchOptions?.overlays || options.overlays || []).filter(
+      (o) => o && (o.kind === 'frame' ? o.image_path || o.url : true)
+    );
     const payload = {
       video_path: currentMedia.file_path || `data/input/raw/${currentMedia.video_id}.mp4`,
       platform: currentMedia.platform || 'douyin',
@@ -206,10 +210,10 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         post_caption: options.post_caption,
         post_tags: options.post_tags,
         publish_status: options.publish_status,
-        frame_enabled: options.frame_enabled !== false,
+        frame_enabled: options.frame_enabled !== false && !frameOvs.some((o) => o.kind === 'frame'),
         frame_color: options.frame_color || 'black',
         frame_thickness: options.frame_thickness || 16,
-        overlays: options.overlays || [],
+        overlays: frameOvs,
         target_platforms: options.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
       },
     };
@@ -261,7 +265,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
               {uploading ? 'Đang Tải Video Lên...' : 'Chưa Có Video Nào Được Chọn Trong Studio'}
             </h3>
             <p className="text-xs text-slate-500 font-medium max-w-md mx-auto leading-relaxed">
-              Nhấp vào đây hoặc kéo thả file video (MP4, MOV) từ máy tính của bạn vào đây để bắt đầu khoanh vùng xoá logo & chỉnh sửa Reup.
+              Nhấp hoặc kéo thả MP4/MOV. Không cần khoanh logo — bấm Reup là máy tự xử lý.
             </p>
           </div>
 

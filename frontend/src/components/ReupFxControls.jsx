@@ -21,6 +21,7 @@ import {
   Captions,
   Share2,
   Frame,
+  ChevronDown,
 } from 'lucide-react';
 
 import { fetchChannels, getMediaUrl, uploadStudioOverlay } from '../services/api';
@@ -28,6 +29,7 @@ import { fetchChannels, getMediaUrl, uploadStudioOverlay } from '../services/api
 export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
   const [channels, setChannels] = useState([]);
   const [loadingChannels, setLoadingChannels] = useState(false);
+  const [showWmAdvanced, setShowWmAdvanced] = useState(false);
 
 
   useEffect(() => {
@@ -91,34 +93,51 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
     <div className="clean-panel rounded-3xl p-6 sm:p-7 shadow-xs space-y-6">
       <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2 border-b border-slate-100 pb-3">
         <Wand2 className="w-5 h-5 text-blue-600" />
-        Tùy Chỉnh Thuật Toán & Reup FX
+        Tùy chỉnh Reup
       </h3>
 
-      {/* Watermark Method Selector */}
-      <div className="space-y-2.5">
-        <label className="block text-xs font-bold text-slate-700">
-          Thuật Toán Xoá Text Cũ & Logo Watermark
-        </label>
+      <div className="p-4 bg-emerald-50/70 rounded-2xl border border-emerald-200 space-y-2">
+        <div className="flex items-center justify-between">
+          <div>
+            <label className="text-xs font-extrabold text-slate-800 block">Tự xoá chữ & logo</label>
+            <span className="text-[11px] text-slate-600">
+              Hybrid Telea + LaMa — không khoanh ROI. Tắt nếu clip sạch sẵn.
+            </span>
+          </div>
+          <input
+            type="checkbox"
+            checked={options.wm_method !== 'none' && options.wm_method !== 'off' && options.wm_method !== 'disabled'}
+            onChange={(e) => handleChange('wm_method', e.target.checked ? 'auto' : 'none')}
+            className="w-4 h-4 rounded text-emerald-600 accent-emerald-600 border-slate-300 cursor-pointer"
+          />
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowWmAdvanced((v) => !v)}
+          className="text-[10px] font-bold text-slate-500 hover:text-slate-800 inline-flex items-center gap-1"
+        >
+          <ChevronDown className={`w-3 h-3 transition ${showWmAdvanced ? 'rotate-180' : ''}`} />
+          Nâng cao (chọn tay thuật toán)
+        </button>
+        {showWmAdvanced && (
+      <div className="space-y-2.5 pt-1">
         <div className="grid grid-cols-2 gap-2 text-xs">
           {[
-            { id: 'all', label: '🚀 Siêu Cấp Toàn Năng (All-In-One)', desc: 'Vừa cắt sạch 100% phụ đề đáy vừa inpaint quét xóa sạch logo/text ở giữa và đỉnh (Khuyên dùng)' },
-            { id: 'auto', label: '🔮 Inpaint Nét Chữ AI + OpenCV', desc: 'Tự động quét & xóa sạch chữ/logo trên mọi vị trí (Giữ nguyên 100% khung hình)' },
-            { id: 'crop', label: '🌟 Cắt Bỏ Phụ Đề Đáy (Crop 6%)', desc: 'Chỉ cắt mỏng đáy nếu phụ đề gốc dính cứng — mặc định không cắt' },
-            { id: 'boxblur', label: '🎬 Dải Mờ Điện Ảnh (Blur Bar)', desc: 'Làm mờ mịn dải phụ đề phong cách điện ảnh' },
-            { id: 'telea', label: '⚡ OpenCV Telea (Nhanh)', desc: 'Xóa mượt mà theo vùng ROI đã chọn' },
-            { id: 'none', label: '🚫 Giữ Nguyên Khung Hình', desc: 'Không can thiệp phụ đề/watermark' },
+            { id: 'auto', label: 'Tự động (LaMa + Telea)', desc: 'Chữ mỏng Telea, khối lớn LaMa neural' },
+            { id: 'all', label: 'All + delogo', desc: 'Inpaint rồi phủ nốt vệt sót' },
+            { id: 'crop', label: 'Chỉ cắt đáy', desc: 'Khi phụ đề dính cứng dưới chân' },
+            { id: 'none', label: 'Không xoá', desc: 'Giữ nguyên hình gốc' },
           ].map((item) => {
             const isSelected =
               options.wm_method === item.id ||
-              (options.wm_method === 'opencv_telea' && item.id === 'telea') ||
-              (options.wm_method === 'opencv_ns' && item.id === 'ns');
+              (options.wm_method === 'opencv_telea' && item.id === 'auto');
             return (
               <label
                 key={item.id}
                 className={`flex flex-col p-3 rounded-2xl border cursor-pointer transition-all duration-150 ${
                   isSelected
-                    ? 'bg-blue-50/80 border-blue-400 text-blue-900 font-bold shadow-xs'
-                    : 'bg-slate-50/80 border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-100/80'
+                    ? 'bg-white border-emerald-400 text-slate-900 font-bold shadow-xs'
+                    : 'bg-white/70 border-slate-200 text-slate-600 hover:border-slate-300'
                 }`}
               >
                 <div className="flex items-center space-x-2">
@@ -128,7 +147,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                     value={item.id}
                     checked={isSelected}
                     onChange={() => handleChange('wm_method', item.id)}
-                    className="text-blue-600 focus:ring-blue-500"
+                    className="text-emerald-600 focus:ring-emerald-500"
                   />
                   <span className="text-xs font-bold text-slate-800">{item.label}</span>
                 </div>
@@ -137,6 +156,8 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
             );
           })}
         </div>
+      </div>
+        )}
       </div>
 
       {/* Video & Audio Controls */}

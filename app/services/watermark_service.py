@@ -219,53 +219,36 @@ def remove_watermark(
 
     # 5. Robust Inpainting Strategy Execution
     if method_clean == "all":
-        # ALL-IN-ONE HYBRID MODE:
-        # Step 1: Neural OCR Inpainting on upper & middle zones (removes stickers, watermarks, logo ID)
-        # Step 2: Crop bottom 13% to eliminate hardcoded bottom subtitles with 100% perfection
-        temp_inpainted = output_path + ".temp_inpaint.mp4"
         try:
-            logger.info("Executing ALL-IN-ONE Mode: Stage 1 (Neural OCR + OpenCV Inpainting)...")
-            inpainter = OpenCVInpainter(radius=radius, method="telea")
-            inpainter.inpaint_video(input_path, temp_inpainted, roi_tuple, progress_callback=progress_callback)
-
-            logger.info("Executing ALL-IN-ONE Mode: Stage 2 (Bottom Subtitle Crop)...")
-            inpaint_video_ffmpeg(temp_inpainted, output_path, (0, 0, 0, 0), filter_type="crop", radius=radius)
-            if os.path.exists(temp_inpainted):
-                try:
-                    os.remove(temp_inpainted)
-                except Exception:
-                    pass
-            return output_path
-        except Exception as e:
-            logger.warning(f"ALL-IN-ONE hybrid chain encountered: {e}. Falling back to crop + inpaint.")
-            if os.path.exists(temp_inpainted):
-                try:
-                    os.remove(temp_inpainted)
-                except Exception:
-                    pass
-            try:
-                return inpaint_video_ffmpeg(input_path, output_path, (0, 0, 0, 0), filter_type="crop", radius=radius)
-            except Exception as crop_err:
-                logger.warning(f"ALL-IN-ONE crop fallback failed ({crop_err}). Using Telea inpaint.")
-                inpainter = OpenCVInpainter(radius=radius, method="telea")
-                return inpainter.inpaint_video(input_path, output_path, roi_tuple, progress_callback=progress_callback)
-
-    elif method_clean == "auto":
-        # Default Auto: Lightning-Fast Adaptive Anti-Halo OpenCV Inpainter (~1x Real-Time, Zero White Smudge)
-        try:
-            logger.info("Executing Auto Inpainter (Fast Adaptive Anti-Halo Telea)...")
-            inpainter = OpenCVInpainter(radius=radius, method="telea")
+            logger.info("ALL mode: hybrid Telea + LaMa (no bottom crop)")
+            inpainter = OpenCVInpainter(radius=radius, method="hybrid")
             return inpainter.inpaint_video(input_path, output_path, roi_tuple, progress_callback=progress_callback)
         except Exception as e:
-            logger.warning(f"Auto OpenCV Telea failed ({e}). Falling back to FFmpeg delogo.")
+            logger.warning(f"ALL inpaint failed ({e}); trying ffmpeg delogo")
+            try:
+                return inpaint_video_ffmpeg(input_path, output_path, roi_tuple, filter_type="delogo", radius=radius)
+            except Exception as e2:
+                logger.warning(f"delogo fallback failed ({e2})")
+                if output_path != input_path:
+                    shutil.copyfile(input_path, output_path)
+                return output_path
+
+    elif method_clean == "auto":
+        try:
+            logger.info("Auto inpaint: hybrid Telea + LaMa neural")
+            inpainter = OpenCVInpainter(radius=max(radius, 5), method="hybrid")
+            return inpainter.inpaint_video(input_path, output_path, roi_tuple, progress_callback=progress_callback)
+        except Exception as e:
+            logger.warning(f"Auto hybrid failed ({e}). Falling back to FFmpeg delogo.")
             return inpaint_video_ffmpeg(input_path, output_path, roi_tuple, filter_type="delogo", radius=radius)
 
     elif method_clean == "lama":
-        # Explicit Deep Learning LaMa Model (High compute neural network)
         try:
-            logger.info("Attempting Deep Neural AI (LaMa) inpainting...")
-            inpainter = LamaInpainter(strict=True)
-            return inpainter.inpaint_video(input_path, output_path, roi_tuple)
+            logger.info("LaMa neural inpaint")
+            from app.services.lama_inpainter import get_lama_session
+            get_lama_session()
+            inpainter = OpenCVInpainter(radius=max(radius, 5), method="hybrid")
+            return inpainter.inpaint_video(input_path, output_path, roi_tuple, progress_callback=progress_callback)
         except (LaMaNotAvailableError, LaMaInpaintError, Exception) as e:
             logger.warning(f"LaMa AI failed ({e}). Falling back to OpenCV Telea.")
             inpainter = OpenCVInpainter(radius=radius, method="telea")

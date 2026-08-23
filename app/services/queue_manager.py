@@ -831,8 +831,8 @@ class BatchQueueManager:
 
             stage2_res_path = None
             fold_algo = (algo_name or "auto").lower()
-            fold_fast = fold_algo in ("crop", "none", "off", "disabled", "all", "auto", "all_in_one", "hybrid")
-            if fold_fast:
+            fold_skip = fold_algo in ("crop", "none", "off", "disabled")
+            if fold_skip:
                 if fold_algo == "crop":
                     reup_config.subtitle_bottom_crop = max(
                         float(getattr(reup_config, "subtitle_bottom_crop", 0.0) or 0.0),
@@ -845,21 +845,7 @@ class BatchQueueManager:
                             reup_config.text_cover_vf = ",".join(covers)
                             self.append_job_log(
                                 job_id,
-                                f"🧽 Che {len(covers)} vùng chữ giữa/đỉnh khung (delogo, không cắt dày)",
-                                level="INFO",
-                                stage="WATERMARK_REMOVAL",
-                            )
-                    except Exception as e:
-                        logger.warning(f"mid-text cover detect failed: {e}")
-                elif fold_algo in ("all", "auto", "all_in_one", "hybrid"):
-                    try:
-                        from app.services.subtitle_detector import persistent_text_cover_filters
-                        covers = persistent_text_cover_filters(current_video_path)
-                        if covers:
-                            reup_config.text_cover_vf = ",".join(covers)
-                            self.append_job_log(
-                                job_id,
-                                f"🧽 Che {len(covers)} vùng chữ giữa khung — giữ nguyên đáy hình",
+                                f"🧽 Che {len(covers)} vùng chữ (delogo)",
                                 level="INFO",
                                 stage="WATERMARK_REMOVAL",
                             )
@@ -867,7 +853,7 @@ class BatchQueueManager:
                         logger.warning(f"mid-text cover detect failed: {e}")
                 self.append_job_log(
                     job_id,
-                    "⚡ Gộp xóa chữ vào 1 pass Reup — không cắt dày đáy hình",
+                    "⚡ Bỏ qua inpaint — chỉ crop/delogo",
                     level="INFO",
                     stage="WATERMARK_REMOVAL",
                     progress=0.60,
@@ -875,13 +861,14 @@ class BatchQueueManager:
             else:
                 self.append_job_log(
                     job_id,
-                    "⚡ Đang phân tách kênh màu, dập tắt viền phấn (Anti-Halo Dilation 5x5) và tái tạo điểm ảnh...",
+                    "🧹 Đang khử chữ/logo: hybrid Telea + LaMa (không cắt đáy hình)…",
                     level="INFO",
                     stage="WATERMARK_REMOVAL",
                     progress=0.50
                 )
 
-                stage2_res_path = WatermarkService.remove_watermark_and_subtitles(
+                from app.services.watermark_service import remove_watermark_and_subtitles
+                stage2_res_path = remove_watermark_and_subtitles(
                     video_path=current_video_path,
                     config=wm_config,
                     output_path=stage2_out_path,
@@ -892,11 +879,24 @@ class BatchQueueManager:
                     current_video_path = stage2_res_path
                     self.append_job_log(
                         job_id,
-                        f"✨ Khử sạch phụ đề và watermark thành công -> {os.path.basename(stage2_res_path)}",
+                        f"✨ Đã inpaint chữ/watermark -> {os.path.basename(stage2_res_path)}",
                         level="SUCCESS",
                         stage="WATERMARK_REMOVAL",
                         progress=0.65
                     )
+                try:
+                    from app.services.subtitle_detector import persistent_text_cover_filters
+                    covers = persistent_text_cover_filters(current_video_path)
+                    if covers:
+                        reup_config.text_cover_vf = ",".join(covers)
+                        self.append_job_log(
+                            job_id,
+                            f"🧽 Phủ nốt {len(covers)} vệt chữ còn sót (delogo)",
+                            level="INFO",
+                            stage="WATERMARK_REMOVAL",
+                        )
+                except Exception as e:
+                    logger.warning(f"residual text cover failed: {e}")
 
             # ------------------------------------------------------------------
             # Stage 3: REUP_TRANSFORM

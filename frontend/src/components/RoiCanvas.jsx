@@ -108,7 +108,7 @@ function OverlayPreviewLayer({ videoRef, overlays }) {
   );
 }
 
-export function RoiCanvas({ videoRef, onRoiChange, overlays = [] }) {
+export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true }) {
   const canvasRef = useRef(null);
   const [roi, setRoi] = useState(null); // { x, y, w, h } normalized to VIDEO content (0 to 1)
   const isDraggingRef = useRef(false);
@@ -268,15 +268,19 @@ export function RoiCanvas({ videoRef, onRoiChange, overlays = [] }) {
         <OverlayPreviewLayer videoRef={videoRef} overlays={overlays} />
         <canvas
           ref={canvasRef}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseUp}
-          className="absolute top-0 left-0 w-full h-full cursor-crosshair z-10"
+          onMouseDown={simple ? undefined : handleMouseDown}
+          onMouseMove={simple ? undefined : handleMouseMove}
+          onMouseUp={simple ? undefined : handleMouseUp}
+          onMouseLeave={simple ? undefined : handleMouseUp}
+          className={`absolute top-0 left-0 w-full h-full z-10 ${simple ? 'pointer-events-none' : 'cursor-crosshair'}`}
         />
       </div>
 
-      {/* Preset Toolbar */}
+      {simple ? (
+        <p className="text-[11px] text-slate-500 font-medium px-1">
+          Xem trước clip. Chữ/logo máy tự quét khi bấm Reup — không cần khoanh vùng.
+        </p>
+      ) : (
       <div className="clean-card p-4 rounded-2xl shadow-xs space-y-2.5 text-xs">
         <div className="flex items-center justify-between">
           <div className="flex items-center space-x-2">
@@ -349,27 +353,6 @@ export function RoiCanvas({ videoRef, onRoiChange, overlays = [] }) {
           )}
         </div>
       </div>
-
-      {/* Normalized Readout */}
-      {roi && (
-        <div className="grid grid-cols-4 gap-3 text-xs font-mono clean-card p-3.5 rounded-2xl shadow-xs">
-          <div>
-            <span className="text-[10px] text-slate-400 font-bold block">Tọa độ X</span>
-            <span className="text-blue-600 font-bold text-sm">{roi.x.toFixed(3)}</span>
-          </div>
-          <div>
-            <span className="text-[10px] text-slate-400 font-bold block">Tọa độ Y</span>
-            <span className="text-blue-600 font-bold text-sm">{roi.y.toFixed(3)}</span>
-          </div>
-          <div>
-            <span className="text-[10px] text-slate-400 font-bold block">Độ Rộng W</span>
-            <span className="text-blue-600 font-bold text-sm">{roi.w.toFixed(3)}</span>
-          </div>
-          <div>
-            <span className="text-[10px] text-slate-400 font-bold block">Độ Cao H</span>
-            <span className="text-blue-600 font-bold text-sm">{roi.h.toFixed(3)}</span>
-          </div>
-        </div>
       )}
     </div>
   );

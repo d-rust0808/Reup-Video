@@ -597,9 +597,9 @@ def persistent_text_cover_filters(video_path: str, max_boxes: int = 4) -> List[s
                 if cy < y_lo or cy > y_hi:
                     continue
                 ar = bw / float(bh)
-                near_bottom = cy >= h * 0.72
-                min_ar = 1.15 if near_bottom else 1.45
-                min_frac = 0.10 if near_bottom else 0.16
+                near_bottom = cy >= h * 0.55
+                min_ar = 1.05 if near_bottom else 1.25
+                min_frac = 0.08 if near_bottom else 0.12
                 if ar < min_ar or bw < w * min_frac:
                     continue
                 if bh > h * 0.28:
@@ -629,7 +629,7 @@ def persistent_text_cover_filters(video_path: str, max_boxes: int = 4) -> List[s
                 break
         if not hit:
             clusters.append([x, y, x2, y2, 1])
-    clusters = [c for c in clusters if c[4] >= 2]
+    clusters = [c for c in clusters if c[4] >= 1]
     clusters.sort(key=lambda c: c[4], reverse=True)
     filters: List[str] = []
     for x, y, x2, y2, _ in clusters[:max_boxes]:

@@ -383,5 +383,35 @@ export async function uploadStudioOverlay(file, meta = {}) {
   return res.json();
 }
 
+export async function fetchFramePresets() {
+  const res = await fetch(`${API_BASE}/frames/presets`);
+  if (!res.ok) throw new Error('Không tải được mẫu khung');
+  return res.json();
+}
+
+export async function renderFramePreset(payload) {
+  const res = await fetch(`${API_BASE}/frames/render`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Không render được khung');
+  }
+  return res.json();
+}
+
+export async function uploadCustomFrame(file) {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`${API_BASE}/frames/upload`, { method: 'POST', body: form });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Tải khung thất bại');
+  }
+  return res.json();
+}
+
 
 

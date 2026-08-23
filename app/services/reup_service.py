@@ -177,10 +177,11 @@ def build_reup_filtergraph(
 
     # Burn Vietsub on original timestamps BEFORE setpts so SRT does not need rescaling
     if burn_srt_path and os.path.exists(burn_srt_path):
-        # Outline-only hardsub (no black bar) so the picture stays full-frame
+        # Tight plate behind Vietnamese text (not a full-width bar)
         style = (
-            "FontName=DejaVu Sans,FontSize=16,Bold=1,Outline=3,Shadow=0,Alignment=2,"
-            "MarginV=14,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1"
+            "FontName=DejaVu Sans,FontSize=17,Bold=1,Alignment=2,"
+            "MarginV=22,MarginL=48,MarginR=48,BorderStyle=3,Outline=5,Shadow=0,"
+            "PrimaryColour=&H00FFFFFF,OutlineColour=&HB2000000,BackColour=&HB2000000"
         )
         sub_path = _ffmpeg_subtitles_path(burn_srt_path)
         vf_nodes.append(f"subtitles='{sub_path}':force_style='{style}'")
@@ -385,8 +386,9 @@ def burn_vietnamese_hardsub(video_path: str, srt_path: str, output_path: str, sp
 
     fontfile = _find_subtitle_font()
     style = (
-        "FontName=DejaVu Sans,FontSize=16,Bold=1,Outline=3,Shadow=0,Alignment=2,"
-        "MarginV=16,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1"
+        "FontName=DejaVu Sans,FontSize=17,Bold=1,Alignment=2,"
+        "MarginV=22,MarginL=48,MarginR=48,BorderStyle=3,Outline=5,Shadow=0,"
+        "PrimaryColour=&H00FFFFFF,OutlineColour=&HB2000000,BackColour=&HB2000000"
     )
     sub_path = _ffmpeg_subtitles_path(work_srt)
     if fontfile:

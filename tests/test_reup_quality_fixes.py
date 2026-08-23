@@ -123,7 +123,7 @@ def test_hardsub_filter_uses_original_timestamps_before_setpts(tmp_path):
     cfg = ReupConfig(speed_factor=1.03, film_grain=0.0, frame_enabled=False)
     _, _, vf, _ = build_reup_filtergraph(cfg, has_audio=False, burn_srt_path=str(srt))
     assert "subtitles=" in vf
-    assert "drawbox=" not in vf
+    assert "BorderStyle=3" in vf
     assert vf.index("subtitles=") < vf.index("setpts=")
 
 
@@ -230,4 +230,29 @@ def test_bgm_lyric_stt_is_detected():
         "/no/such.mp4",
         ReupConfig(post_title="好饿好困也好累～ #猫咪 #萌宠"),
     )
+
+
+def test_hybrid_inpaint_kills_white_caption():
+    import numpy as np
+    from app.services.opencv_inpainter import hybrid_inpaint_frame
+    img = np.full((160, 240, 3), 70, dtype=np.uint8)
+    img[90:120, 20:220] = 250
+    mask = np.zeros((160, 240), dtype=np.uint8)
+    mask[90:120, 20:220] = 255
+    out = hybrid_inpaint_frame(img, mask, radius=5)
+    region = out[96:114, 40:200]
+    assert region.mean() < 180
+
+
+def test_lama_session_optional():
+    import numpy as np
+    from app.services.lama_inpainter import get_lama_session, lama_inpaint_bgr
+    img = np.full((64, 64, 3), 40, dtype=np.uint8)
+    mask = np.zeros((64, 64), dtype=np.uint8)
+    mask[20:40, 10:54] = 255
+    img[20:40, 10:54] = 255
+    out = lama_inpaint_bgr(img, mask)
+    assert out.shape == img.shape
+    if get_lama_session() is not None:
+        assert out[28, 32].mean() < 220
 

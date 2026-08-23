@@ -1,4 +1,4 @@
-"""Studio session compacting + multi-platform export helpers."""
+"""Studio session compacting + multi-platform export helpers + frame PNG."""
 
 import os
 import sys
@@ -29,3 +29,17 @@ def test_reup_config_default_platforms():
     cfg = ReupConfig()
     assert "tiktok" in cfg.target_platforms
     assert "youtube_shorts" in cfg.target_platforms
+
+
+def test_frame_png_has_alpha_ring():
+    from app.services.frame_studio import render_frame_png, PRESETS as FRAMES
+    import cv2
+
+    path = render_frame_png("gold", out_name="test_gold.png")
+    assert os.path.exists(path)
+    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    assert img is not None and img.shape[2] == 4
+    h, w = img.shape[:2]
+    assert img[0, 0, 3] > 200
+    assert img[h // 2, w // 2, 3] < 10
+    assert any(p["id"] == "cinema" for p in FRAMES)

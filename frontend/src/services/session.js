@@ -13,6 +13,13 @@ export const EMPTY_SESSION = {
   autoReup: true,
   selectedChannelId: null,
   targetPlatforms: ['tiktok', 'youtube_shorts', 'facebook'],
+  frameStudio: {
+    enabled: true,
+    preset: 'cinema',
+    color: '#000000',
+    thickness: 28,
+    overlay: null,
+  },
   savedAt: 0,
 };
 
@@ -48,12 +55,16 @@ export function compactOptions(options) {
           id: o.id,
           kind: o.kind,
           src: isSafeUrl(o.src) ? o.src : '',
+          url: isSafeUrl(o.url) ? o.url : '',
+          image_path: typeof o.image_path === 'string' ? o.image_path : '',
+          filename: o.filename || '',
           x: o.x,
           y: o.y,
           w: o.w,
           h: o.h,
+          opacity: o.opacity,
         }))
-        .filter((o) => o.src)
+        .filter((o) => o.src || o.url || o.image_path)
     : [];
   return { ...rest, overlays: cleanOverlays };
 }
@@ -79,6 +90,10 @@ function compactSession(raw) {
     autoReup: src.autoReup !== false,
     selectedChannelId: src.selectedChannelId || null,
     targetPlatforms: platforms.length ? platforms : EMPTY_SESSION.targetPlatforms,
+    frameStudio: {
+      ...EMPTY_SESSION.frameStudio,
+      ...(src.frameStudio || {}),
+    },
     savedAt: Number(src.savedAt) || Date.now(),
   };
 }
