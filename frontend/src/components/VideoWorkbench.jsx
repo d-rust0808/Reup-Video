@@ -48,6 +48,9 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     frame_thickness: 16,
     overlays: [],
     target_platforms: ['tiktok', 'youtube_shorts', 'facebook'],
+    bgm_path: '',
+    bgm_id: '',
+    bgm_volume: 0.85,
     ...(saved || {}),
     };
   });
@@ -222,6 +225,8 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         frame_thickness: options.frame_thickness || 16,
         overlays: frameOvs,
         target_platforms: options.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
+        bgm_path: options.bgm_path || options.bgm_id || '',
+        bgm_volume: options.bgm_volume ?? 0.85,
       },
     };
 

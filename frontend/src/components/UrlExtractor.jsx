@@ -132,6 +132,8 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             burn_subtitles: opts.burn_subtitles !== false,
             overlays: opts.overlays || [],
             target_platforms: opts.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
+            bgm_path: opts.bgm_path || opts.bgm_id,
+            bgm_volume: opts.bgm_volume ?? 0.85,
             channel_id: opts.channel_id,
             wm_method: opts.wm_method,
           },
@@ -270,6 +272,8 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             frame_color: opts.frame_color || 'black',
             frame_thickness: opts.frame_thickness || 16,
             target_platforms: opts.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
+            bgm_path: opts.bgm_path || opts.bgm_id,
+            bgm_volume: opts.bgm_volume ?? 0.85,
           },
         });
         if (res?.duplicate) skipped += 1;

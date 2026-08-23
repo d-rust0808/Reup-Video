@@ -593,12 +593,20 @@ def process_reup_video(
 
     has_audio = detect_audio_stream(input_path)
     demucs_bgm_path: Optional[str] = None
+    lib_bgm_path: Optional[str] = None
+    raw_bgm = getattr(cfg, "bgm_path", None)
+    if raw_bgm:
+        try:
+            from app.services.bgm_library import resolve_bgm
+            lib_bgm_path = resolve_bgm(str(raw_bgm)) or (raw_bgm if os.path.isfile(raw_bgm) else None)
+        except Exception:
+            lib_bgm_path = raw_bgm if os.path.isfile(str(raw_bgm)) else None
     srt_override = kwargs.get("srt_override")
     burn_in_graph = bool(
         srt_override and os.path.exists(srt_override) and getattr(cfg, "burn_subtitles", True)
     )
 
-    if has_audio and cfg.enable_vocal_mute and cfg.vocal_mute_strategy in ("auto", "demucs"):
+    if (not lib_bgm_path) and has_audio and cfg.enable_vocal_mute and cfg.vocal_mute_strategy in ("auto", "demucs"):
         from app.services.audio_service import check_demucs_available, extract_audio_stream, process_vocal_muting
         if not check_demucs_available():
             if cfg.vocal_mute_strategy == "demucs":
@@ -641,9 +649,9 @@ def process_reup_video(
         from app.services.overlay_service import append_overlay_filter, normalize_overlays, overlay_input_args
         overlay_items = normalize_overlays(getattr(cfg, "overlays", None))
         overlay_paths: List[str] = []
-        demucs_used = bool(demucs_bgm_path and os.path.exists(demucs_bgm_path))
+        extra_audio = bool(lib_bgm_path) or bool(demucs_bgm_path and os.path.exists(demucs_bgm_path))
         if overlay_items:
-            first_ov = 2 if demucs_used else 1
+            first_ov = 2 if extra_audio else 1
             main_size = None
             try:
                 import cv2
@@ -670,7 +678,17 @@ def process_reup_video(
             try:
                 encode_args = browser_safe_encode_args(ffmpeg_bin)
                 cmd = [ffmpeg_bin, "-y", "-threads", "0", "-i", input_path]
-                if demucs_bgm_path and os.path.exists(demucs_bgm_path):
+                if lib_bgm_path and os.path.exists(lib_bgm_path):
+                    from app.services.tts_service import get_audio_duration
+                    in_dur = get_audio_duration(input_path) or 8.0
+                    speed = float(getattr(cfg, "speed_factor", 1.0) or 1.0)
+                    out_dur = max(0.4, in_dur / max(0.5, speed))
+                    vol = float(getattr(cfg, "bgm_volume", 0.85) or 0.85)
+                    vf_part = filter_complex.split(";")[0]
+                    fc = f"{vf_part};[1:a]volume={vol:.3f},aresample=44100,aformat=channel_layouts=stereo[a_out]"
+                    includes_audio = True
+                    cmd.extend(["-stream_loop", "-1", "-t", f"{out_dur:.3f}", "-i", lib_bgm_path])
+                elif demucs_bgm_path and os.path.exists(demucs_bgm_path):
                     fc = filter_complex.replace("[0:a]", "[1:a]")
                     cmd.extend(["-i", demucs_bgm_path])
                 else:

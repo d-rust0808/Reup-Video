@@ -165,6 +165,8 @@ class ReupConfig(BaseModel):
     frame_enabled: bool = Field(default=True, description="Burn a cinematic border onto the video")
     frame_color: str = Field(default="black", description="Outer border color name or hex")
     frame_thickness: int = Field(default=16, ge=0, le=80, description="Outer border thickness in pixels")
+    bgm_path: Optional[str] = Field(default=None, description="Library BGM file to replace source music")
+    bgm_volume: float = Field(default=0.85, ge=0.05, le=2.0, description="Gain of imported BGM")
 
     @model_validator(mode="after")
 

@@ -425,5 +425,41 @@ export async function uploadCustomFrame(file) {
   return res.json();
 }
 
+export async function fetchBgmLibrary() {
+  const res = await fetch(`${API_BASE}/bgm`);
+  if (!res.ok) throw new Error('Không tải được kho nhạc');
+  return res.json();
+}
+
+export async function extractBgm(payload) {
+  const res = await fetch(`${API_BASE}/bgm/extract`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Không tách được nhạc nền');
+  }
+  return res.json();
+}
+
+export async function uploadBgmFile(file) {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`${API_BASE}/bgm/upload`, { method: 'POST', body: form });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Tải nhạc thất bại');
+  }
+  return res.json();
+}
+
+export async function deleteBgm(id) {
+  const res = await fetch(`${API_BASE}/bgm/${id}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error('Không xóa được nhạc');
+  return res.json();
+}
+
 
 

@@ -76,6 +76,10 @@ class Settings(BaseModel):
         default_factory=lambda: os.getenv("CHANNELS_DIR", "data/channels"),
         description="Directory for channel branding overlays (logos, frames)"
     )
+    BGM_DIR: str = Field(
+        default_factory=lambda: os.getenv("BGM_DIR", "data/bgm"),
+        description="Directory for harvested background-music library"
+    )
     DB_PATH: str = Field(
         default_factory=lambda: os.getenv("DB_PATH", os.getenv("DATABASE_PATH", "data/jobs.sqlite")),
         description="SQLite database file path"

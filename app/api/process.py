@@ -62,6 +62,8 @@ class ReupPayload(BaseModel):
     frame_color: Optional[str] = "black"
     frame_thickness: Optional[int] = 16
     target_platforms: Optional[List[str]] = None
+    bgm_path: Optional[str] = None
+    bgm_volume: Optional[float] = 0.85
 
 
 class ProcessJobRequest(BaseModel):
@@ -107,6 +109,8 @@ class ProcessJobRequest(BaseModel):
     frame_color: Optional[str] = "black"
     frame_thickness: Optional[int] = 16
     target_platforms: Optional[List[str]] = None
+    bgm_path: Optional[str] = None
+    bgm_volume: Optional[float] = 0.85
 
     # Nested payload fields (from React frontend)
     watermark: Optional[WatermarkPayload] = None
@@ -321,6 +325,14 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
             (req.reup.target_platforms if req.reup and getattr(req.reup, "target_platforms", None) else None)
             or getattr(req, "target_platforms", None)
             or ["tiktok", "youtube_shorts", "facebook"]
+        ),
+        bgm_path=(
+            (req.reup.bgm_path if req.reup and getattr(req.reup, "bgm_path", None) else None)
+            or getattr(req, "bgm_path", None)
+        ),
+        bgm_volume=(
+            req.reup.bgm_volume if req.reup and getattr(req.reup, "bgm_volume", None) is not None
+            else (req.bgm_volume if getattr(req, "bgm_volume", None) is not None else 0.85)
         ),
     )
 

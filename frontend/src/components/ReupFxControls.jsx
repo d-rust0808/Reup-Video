@@ -22,18 +22,23 @@ import {
   Share2,
   Frame,
   ChevronDown,
+  Music,
 } from 'lucide-react';
 
-import { fetchChannels, getMediaUrl, uploadStudioOverlay } from '../services/api';
+import { fetchChannels, getMediaUrl, uploadStudioOverlay, fetchBgmLibrary } from '../services/api';
 
 export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
   const [channels, setChannels] = useState([]);
   const [loadingChannels, setLoadingChannels] = useState(false);
   const [showWmAdvanced, setShowWmAdvanced] = useState(false);
+  const [bgmList, setBgmList] = useState([]);
 
 
   useEffect(() => {
     loadChannels();
+    fetchBgmLibrary()
+      .then((d) => setBgmList(d.items || []))
+      .catch(() => setBgmList([]));
   }, []);
 
   const loadChannels = async () => {
@@ -433,6 +438,48 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
             onChange={(e) => handleChange('enable_vocal_mute', e.target.checked)}
             className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 shrink-0 cursor-pointer"
           />
+        </div>
+
+        <div className="p-3.5 bg-indigo-50/70 rounded-2xl border border-indigo-200 space-y-2">
+          <div className="flex items-center gap-2">
+            <Music className="w-4 h-4 text-indigo-600" />
+            <span className="text-xs font-extrabold text-slate-800">Nhạc nền lấy từ video khác</span>
+          </div>
+          <select
+            value={options.bgm_id || ''}
+            onChange={(e) => {
+              const id = e.target.value;
+              const hit = bgmList.find((x) => x.id === id);
+              onChange({
+                ...options,
+                bgm_id: hit?.id || '',
+                bgm_path: hit?.path || hit?.id || '',
+                bgm_title: hit?.title || '',
+              });
+            }}
+            className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold"
+          >
+            <option value="">Không — giữ nhạc clip gốc</option>
+            {bgmList.map((t) => (
+              <option key={t.id} value={t.id}>{t.title}</option>
+            ))}
+          </select>
+          {(options.bgm_path || options.bgm_id) && (
+            <label className="flex items-center gap-2 text-[11px] font-bold text-slate-600">
+              Âm lượng
+              <input
+                type="range"
+                min="0.2"
+                max="1.4"
+                step="0.05"
+                value={options.bgm_volume ?? 0.85}
+                onChange={(e) => handleChange('bgm_volume', Number(e.target.value))}
+                className="flex-1"
+              />
+              <span>{Math.round((options.bgm_volume ?? 0.85) * 100)}%</span>
+            </label>
+          )}
+          <p className="text-[10px] text-slate-500">Tách nhạc ở tab Nhạc nền (⌘7), rồi chọn ở đây.</p>
         </div>
 
         {/* TTS Dubbing Control - Unified Vietnamese Voice Hub */}

@@ -78,6 +78,8 @@ data/models/*
 !data/models/.gitkeep
 data/frames/*
 !data/frames/.gitkeep
+data/bgm/*
+!data/bgm/.gitkeep
 
 # Module runtime temp and output directories
 app/modules/tmp/
