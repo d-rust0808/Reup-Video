@@ -64,18 +64,18 @@ def test_append_overlay_repeats_still_for_full_duration(tmp_path):
     fc, paths = append_overlay_filter("[0:v]format=yuv420p[v_out]", items, first_overlay_index=1)
     assert paths and os.path.isfile(paths[0])
     assert "[v_out]" in fc
-    assert "nullsink" in fc
-    assert "shortest=1" in fc
+    assert "eof_action=repeat" in fc
+    assert "repeatlast=1" in fc
     assert "W*0.1000" in fc
     assert "H*0.0800" in fc
-    assert "iw*0.2000" in fc
+    assert "scale=216:-1" in fc
 
 
 def test_append_frame_covers_full_frame(tmp_path):
     png = _touch_png(tmp_path / "khung.png")
     items = normalize_overlays([{"image_path": png, "kind": "frame"}])
     fc, _ = append_overlay_filter("[0:v]null[v_out]", items, 1)
-    assert "scale2ref=w=iw:h=ih" in fc
+    assert "scale=1080:1920" in fc
     assert "overlay=0:0:format=auto:eof_action=repeat" in fc
 
 

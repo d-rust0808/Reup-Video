@@ -73,11 +73,11 @@ def append_overlay_filter(
     filter_complex: str,
     overlays: Sequence[Any],
     first_overlay_index: int,
+    main_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[str, List[str]]:
     """
     Chains overlay nodes after the existing [v_out] label.
-    first_overlay_index is the ffmpeg input index of the first overlay image.
-    Returns (new_filter_complex, overlay_file_paths).
+    Stills use repeatlast (no scale2ref, no -loop) so FFmpeg 7 keeps full duration.
     """
     items = normalize_overlays(overlays)
     if not items:
@@ -87,41 +87,34 @@ def append_overlay_filter(
         logger.warning("append_overlay_filter: [v_out] label missing, overlays skipped")
         return filter_complex, []
 
+    mw, mh = main_size if main_size and main_size[0] > 0 and main_size[1] > 0 else (1080, 1920)
     fc = filter_complex.replace("[v_out]", "[v_base]", 1)
     prev = "v_base"
     parts: List[str] = []
     paths: List[str] = []
-
-    # eof_action=repeat + repeatlast=1: still PNG/JPG lasts the whole video.
-    persist = "format=auto:eof_action=repeat:repeatlast=1:shortest=1"
+    persist = "format=auto:eof_action=repeat:repeatlast=1"
 
     for i, ov in enumerate(items):
         in_idx = first_overlay_index + i
         lg = f"lg{i}"
-        lgs = f"lgs{i}"
-        dump = f"vdump{i}"
-        spa = f"vsa{i}"
-        spb = f"vsb{i}"
         nxt = "v_out" if i == len(items) - 1 else f"vov{i}"
         op = ov["opacity"]
         kind = ov["kind"]
         x, y, w = ov["x"], ov["y"], ov["w"]
-        parts.append(f"[{in_idx}:v]format=rgba,colorchannelmixer=aa={op:.3f}[{lg}]")
-        # Labelled pads can be consumed only once. Split so scale2ref cannot
-        # truncate the video; overlay the looping still onto a full-length copy.
-        parts.append(f"[{prev}]split=2[{spa}][{spb}]")
         if kind == "frame" or w >= 0.97:
-            parts.append(f"[{lg}][{spa}]scale2ref=w=iw:h=ih[{lgs}][{dump}]")
-            parts.append(f"[{dump}]nullsink")
-            parts.append(f"[{spb}][{lgs}]overlay=0:0:{persist}[{nxt}]")
+            parts.append(
+                f"[{in_idx}:v]format=rgba,colorchannelmixer=aa={op:.3f},"
+                f"scale={mw}:{mh}:force_original_aspect_ratio=disable[{lg}]"
+            )
+            parts.append(f"[{prev}][{lg}]overlay=0:0:{persist}[{nxt}]")
         else:
             wf = max(0.04, min(0.80, w))
+            sw = max(16, int(mw * wf) // 2 * 2)
             parts.append(
-                f"[{lg}][{spa}]scale2ref=w='iw*{wf:.4f}':h='ow/mdar'[{lgs}][{dump}]"
+                f"[{in_idx}:v]format=rgba,colorchannelmixer=aa={op:.3f},scale={sw}:-1[{lg}]"
             )
-            parts.append(f"[{dump}]nullsink")
             parts.append(
-                f"[{spb}][{lgs}]overlay=x='W*{x:.4f}':y='H*{y:.4f}':{persist}[{nxt}]"
+                f"[{prev}][{lg}]overlay=x='W*{x:.4f}':y='H*{y:.4f}':{persist}[{nxt}]"
             )
         prev = nxt
         paths.append(ov["image_path"])
@@ -130,8 +123,8 @@ def append_overlay_filter(
 
 
 def overlay_input_args(paths: Sequence[str]) -> List[str]:
-    """FFmpeg args that loop still images so they last the whole video."""
+    """Still images as extra inputs. Overlay repeatlast keeps them on for the whole clip."""
     args: List[str] = []
     for p in paths:
-        args.extend(["-loop", "1", "-i", p])
+        args.extend(["-i", p])
     return args

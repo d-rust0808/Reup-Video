@@ -644,8 +644,19 @@ def process_reup_video(
         demucs_used = bool(demucs_bgm_path and os.path.exists(demucs_bgm_path))
         if overlay_items:
             first_ov = 2 if demucs_used else 1
+            main_size = None
+            try:
+                import cv2
+                cap = cv2.VideoCapture(input_path)
+                mw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+                mh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+                cap.release()
+                if mw > 0 and mh > 0:
+                    main_size = (mw, mh)
+            except Exception:
+                main_size = None
             filter_complex, overlay_paths = append_overlay_filter(
-                filter_complex, overlay_items, first_overlay_index=first_ov
+                filter_complex, overlay_items, first_overlay_index=first_ov, main_size=main_size
             )
         input_md5 = calculate_file_md5(input_path)
 
