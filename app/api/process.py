@@ -329,6 +329,15 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         qm.register_callback(ws_manager.on_queue_update)
         request.app.state.queue_manager = qm
 
+    dup = qm.find_active_by_input(input_file)
+    if dup:
+        return {
+            "job_id": dup["job_id"],
+            "status": dup.get("status") or "PENDING",
+            "message": "Clip này đang trong hàng chờ — không tạo job trùng",
+            "duplicate": True,
+        }
+
     now_iso = datetime.now(timezone.utc).isoformat()
     with qm._get_conn() as conn:
         conn.execute(

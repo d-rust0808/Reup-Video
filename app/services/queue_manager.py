@@ -544,6 +544,59 @@ class BatchQueueManager:
         await self.queue.put(job_id)
         return True
 
+    async def retry_failed_jobs(self) -> int:
+        jobs = self.list_jobs()
+        n = 0
+        for job in jobs:
+            if (job.get("status") or "").upper() in ("FAILED", "CANCELLED"):
+                if await self.retry_job(job["job_id"]):
+                    n += 1
+        return n
+
+    def find_active_by_input(self, input_path: str) -> Optional[Dict[str, Any]]:
+        if not input_path:
+            return None
+        base = os.path.basename(input_path)
+        with self._get_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM jobs
+                WHERE UPPER(status) NOT IN ('COMPLETED','FAILED','CANCELLED')
+                  AND (input_file_path = ? OR input_file_path LIKE ?)
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (input_path, f"%{base}"),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def fail_stuck_jobs(self, max_minutes: int = 25) -> int:
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_minutes)
+        n = 0
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT job_id, updated_at FROM jobs
+                WHERE UPPER(status) NOT IN ('COMPLETED','FAILED','CANCELLED','PENDING','QUEUED')
+                """
+            ).fetchall()
+        for row in rows:
+            raw = row["updated_at"] or ""
+            try:
+                ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+            if ts < cutoff:
+                self.update_job_status(
+                    row["job_id"], "FAILED", progress=0.0,
+                    error_message="Job treo quá lâu — đã tự hủy",
+                    message="Timeout watchdog",
+                )
+                n += 1
+        return n
+
     def delete_job(self, job_id: str) -> bool:
         """Deletes job output file from disk and deletes job row from SQLite database."""
         job = self.get_job(job_id)
@@ -859,44 +912,59 @@ class BatchQueueManager:
                     progress=0.60,
                 )
             else:
-                self.append_job_log(
-                    job_id,
-                    "🧹 Đang khử chữ/logo: hybrid Telea + LaMa (không cắt đáy hình)…",
-                    level="INFO",
-                    stage="WATERMARK_REMOVAL",
-                    progress=0.50
-                )
-
-                from app.services.watermark_service import remove_watermark_and_subtitles
-                stage2_res_path = remove_watermark_and_subtitles(
-                    video_path=current_video_path,
-                    config=wm_config,
-                    output_path=stage2_out_path,
-                    progress_callback=lambda p: self.update_job_progress(job_id, p, stage="WATERMARK_REMOVAL")
-                )
-
-                if stage2_res_path and os.path.exists(stage2_res_path):
-                    current_video_path = stage2_res_path
+                from app.services.subtitle_detector import video_has_overlay_text
+                dirty = True
+                try:
+                    dirty = video_has_overlay_text(current_video_path)
+                except Exception as e:
+                    logger.warning(f"text pre-scan failed: {e}")
+                if not dirty:
                     self.append_job_log(
                         job_id,
-                        f"✨ Đã inpaint chữ/watermark -> {os.path.basename(stage2_res_path)}",
+                        "✨ Clip sạch — bỏ qua inpaint, giữ nguyên hình",
                         level="SUCCESS",
                         stage="WATERMARK_REMOVAL",
-                        progress=0.65
+                        progress=0.62,
                     )
-                try:
-                    from app.services.subtitle_detector import persistent_text_cover_filters
-                    covers = persistent_text_cover_filters(current_video_path)
-                    if covers:
-                        reup_config.text_cover_vf = ",".join(covers)
+                else:
+                    self.append_job_log(
+                        job_id,
+                        "🧹 Đang khử chữ/logo: hybrid Telea + LaMa (không cắt đáy hình)…",
+                        level="INFO",
+                        stage="WATERMARK_REMOVAL",
+                        progress=0.50
+                    )
+
+                    from app.services.watermark_service import remove_watermark_and_subtitles
+                    stage2_res_path = remove_watermark_and_subtitles(
+                        video_path=current_video_path,
+                        config=wm_config,
+                        output_path=stage2_out_path,
+                        progress_callback=lambda p: self.update_job_progress(job_id, p, stage="WATERMARK_REMOVAL")
+                    )
+
+                    if stage2_res_path and os.path.exists(stage2_res_path):
+                        current_video_path = stage2_res_path
                         self.append_job_log(
                             job_id,
-                            f"🧽 Phủ nốt {len(covers)} vệt chữ còn sót (delogo)",
-                            level="INFO",
+                            f"✨ Đã inpaint chữ/watermark -> {os.path.basename(stage2_res_path)}",
+                            level="SUCCESS",
                             stage="WATERMARK_REMOVAL",
+                            progress=0.65
                         )
-                except Exception as e:
-                    logger.warning(f"residual text cover failed: {e}")
+                    try:
+                        from app.services.subtitle_detector import persistent_text_cover_filters
+                        covers = persistent_text_cover_filters(current_video_path)
+                        if covers:
+                            reup_config.text_cover_vf = ",".join(covers)
+                            self.append_job_log(
+                                job_id,
+                                f"🧽 Phủ nốt {len(covers)} vệt chữ còn sót (delogo)",
+                                level="INFO",
+                                stage="WATERMARK_REMOVAL",
+                            )
+                    except Exception as e:
+                        logger.warning(f"residual text cover failed: {e}")
 
             # ------------------------------------------------------------------
             # Stage 3: REUP_TRANSFORM
@@ -1098,8 +1166,20 @@ class BatchQueueManager:
             raise
 
     def process_job(self, job_id: str) -> Dict[str, Any]:
-        """Synchronously processes a job directly through the 4-stage pipeline."""
-        return self._run_pipeline_stages(job_id)
+        """Synchronously processes a job; auto-retries once on failure."""
+        try:
+            return self._run_pipeline_stages(job_id)
+        except Exception as e:
+            if "CANCEL" in str(e).upper():
+                raise
+            self.append_job_log(
+                job_id,
+                f"🔁 Lỗi lần 1 ({e}). Tự chạy lại 1 lần…",
+                level="WARN",
+                stage="DOWNLOADING",
+            )
+            self.update_job_status(job_id, "PENDING", progress=0.05, error_message=None)
+            return self._run_pipeline_stages(job_id)
 
     def process_next_pending(self) -> Optional[Dict[str, Any]]:
         """Picks up and processes the next pending job in queue."""
@@ -1114,6 +1194,10 @@ class BatchQueueManager:
     async def _worker_loop(self) -> None:
         """Background worker task loop."""
         while True:
+            try:
+                self.fail_stuck_jobs(25)
+            except Exception:
+                pass
             job_id = await self.queue.get()
             try:
                 await self._process_job_pipeline(job_id)
@@ -1138,4 +1222,10 @@ class BatchQueueManager:
             pass
         except Exception as e:
             logger.error(f"Worker pipeline async execution error for job {job_id}: {e}")
+            try:
+                self.append_job_log(job_id, f"🔁 Tự chạy lại 1 lần sau lỗi: {e}", level="WARN")
+                self.update_job_status(job_id, "PENDING", progress=0.05, error_message=None)
+                await loop.run_in_executor(None, self._run_pipeline_stages, job_id)
+            except Exception as e2:
+                logger.error(f"Retry also failed for {job_id}: {e2}")
 

@@ -115,6 +115,18 @@ export async function fetchJobLogs(jobId) {
   return res.json();
 }
 
+export async function retryJob(jobId) {
+  const res = await fetch(`${API_BASE}/jobs/${jobId}/retry`, { method: 'POST' });
+  if (!res.ok) throw new Error('Không chạy lại được job');
+  return res.json();
+}
+
+export async function retryFailedJobs() {
+  const res = await fetch(`${API_BASE}/jobs/retry-failed`, { method: 'POST' });
+  if (!res.ok) throw new Error('Không chạy lại hàng loạt');
+  return res.json();
+}
+
 export async function cancelJob(jobId) {
   const res = await fetch(`${API_BASE}/jobs/${jobId}/cancel`, {
     method: 'POST',

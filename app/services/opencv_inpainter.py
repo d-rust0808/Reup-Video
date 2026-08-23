@@ -300,8 +300,14 @@ def _resolve_scan_region(
     return x1, y1, x2, y2, False
 
 
-def hybrid_inpaint_frame(frame: np.ndarray, mask: np.ndarray, radius: int = 5) -> np.ndarray:
-    """Telea fill, then LaMa neural refine on large holes (full-frame context)."""
+def hybrid_inpaint_frame(
+    frame: np.ndarray,
+    mask: np.ndarray,
+    radius: int = 5,
+    use_lama: bool = True,
+    frame_index: int = 0,
+) -> np.ndarray:
+    """Telea fill; LaMa refine every 5th frame when the hole is large."""
     if frame is None or mask is None or mask.size == 0:
         return frame
     if cv2.countNonZero(mask) == 0:
@@ -311,7 +317,8 @@ def hybrid_inpaint_frame(frame: np.ndarray, mask: np.ndarray, radius: int = 5) -
     r = _inpaint_radius(radius)
     out = cv2.inpaint(frame, m, r, cv2.INPAINT_TELEA)
     h, w = out.shape[:2]
-    if cv2.countNonZero(m) / float(max(1, w * h)) >= 0.004:
+    hole = cv2.countNonZero(m) / float(max(1, w * h))
+    if use_lama and hole >= 0.004 and (frame_index % 5 == 0):
         try:
             from app.services.lama_inpainter import lama_inpaint_bgr, get_lama_session
             if get_lama_session() is not None:
@@ -332,6 +339,7 @@ def _inpaint_frame_region(
     radius: int,
     flag: int,
     is_manual_roi: bool,
+    use_lama: bool = True,
 ) -> int:
     """Inpaint one frame region. Returns number of inpainted pixels."""
     rw = x2 - x1
@@ -357,7 +365,9 @@ def _inpaint_frame_region(
             return 0
         sub_mask = np.zeros((py2 - py1, px2 - px1), dtype=np.uint8)
         sub_mask[y1 - py1 : y2 - py1, x1 - px1 : x2 - px1] = text_mask
-        inpainted_sub = hybrid_inpaint_frame(sub_frame, sub_mask, radius)
+        inpainted_sub = hybrid_inpaint_frame(
+            sub_frame, sub_mask, radius, use_lama=use_lama, frame_index=frames_processed
+        )
         frame[py1:py2, px1:px2] = inpainted_sub
         return int(cv2.countNonZero(text_mask))
 
@@ -367,7 +377,9 @@ def _inpaint_frame_region(
     )
     if cv2.countNonZero(text_mask) == 0:
         return 0
-    inpainted_zone = hybrid_inpaint_frame(sub_zone, text_mask, radius)
+    inpainted_zone = hybrid_inpaint_frame(
+        sub_zone, text_mask, radius, use_lama=use_lama, frame_index=frames_processed
+    )
     frame[y1:y2, x1:x2] = inpainted_zone
     return int(cv2.countNonZero(text_mask))
 
@@ -431,7 +443,8 @@ def inpaint_video_opencv(
         raise ValueError("Inpainting radius must be strictly greater than 0")
 
     method_clean = method.lower()
-    if method_clean in ("opencv_telea", "telea", "hybrid", "auto", "all"):
+    use_lama = method_clean in ("hybrid", "auto", "all", "lama")
+    if method_clean in ("opencv_telea", "telea", "hybrid", "auto", "all", "lama"):
         flag = cv2.INPAINT_TELEA
     elif method_clean in ("opencv_ns", "ns"):
         flag = cv2.INPAINT_NS
@@ -500,7 +513,7 @@ def inpaint_video_opencv(
 
                 frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((height, width, 3)).copy()
                 pixels_inpainted += _inpaint_frame_region(
-                    frame, x1, y1, x2, y2, tracker, frames_processed, radius, flag, is_manual_roi
+                    frame, x1, y1, x2, y2, tracker, frames_processed, radius, flag, is_manual_roi, use_lama
                 )
 
                 if encoder_proc.stdin:
@@ -559,7 +572,7 @@ def inpaint_video_opencv(
             if not ret or frame is None:
                 break
             _inpaint_frame_region(
-                frame, x1, y1, x2, y2, tracker_b, frames_processed, radius, flag, is_manual_roi
+                frame, x1, y1, x2, y2, tracker_b, frames_processed, radius, flag, is_manual_roi, use_lama
             )
             writer.write(frame)
             frames_processed += 1

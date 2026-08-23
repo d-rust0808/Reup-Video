@@ -151,6 +151,13 @@ async def retry_job(job_id: str, request: Request):
     }
 
 
+@router.post("/jobs/retry-failed")
+async def retry_failed_jobs(request: Request):
+    qm = _get_queue_manager(request)
+    n = await qm.retry_failed_jobs()
+    return {"retried": n, "message": f"Đã xếp lại {n} job lỗi"}
+
+
 class BatchDeleteJobsRequest(BaseModel):
     job_ids: List[str]
 

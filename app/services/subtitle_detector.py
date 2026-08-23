@@ -646,3 +646,32 @@ def persistent_text_cover_filters(video_path: str, max_boxes: int = 4) -> List[s
         filters.append(f"delogo=x={x}:y={y}:w={bw}:h={bh}:show=0")
     return filters
 
+
+def video_has_overlay_text(video_path: str) -> bool:
+    """Cheap pre-scan: True if burned-in captions/logos look present."""
+    covers = persistent_text_cover_filters(video_path, max_boxes=3)
+    if covers:
+        return True
+    if not HAS_OPENCV or not video_path or not os.path.exists(video_path):
+        return True
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return True
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    hits = 0
+    try:
+        for f in (0.2, 0.5, 0.8):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(n * f)))
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            boxes = detect_text_boxes_opencv(frame, padding=4)
+            h, w = frame.shape[:2]
+            for x, y, bw, bh in boxes:
+                if bw >= w * 0.12 and bh >= 10:
+                    hits += 1
+                    break
+    finally:
+        cap.release()
+    return hits >= 2
+

@@ -23,6 +23,7 @@ import {
   fetchSampleVideos,
   fetchLibrary,
   getStreamUrl,
+  submitJob,
 } from '../services/api';
 import { loadSession, saveSession } from '../services/session';
 
@@ -43,6 +44,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
   const [channelHint, setChannelHint] = useState('');
   const [channelMessage, setChannelMessage] = useState('');
   const [queuedJobs, setQueuedJobs] = useState([]);
+  const [batchBusy, setBatchBusy] = useState(false);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -194,8 +196,63 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
   };
 
   const handleFileUpload = (e) => {
-    const file = e.target.files?.[0];
-    processFile(file);
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    (async () => {
+      for (const f of files) {
+        await processFile(f);
+      }
+    })();
+  };
+
+  const handleBatchReup = async () => {
+    if (!extractedList.length) return;
+    setBatchBusy(true);
+    setError(null);
+    const opts = loadSession().workbenchOptions || {};
+    const overlays = opts.overlays || [];
+    let ok = 0;
+    try {
+      for (const item of extractedList) {
+        await submitJob({
+          video_path: item.file_path || `data/input/raw/${item.video_id}.mp4`,
+          platform: item.platform || 'douyin',
+          canvas_size: [1080, 1920],
+          video_resolution: [1080, 1920],
+          watermark: { method: opts.wm_method || 'auto', roi: [0, 0, 0, 0], radius: 5 },
+          reup: {
+            hflip: opts.hflip !== false,
+            speed_ratio: opts.speed_ratio || 1.03,
+            pitch_shift: opts.pitch_shift !== false,
+            crop_percent: (Number(opts.crop_percent) || 2) / 100,
+            film_grain: opts.film_grain ?? 3,
+            modify_md5: opts.modify_md5 !== false,
+            enable_vocal_mute: opts.enable_vocal_mute !== false,
+            enable_tts: opts.enable_tts !== false,
+            enable_lipsync: opts.enable_lipsync !== false,
+            vietsub_style: opts.vietsub_style || 'dub',
+            burn_subtitles: opts.burn_subtitles !== false,
+            tts_voice: opts.tts_voice || 'en-US-AvaMultilingualNeural',
+            tts_engine: opts.tts_engine || 'edge-tts',
+            target_lang: 'vi',
+            channel_id: opts.channel_id,
+            post_title: item.title,
+            overlays,
+            frame_enabled: opts.frame_enabled !== false,
+            frame_color: opts.frame_color || 'black',
+            frame_thickness: opts.frame_thickness || 16,
+            target_platforms: opts.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
+          },
+        });
+        ok += 1;
+      }
+      setChannelMessage(`Đã xếp ${ok} job reup. Mở tab Hàng chờ để theo dõi.`);
+      onJobsQueued?.();
+    } catch (err) {
+      setError(err.message || 'Reup hàng loạt thất bại');
+    } finally {
+      setBatchBusy(false);
+    }
   };
 
   const handleDrop = (e) => {
@@ -460,6 +517,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
               <input
                 ref={fileInputRef}
                 type="file"
+                multiple
                 accept="video/mp4,video/quicktime,video/x-matroska,video/webm"
                 onChange={handleFileUpload}
                 className="hidden"
@@ -578,9 +636,16 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
         <div className="clean-panel rounded-3xl p-6 sm:p-8 space-y-4 animate-in fade-in duration-300">
           <div className="flex items-center justify-between pb-2 border-b border-slate-100">
             <h4 className="text-xs font-black text-slate-500 uppercase tracking-wider">
-              Danh Sách Video Đã Quét Từ Kênh ({extractedList.length})
+              Danh Sách Video Đã Quét ({extractedList.length})
             </h4>
-            <span className="text-xs font-semibold text-slate-500">Chọn video để chuyển sang Studio</span>
+            <button
+              type="button"
+              disabled={batchBusy || !extractedList.length}
+              onClick={handleBatchReup}
+              className="text-xs font-extrabold bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-3 py-2 rounded-xl"
+            >
+              {batchBusy ? 'Đang xếp job…' : `Reup tất cả (${extractedList.length})`}
+            </button>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

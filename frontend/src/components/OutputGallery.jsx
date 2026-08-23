@@ -346,6 +346,18 @@ export function OutputGallery() {
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
+                        const cap = item.caption || item.post_caption || item.title || item.filename || '';
+                        navigator.clipboard.writeText(String(cap));
+                        setToast({ type: 'success', title: 'Đã copy', message: 'Tiêu đề / caption' });
+                      }}
+                      title="Copy caption"
+                      className="px-3 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold rounded-xl border border-slate-200 transition cursor-pointer shadow-xs"
+                    >
+                      Copy
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
                         setPreviewVideo(item);
                       }}
                       title="Xem trực tiếp video này"

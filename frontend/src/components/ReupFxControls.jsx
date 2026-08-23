@@ -96,6 +96,31 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
         Tùy chỉnh Reup
       </h3>
 
+      <div className="grid grid-cols-3 gap-2">
+        {[
+          { id: 'fast', method: 'telea', label: 'Nhanh', desc: 'Telea, bỏ LaMa' },
+          { id: 'balanced', method: 'auto', label: 'Cân bằng', desc: 'Telea + LaMa cách khung' },
+          { id: 'clean', method: 'lama', label: 'Sạch', desc: 'LaMa neural tối đa' },
+        ].map((p) => {
+          const on =
+            (p.method === 'auto' && (!options.wm_method || options.wm_method === 'auto' || options.wm_method === 'all')) ||
+            options.wm_method === p.method;
+          return (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => handleChange('wm_method', p.method)}
+              className={`text-left rounded-2xl border px-3 py-2.5 ${
+                on ? 'bg-blue-600 border-blue-700 text-white' : 'bg-white border-slate-200 hover:border-blue-300'
+              }`}
+            >
+              <span className="text-xs font-extrabold block">{p.label}</span>
+              <span className={`text-[10px] ${on ? 'text-blue-100' : 'text-slate-500'}`}>{p.desc}</span>
+            </button>
+          );
+        })}
+      </div>
+
       <div className="p-4 bg-emerald-50/70 rounded-2xl border border-emerald-200 space-y-2">
         <div className="flex items-center justify-between">
           <div>
