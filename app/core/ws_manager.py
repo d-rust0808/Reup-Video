@@ -156,7 +156,8 @@ class ConnectionManager:
                 "job_id": job_id,
                 "status": "FAILED",
                 "stage": "FAILED",
-                "error": error_msg or "Unknown pipeline processing error",
+                "error": job_dict.get("error") or job_dict.get("error_message") or "Unknown pipeline processing error",
+                "error_message": job_dict.get("error_message") or job_dict.get("error"),
                 "message": message_str,
                 "logs": logs_list
             }

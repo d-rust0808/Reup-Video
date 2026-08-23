@@ -267,6 +267,9 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
     reup_chan_id = req.reup.channel_id if req.reup and req.reup.channel_id else req.channel_id
     reup_post_title = req.reup.post_title if req.reup and req.reup.post_title else req.post_title
     reup_post_caption = req.reup.post_caption if req.reup and req.reup.post_caption else req.post_caption
+    if not (reup_post_caption or "").strip():
+        from app.services.caption import build_caption
+        reup_post_caption = build_caption(reup_post_title, platform)
     reup_post_tags = (req.reup.post_tags if req.reup and req.reup.post_tags is not None else req.post_tags) or []
     reup_pub_status = (req.reup.publish_status if req.reup and req.reup.publish_status else req.publish_status) or "READY"
 

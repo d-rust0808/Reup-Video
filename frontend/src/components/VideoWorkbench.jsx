@@ -54,7 +54,15 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
   const [channelOverlays, setChannelOverlays] = useState([]);
 
   useEffect(() => {
-    saveSession({ workbenchOptions: options });
+    const sess = loadSession();
+    const sessionOvs = sess.workbenchOptions?.overlays || [];
+    const localOvs = options.overlays || [];
+    saveSession({
+      workbenchOptions: {
+        ...options,
+        overlays: localOvs.length ? localOvs : sessionOvs,
+      },
+    });
   }, [options]);
 
   useEffect(() => {
@@ -132,10 +140,9 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
   const handleDrop = (e) => {
     e.preventDefault();
     setIsDragOver(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file && file.type.startsWith('video/')) {
-      handleFileUpload(file);
-    }
+    const files = Array.from(e.dataTransfer.files || []).filter((f) => f.type.startsWith('video/'));
+    if (!files.length) return;
+    handleFileUpload(files[0]);
   };
 
   const handleSubmit = async () => {
@@ -221,7 +228,11 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
 
     try {
       const res = await submitJob(payload);
-      setMsg({ type: 'success', text: `Tạo Job thành công! Mã Job ID: ${res.job_id}` });
+      if (res?.duplicate) {
+        setMsg({ type: 'success', text: `Clip này đang chạy rồi (${res.job_id}) — không tạo job trùng.` });
+      } else {
+        setMsg({ type: 'success', text: `Tạo Job thành công! Mã Job ID: ${res.job_id}` });
+      }
       onJobSubmitted?.(res.job_id);
     } catch (err) {
       setMsg({ type: 'error', text: err.message || 'Gửi job thất bại' });

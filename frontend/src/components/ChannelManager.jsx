@@ -698,7 +698,7 @@ export function ChannelManager() {
                           {/* Title & Preview Trigger */}
                           <div className="flex items-center gap-3 min-w-0">
                             <button
-                              onClick={() => setPreviewVideo(videoSrc)}
+                              onClick={() => setPreviewVideo({ job_id: vid.job_id, title: vid.title })}
                               className="w-10 h-10 rounded-xl bg-slate-900 hover:bg-blue-600 text-white flex items-center justify-center shrink-0 transition shadow-xs group"
                               title="Xem thử video"
                             >
@@ -1075,7 +1075,7 @@ export function ChannelManager() {
       {previewVideo && (
         <VideoModal
           isOpen={true}
-          videoSrc={previewVideo}
+          video={typeof previewVideo === 'string' ? { job_id: previewVideo } : previewVideo}
           title="Xem Thử Video Thành Phẩm"
           onClose={() => setPreviewVideo(null)}
         />
@@ -1083,12 +1083,7 @@ export function ChannelManager() {
 
       {/* Toast Notification */}
       {toast && (
-        <Toast
-          type={toast.type}
-          title={toast.title}
-          message={toast.message}
-          onClose={() => setToast(null)}
-        />
+        <Toast toast={toast} onClose={() => setToast(null)} />
       )}
     </div>
   );

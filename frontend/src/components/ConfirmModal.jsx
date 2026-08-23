@@ -1,8 +1,9 @@
 import React from 'react';
 import { AlertTriangle, X } from 'lucide-react';
 
-export function ConfirmModal({ isOpen, title, message, onConfirm, onCancel, confirmText = 'Xác Nhận Xóa', cancelText = 'Hủy Bỏ' }) {
+export function ConfirmModal({ isOpen, title, message, onConfirm, onCancel, confirmText, confirmLabel, cancelText = 'Hủy Bỏ' }) {
   if (!isOpen) return null;
+  const ok = confirmText || confirmLabel || 'Xác Nhận Xóa';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs transition-opacity animate-in fade-in duration-200">
@@ -48,7 +49,7 @@ export function ConfirmModal({ isOpen, title, message, onConfirm, onCancel, conf
             onClick={onConfirm}
             className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs transition shadow-md shadow-rose-600/20 cursor-pointer"
           >
-            {confirmText}
+            {ok}
           </button>
         </div>
       </div>

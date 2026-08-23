@@ -14,7 +14,7 @@ export function OutputGallery() {
   const [batchDeleteTarget, setBatchDeleteTarget] = useState(false);
   const [clearAllTarget, setClearAllTarget] = useState(false);
   const [toast, setToast] = useState(null); // { type, title, message }
-  const [previewVideo, setPreviewVideo] = useState(null);
+  const [search, setSearch] = useState('');
 
   const isDesktopApp = typeof window !== 'undefined' && !!window.electronAPI?.isDesktop;
 
@@ -148,7 +148,13 @@ export function OutputGallery() {
     }
   };
 
-  const outputList = Array.isArray(outputs) ? outputs : [];
+  const outputList = (Array.isArray(outputs) ? outputs : []).filter((item) => {
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    return [item.filename, item.title, item.caption, item.platform, item.job_id]
+      .filter(Boolean)
+      .some((v) => String(v).toLowerCase().includes(q));
+  });
 
   return (
     <div className="clean-panel rounded-3xl p-6 sm:p-8 shadow-xs space-y-6">
@@ -200,6 +206,12 @@ export function OutputGallery() {
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Tìm caption / file / nền tảng…"
+            className="bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-medium w-48"
+          />
           <button
             onClick={loadOutputs}
             className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold p-2.5 rounded-xl border border-slate-200 transition cursor-pointer shadow-xs"
@@ -312,7 +324,7 @@ export function OutputGallery() {
                       <FileVideo className="w-5 h-5" />
                     </div>
                     <span className="text-xs font-bold text-slate-900 truncate max-w-[180px]">
-                      {item.filename || item.title || jobId}
+                      {item.title || item.filename || jobId}
                     </span>
                     {platLabel && (
                       <span className="ml-1 shrink-0 text-[9px] font-extrabold px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-100">
@@ -348,7 +360,7 @@ export function OutputGallery() {
                         e.stopPropagation();
                         const cap = item.caption || item.post_caption || item.title || item.filename || '';
                         navigator.clipboard.writeText(String(cap));
-                        setToast({ type: 'success', title: 'Đã copy', message: 'Tiêu đề / caption' });
+                        setToast({ type: 'success', title: 'Đã copy caption', message: cap.slice(0, 80) });
                       }}
                       title="Copy caption"
                       className="px-3 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold rounded-xl border border-slate-200 transition cursor-pointer shadow-xs"

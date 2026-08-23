@@ -82,7 +82,8 @@ export default function App() {
     try {
       const jobsData = await fetchJobs();
       const jobsList = Array.isArray(jobsData) ? jobsData : (jobsData.jobs || jobsData.items || []);
-      setQueueCount(jobsList.length);
+      const active = jobsList.filter((j) => !['COMPLETED', 'FAILED', 'CANCELLED'].includes((j.status || '').toUpperCase()));
+      setQueueCount(active.length);
       setServerOnline(true);
     } catch {
       setServerOnline(false);

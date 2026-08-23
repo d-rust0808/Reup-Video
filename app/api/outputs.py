@@ -6,6 +6,7 @@ Target Path: app/api/outputs.py
 
 import os
 import io
+import json
 import zipfile
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -43,6 +44,12 @@ async def list_outputs(request: Request):
         out_p = j.get("output_file_path") or j.get("output_path")
         if out_p and os.path.exists(out_p):
             seen.add(os.path.abspath(out_p))
+            raw_cfg = j.get("reup_config") or {}
+            if isinstance(raw_cfg, str):
+                try:
+                    raw_cfg = json.loads(raw_cfg)
+                except Exception:
+                    raw_cfg = {}
             outputs.append({
                 "job_id": j["job_id"],
                 "output_path": out_p,
@@ -50,6 +57,9 @@ async def list_outputs(request: Request):
                 "filename": os.path.basename(out_p),
                 "file_size": os.path.getsize(out_p),
                 "created_at": j.get("created_at"),
+                "title": (raw_cfg or {}).get("post_title"),
+                "caption": (raw_cfg or {}).get("post_caption"),
+                "platform": j.get("platform"),
             })
 
     from app.services.platform_export import PRESETS

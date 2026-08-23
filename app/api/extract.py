@@ -67,11 +67,13 @@ def _studio_reup_defaults(platform: str, overrides: Optional[dict] = None) -> Re
         "publish_status": "READY",
     }
     if overrides:
+        if "speed_ratio" in overrides and "speed_factor" not in overrides:
+            overrides = {**overrides, "speed_factor": overrides.get("speed_ratio")}
         for k, v in overrides.items():
             if v is not None:
                 payload[k] = v
     valid = set(ReupConfig.model_fields.keys())
-    clean = {k: v for k, v in payload.items() if k in valid or k == "speed_ratio"}
+    clean = {k: v for k, v in payload.items() if k in valid}
     return ReupConfig(**clean)
 
 
@@ -90,6 +92,10 @@ async def _enqueue_file(
         qm = BatchQueueManager(db_path=settings.DB_PATH, max_concurrent_jobs=settings.MAX_CONCURRENT_JOBS)
         qm.register_callback(ws_manager.on_queue_update)
         request.app.state.queue_manager = qm
+
+    dup = qm.find_active_by_input(input_file)
+    if dup:
+        return dup["job_id"]
 
     job_id = f"job_{uuid.uuid4().hex[:8]}"
     out_file = os.path.join(settings.OUTPUT_DIR, f"{job_id}.mp4")
@@ -292,11 +298,13 @@ async def extract_channel(req: ChannelExtractRequest, request: Request):
         if channel_id:
             overrides.setdefault("channel_id", channel_id)
         reup_base = _studio_reup_defaults(platform, overrides)
+        wm_algo = str((overrides or {}).get("wm_method") or "auto")
         for item in playable:
             cfg = reup_base.model_copy(deep=True)
             title = item.get("title") or item.get("video_id")
             cfg.post_title = title
-            cfg.post_caption = f"{title}\n\n#reup #douyin #vietsub"
+            from app.services.caption import build_caption
+            cfg.post_caption = build_caption(title, item.get("platform") or platform)
             cfg.channel_id = channel_id or cfg.channel_id
             try:
                 job_id = await _enqueue_file(
@@ -304,6 +312,7 @@ async def extract_channel(req: ChannelExtractRequest, request: Request):
                     item["file_path"],
                     item.get("platform") or platform,
                     cfg,
+                    wm_algorithm=wm_algo,
                 )
                 jobs.append({"job_id": job_id, "video_id": item.get("video_id"), "title": title})
             except Exception as e:

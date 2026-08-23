@@ -55,3 +55,22 @@ def test_hybrid_lama_only_every_fifth_frame():
 def test_video_has_overlay_text_missing_file():
     from app.services.subtitle_detector import video_has_overlay_text
     assert video_has_overlay_text("/no/such/file.mp4") is True
+
+def test_build_caption_hashtags():
+    from app.services.caption import build_caption
+    cap = build_caption("Mèo vui", "douyin", ["viral"])
+    assert "Mèo vui" in cap
+    assert "#douyin" in cap
+    assert "#vietsub" in cap
+    assert "#viral" in cap
+    empty = build_caption(None, "tiktok")
+    assert empty.startswith("Video reup")
+    assert "#tiktok" in empty
+
+def test_failed_ws_payload_reads_error_message():
+    import inspect
+    from app.core.ws_manager import ConnectionManager
+    src = inspect.getsource(ConnectionManager.on_queue_update)
+    assert "error_msg" not in src
+    assert "error_message" in src
+

@@ -117,10 +117,24 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
 
     try {
       if (mode === 'channel') {
+        const opts = loadSession().workbenchOptions || {};
         const result = await extractChannel({
           url: inputUrl.trim(),
           max_videos: Number(maxVideos) || 8,
           auto_reup: autoReup,
+          reup: {
+            vietsub_style: opts.vietsub_style || 'dub',
+            tts_voice: opts.tts_voice,
+            tts_engine: opts.tts_engine,
+            enable_tts: opts.enable_tts !== false,
+            enable_vocal_mute: opts.enable_vocal_mute !== false,
+            enable_lipsync: opts.enable_lipsync !== false,
+            burn_subtitles: opts.burn_subtitles !== false,
+            overlays: opts.overlays || [],
+            target_platforms: opts.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
+            channel_id: opts.channel_id,
+            wm_method: opts.wm_method,
+          },
         });
         const items = result.items || [];
         setChannelProfile(result.profile || null);
@@ -147,7 +161,11 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
         return;
       }
 
-      const result = await extractUrls([inputUrl.trim()]);
+      const urls = inputUrl
+        .split(/[\n,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const result = await extractUrls(urls);
       const items = result.items || [];
       if (items.length === 0) {
         setError(
@@ -155,8 +173,15 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
         );
         return;
       }
-      setExtractedList(items);
-      onMediaExtracted?.(items);
+      setExtractedList((prev) => {
+        const map = new Map();
+        [...items, ...prev].forEach((item) => {
+          if (item?.video_id && !map.has(item.video_id)) map.set(item.video_id, item);
+        });
+        const next = Array.from(map.values());
+        onMediaExtracted?.(next);
+        return next;
+      });
 
       // If single video extracted, directly open it in Studio Workbench
       if (items.length === 1) {
@@ -183,9 +208,11 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
         title: res.filename,
         author: 'File Tải Lên',
       };
-      const updated = [newMedia, ...extractedList];
-      setExtractedList(updated);
-      onMediaExtracted?.(updated);
+      setExtractedList((prev) => {
+        const next = [newMedia, ...prev.filter((x) => x.video_id !== newMedia.video_id)];
+        onMediaExtracted?.(next);
+        return next;
+      });
       onSelectForWorkbench?.(newMedia);
     } catch (err) {
       setError(err.message || 'Tải file video lên thất bại');
@@ -212,9 +239,10 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
     const opts = loadSession().workbenchOptions || {};
     const overlays = opts.overlays || [];
     let ok = 0;
+    let skipped = 0;
     try {
       for (const item of extractedList) {
-        await submitJob({
+        const res = await submitJob({
           video_path: item.file_path || `data/input/raw/${item.video_id}.mp4`,
           platform: item.platform || 'douyin',
           canvas_size: [1080, 1920],
@@ -244,9 +272,14 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             target_platforms: opts.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
           },
         });
-        ok += 1;
+        if (res?.duplicate) skipped += 1;
+        else ok += 1;
       }
-      setChannelMessage(`Đã xếp ${ok} job reup. Mở tab Hàng chờ để theo dõi.`);
+      setChannelMessage(
+        skipped
+          ? `Đã xếp ${ok} job mới, bỏ qua ${skipped} clip đang chạy.`
+          : `Đã xếp ${ok} job reup. Mở tab Hàng chờ để theo dõi.`
+      );
       onJobsQueued?.();
     } catch (err) {
       setError(err.message || 'Reup hàng loạt thất bại');
@@ -258,10 +291,13 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
   const handleDrop = (e) => {
     e.preventDefault();
     setIsDragOver(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file && file.type.startsWith('video/')) {
-      processFile(file);
-    }
+    const files = Array.from(e.dataTransfer.files || []).filter((f) => f.type.startsWith('video/'));
+    if (!files.length) return;
+    (async () => {
+      for (const f of files) {
+        await processFile(f);
+      }
+    })();
   };
 
   const getPlatformBadge = (platform) => {

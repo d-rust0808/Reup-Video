@@ -385,6 +385,17 @@ export function BatchQueue({ wsUpdates }) {
                     return s || 'Đang chờ';
                   };
 
+                  const etaText = (() => {
+                    if (isCompleted || isFailed || isCancelled || progressPct < 4) return null;
+                    const t = Date.parse(job.updated_at || job.created_at || '');
+                    if (!t) return null;
+                    const elapsed = Date.now() - t;
+                    const remain = elapsed * (100 - progressPct) / progressPct;
+                    const sec = Math.max(5, Math.round(remain / 1000));
+                    if (sec < 60) return `~${sec}s`;
+                    return `~${Math.round(sec / 60)} phút`;
+                  })();
+
                   return (
                     <tr
                       key={job.job_id}
@@ -413,7 +424,7 @@ export function BatchQueue({ wsUpdates }) {
                             <span className="text-slate-600 font-bold truncate max-w-[150px]">
                               {formatStage(job.stage || job.status)}
                             </span>
-                            <span className="font-extrabold text-blue-700 ml-2">{progressPct}%</span>
+                            <span className="font-extrabold text-blue-700 ml-2">{progressPct}%{etaText ? ` · ${etaText}` : ''}</span>
                           </div>
                           <div className="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden border border-slate-200/80">
                             <div
@@ -423,6 +434,11 @@ export function BatchQueue({ wsUpdates }) {
                               style={{ width: `${progressPct}%` }}
                             />
                           </div>
+                          {(isFailed || isCancelled) && (job.error_message || job.error) && (
+                            <p className="text-[10px] text-rose-600 font-medium truncate max-w-[220px]" title={job.error_message || job.error}>
+                              {job.error_message || job.error}
+                            </p>
+                          )}
                         </div>
                       </td>
                       <td className="px-4 py-3.5 whitespace-nowrap text-right" onClick={(e) => e.stopPropagation()}>
