@@ -396,7 +396,7 @@ class TTSService:
             inputs.extend(["-i", clip_path])
             label = f"a{idx}"
             filter_nodes.append(
-                f"[{idx}:a]atrim=0:{dur:.3f},asetpts=PTS-STARTPTS,adelay={start_ms}|{start_ms}:all=1[{label}]"
+                f"[{idx}:a]aresample=44100,aformat=channel_layouts=stereo,atrim=0:{dur:.3f},asetpts=PTS-STARTPTS,adelay={start_ms}|{start_ms}:all=1[{label}]"
             )
             map_labels.append(f"[{label}]")
 

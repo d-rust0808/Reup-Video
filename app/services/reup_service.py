@@ -220,6 +220,7 @@ def build_reup_filtergraph(
         vf_nodes.append(f"unsharp=luma_msize_x=5:luma_msize_y=5:luma_amount={cfg.unsharp_amount}")
 
     af_nodes = []
+    mute_complex = ""
     if has_audio:
         if cfg.enable_vocal_mute:
             from app.services.audio_service import build_vocal_mute_ffmpeg_filter
@@ -228,7 +229,9 @@ def build_reup_filtergraph(
                 vocal_mute_strategy=cfg.vocal_mute_strategy,
                 is_stereo=True
             )
-            if vm_filter:
+            if vm_filter and ";" in vm_filter:
+                mute_complex = vm_filter
+            elif vm_filter:
                 af_nodes.append(vm_filter)
 
         if cfg.pitch_shift:
@@ -247,10 +250,21 @@ def build_reup_filtergraph(
 
     vf_str = ",".join(vf_nodes) if vf_nodes else ""
     af_str = ",".join(af_nodes) if af_nodes else ""
+    if mute_complex:
+        af_str = mute_complex + ((";" + af_str) if af_str else "")
 
     vf_graph = vf_str if vf_str else "null"
-    if has_audio and af_nodes:
-        filter_complex = f"[0:v]{vf_graph}[v_out];[0:a]{af_str}[a_out]"
+    if has_audio and (af_nodes or mute_complex):
+        if mute_complex and af_nodes:
+            filter_complex = (
+                f"[0:v]{vf_graph}[v_out];"
+                f"[0:a]{mute_complex}[a_muted];"
+                f"[a_muted]{','.join(af_nodes)}[a_out]"
+            )
+        elif mute_complex:
+            filter_complex = f"[0:v]{vf_graph}[v_out];[0:a]{mute_complex}[a_out]"
+        else:
+            filter_complex = f"[0:v]{vf_graph}[v_out];[0:a]{af_str}[a_out]"
         return filter_complex, True, vf_str, af_str
     else:
         filter_complex = f"[0:v]{vf_graph}[v_out]"
@@ -417,13 +431,16 @@ def burn_vietnamese_hardsub(video_path: str, srt_path: str, output_path: str, sp
 
 
 def build_tts_bgm_mix_filter() -> str:
-    """Bass-only BGM; crush it whenever Vietnamese TTS is speaking so voices never stack."""
+    """Keep BGM body; duck it under Vietnamese TTS. Do not lowpass BGM again (already muted)."""
     return (
-        "[1:a]volume=1.28,highpass=f=70,asplit=2[sc][voice];"
-        "[0:a]lowpass=f=180:poles=2,volume=0.80[bgraw];"
-        "[bgraw][sc]sidechaincompress=threshold=0.005:ratio=20:attack=6:release=70:makeup=1:knee=1[bg];"
-        "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amixed];"
-        "[amixed]loudnorm=I=-14:LRA=11:TP=-1.5[aout]"
+        "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.12,highpass=f=80,lowpass=f=12000,"
+        "equalizer=f=2500:t=q:w=1.0:g=2.5,"
+        "acompressor=threshold=-22dB:ratio=2.6:attack=8:release=90:makeup=2.5[voice];"
+        "[voice]asplit=2[sc][vox];"
+        "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.00[bgraw];"
+        "[bgraw][sc]sidechaincompress=threshold=0.03:ratio=6:attack=15:release=240:makeup=2:knee=4[bg];"
+        "[bg][vox]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amixed];"
+        "[amixed]dynaudnorm=f=120:g=10:p=0.95,alimiter=limit=0.94[aout]"
     )
 
 
@@ -463,7 +480,7 @@ def mix_tts_with_background(video_path: str, tts_audio_path: str, output_path: s
             "-filter_complex", fc,
             "-map", "0:v:0", "-map", "[aout]",
             "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             tmp_out,
         ]
     else:
@@ -473,7 +490,7 @@ def mix_tts_with_background(video_path: str, tts_audio_path: str, output_path: s
             "-i", audio_to_use,
             "-map", "0:v:0", "-map", "1:a:0",
             "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             tmp_out,
         ]
     try:
@@ -485,10 +502,10 @@ def mix_tts_with_background(video_path: str, tts_audio_path: str, output_path: s
         if has_audio:
             # Fallback: keep BGM loud instead of crushing it
             fc2 = (
-                "[0:a]lowpass=f=180,volume=0.55[bg];"
-                "[1:a]volume=1.20[voice];"
+                "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=0.85[bg];"
+                "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.10[voice];"
                 "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amixed];"
-                "[amixed]loudnorm=I=-14:LRA=11:TP=-1.5[aout]"
+                "[amixed]dynaudnorm=f=120:g=10:p=0.95,alimiter=limit=0.94[aout]"
             )
             cmd[cmd.index("-filter_complex") + 1] = fc2
             res2 = subprocess.run(cmd, capture_output=True, text=True, check=False)

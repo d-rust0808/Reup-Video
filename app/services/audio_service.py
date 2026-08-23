@@ -185,9 +185,17 @@ def build_vocal_mute_ffmpeg_filter(
     if vocal_mute_strategy == "mute_all" or not preserve_bgm:
         return "volume=0"
 
-    # Dialogue lives ~200–4000 Hz. Keep only sub-bass so BGM thump remains
-    # but original Chinese cannot stack on top of the Vietnamese dub.
-    return "lowpass=f=180:poles=2,volume=0.80"
+    # Keep kick/BGM body (<180 Hz) and air (>6 kHz). Cut speech-band mids
+    # via mid-side so original dialogue does not stack on Vietnamese TTS.
+    # A brick-wall lowpass=180 made silent stretches sound thin / "nhạt".
+    return (
+        "asplit=2[vm_lo][vm_hi];"
+        "[vm_lo]lowpass=f=180:poles=2,volume=0.92[vm_bass];"
+        "[vm_hi]highpass=f=180,stereotools=mlev=0.10:slev=1.22,"
+        "equalizer=f=1400:t=q:w=1.6:g=-15[vm_cut];"
+        "[vm_bass][vm_cut]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+        "treble=g=5:f=6500"
+    )
 
 
 
@@ -217,13 +225,23 @@ def apply_ffmpeg_vocal_mute(
     )
 
     os.makedirs(os.path.dirname(os.path.abspath(output_audio_path)), exist_ok=True)
-    cmd = [
-        ffmpeg_bin, "-y",
-        "-i", input_audio_path,
-        "-af", af_filter,
-        "-c:a", "pcm_s16le" if output_audio_path.endswith(".wav") else "aac",
-        output_audio_path
-    ]
+    if ";" in (af_filter or ""):
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-i", input_audio_path,
+            "-filter_complex", f"[0:a]{af_filter}[aout]",
+            "-map", "[aout]",
+            "-c:a", "pcm_s16le" if output_audio_path.endswith(".wav") else "aac",
+            output_audio_path,
+        ]
+    else:
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-i", input_audio_path,
+            "-af", af_filter,
+            "-c:a", "pcm_s16le" if output_audio_path.endswith(".wav") else "aac",
+            output_audio_path,
+        ]
 
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)

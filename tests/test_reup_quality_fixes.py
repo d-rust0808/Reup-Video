@@ -159,14 +159,22 @@ def test_lipsync_default_on():
 
 
 def test_tts_mix_ducks_only_during_speech():
-    from app.services.reup_service import build_tts_bgm_mix_filter
+    from app.services.reup_service import build_tts_bgm_mix_filter, build_reup_filtergraph
     from app.services.audio_service import build_vocal_mute_ffmpeg_filter
     fc = build_tts_bgm_mix_filter()
     assert "sidechaincompress" in fc
     assert "volume=0.22" not in fc
-    assert "loudnorm=I=-14" in fc
+    assert "[0:a]lowpass=f=180" not in fc
+    assert "dynaudnorm" in fc
     mute = build_vocal_mute_ffmpeg_filter(preserve_bgm=True)
-    assert "lowpass=f=180" in mute
+    assert "stereotools=" in mute
+    assert "asplit=" in mute
+    assert "treble=" in mute
+    cfg = ReupConfig(enable_vocal_mute=True, film_grain=0, pitch_shift=False, speed_factor=1.0)
+    graph, has_a, vf, af = build_reup_filtergraph(cfg, has_audio=True)
+    assert has_a is True
+    assert "asplit=2" in graph
+    assert graph.count("[0:a]") == 1
 
 
 def test_vietsub_style_auto_picks_recap_for_long_clips():
