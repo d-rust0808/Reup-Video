@@ -991,35 +991,99 @@ class BatchQueueManager:
                 )
                 conn.commit()
 
+            # Multi-platform export (TikTok / Shorts / Reels / YouTube)
+            variants = []
+            try:
+                from app.services.platform_export import export_for_platforms, normalize_platforms
+                wanted = normalize_platforms(
+                    getattr(reup_config, "target_platforms", None)
+                    or params.get("target_platforms")
+                    or []
+                )
+                if wanted:
+                    variants = export_for_platforms(final_video_path, job_id, wanted)
+                    if variants:
+                        labels = ", ".join(f"{v['label']} {v['ratio']}" for v in variants)
+                        self.append_job_log(
+                            job_id,
+                            f"🌍 Xuất đa nền tảng: {labels}",
+                            level="SUCCESS",
+                            stage="COMPLETED",
+                        )
+            except Exception as e:
+                logger.warning(f"Platform export skipped for {job_id}: {e}")
+
             # Auto-assign to distribution channel if configured
             chan_id = getattr(reup_config, "channel_id", None) or params.get("channel_id")
+            assign_paths = [final_video_path] + [v["path"] for v in variants if v.get("path")]
+            unique_paths = []
+            seen_p = set()
+            for pth in assign_paths:
+                if pth and pth not in seen_p:
+                    seen_p.add(pth)
+                    unique_paths.append(pth)
+
+            def _assign(channel_id: str, video_path: str, suffix: str = "") -> None:
+                cv_id = f"cvid_{uuid.uuid4().hex[:8]}"
+                raw_tags = getattr(reup_config, "post_tags", None) or params.get("post_tags") or []
+                tags_json = json.dumps(raw_tags if isinstance(raw_tags, list) else [], ensure_ascii=False)
+                p_title = getattr(reup_config, "post_title", None) or params.get("post_title") or f"Video Reup #{job_id[-6:]}"
+                if suffix:
+                    p_title = f"{p_title} · {suffix}"
+                p_caption = getattr(reup_config, "post_caption", None) or params.get("post_caption") or ""
+                p_status = (getattr(reup_config, "publish_status", None) or params.get("publish_status") or "READY").upper()
+                with self._get_conn() as conn:
+                    conn.execute("""
+                        INSERT INTO channel_videos (
+                            id, channel_id, job_id, title, caption, tags,
+                            publish_status, video_path, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        cv_id, channel_id, job_id, p_title, p_caption,
+                        tags_json, p_status, video_path, now, now
+                    ))
+                    conn.commit()
+
             if chan_id:
                 try:
-                    with self._get_conn() as conn:
-                        cv_id = f"cvid_{uuid.uuid4().hex[:8]}"
-                        raw_tags = getattr(reup_config, "post_tags", None) or params.get("post_tags") or []
-                        tags_json = json.dumps(raw_tags if isinstance(raw_tags, list) else [], ensure_ascii=False)
-                        p_title = getattr(reup_config, "post_title", None) or params.get("post_title") or f"Video Reup #{job_id[-6:]}"
-                        p_caption = getattr(reup_config, "post_caption", None) or params.get("post_caption") or ""
-                        p_status = (getattr(reup_config, "publish_status", None) or params.get("publish_status") or "READY").upper()
-                        conn.execute("""
-                            INSERT INTO channel_videos (
-                                id, channel_id, job_id, title, caption, tags,
-                                publish_status, video_path, created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            cv_id, chan_id, job_id, p_title, p_caption,
-                            tags_json, p_status, final_video_path, now, now
-                        ))
-                        conn.commit()
+                    _assign(chan_id, unique_paths[0] if unique_paths else final_video_path)
                     self.append_job_log(
                         job_id,
-                        f"📢 Đã tự động phân bổ video vào kênh thành công!",
+                        "📢 Đã tự động phân bổ video vào kênh thành công!",
                         level="SUCCESS",
                         stage="COMPLETED"
                     )
                 except Exception as e:
                     logger.warning(f"Failed to auto-assign video {job_id} to channel {chan_id}: {e}")
+
+            # Also drop variants onto channels whose platform matches
+            if variants:
+                try:
+                    with self._get_conn() as conn:
+                        rows = conn.execute(
+                            "SELECT channel_id, platform FROM channels WHERE UPPER(status) = 'ACTIVE'"
+                        ).fetchall()
+                    plat_to_chan = {}
+                    for row in rows:
+                        plat = (row["platform"] or "").lower()
+                        plat_to_chan.setdefault(plat, row["channel_id"])
+                    plat_to_chan["youtube_shorts"] = plat_to_chan.get("youtube_shorts") or plat_to_chan.get("youtube")
+                    assigned_extra = 0
+                    for v in variants:
+                        cid = plat_to_chan.get(v["platform"])
+                        if not cid or cid == chan_id:
+                            continue
+                        _assign(cid, v["path"], v.get("label") or v["platform"])
+                        assigned_extra += 1
+                    if assigned_extra:
+                        self.append_job_log(
+                            job_id,
+                            f"📢 Đã gán {assigned_extra} bản xuất vào kênh cùng nền tảng.",
+                            level="SUCCESS",
+                            stage="COMPLETED",
+                        )
+                except Exception as e:
+                    logger.warning(f"Variant channel assign skipped: {e}")
 
             updated_job = self.get_job(job_id)
             if updated_job:

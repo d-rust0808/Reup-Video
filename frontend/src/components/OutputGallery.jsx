@@ -275,6 +275,15 @@ export function OutputGallery() {
           {outputList.map((item, idx) => {
             const jobId = item.job_id || item.filename;
             const isSelected = selectedIds.includes(jobId);
+            const plat = (item.platform || (String(item.filename || jobId).match(/\.([a-z_]+)\.mp4$/i) || [])[1] || '').toLowerCase();
+            const platLabel = {
+              tiktok: 'TikTok 9:16',
+              youtube_shorts: 'YT Shorts 9:16',
+              facebook: 'FB Reels 9:16',
+              instagram: 'IG Reels 9:16',
+              youtube: 'YouTube 16:9',
+              douyin: 'Douyin 9:16',
+            }[plat];
 
             return (
               <div
@@ -305,6 +314,11 @@ export function OutputGallery() {
                     <span className="text-xs font-bold text-slate-900 truncate max-w-[180px]">
                       {item.filename || item.title || jobId}
                     </span>
+                    {platLabel && (
+                      <span className="ml-1 shrink-0 text-[9px] font-extrabold px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-100">
+                        {platLabel}
+                      </span>
+                    )}
                   </div>
                   {isSelected ? (
                     <CheckSquare className="w-4 h-4 text-blue-600 shrink-0" />

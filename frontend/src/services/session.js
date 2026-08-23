@@ -1,35 +1,154 @@
-const KEY = 'reup.studio.session.v1';
+const KEY = 'reup.studio.session.v2';
+const LEGACY_KEY = 'reup.studio.session.v1';
 
-const EMPTY = {
+export const EMPTY_SESSION = {
   activeTab: 'extract',
   collapsed: false,
   selectedMedia: null,
   extractedMediaList: [],
   workbenchOptions: null,
+  extractMode: 'video',
+  extractUrl: '',
+  maxVideos: 8,
+  autoReup: true,
+  selectedChannelId: null,
+  targetPlatforms: ['tiktok', 'youtube_shorts', 'facebook'],
+  savedAt: 0,
 };
+
+function isSafeUrl(value) {
+  if (typeof value !== 'string' || !value) return false;
+  if (value.startsWith('blob:') || value.startsWith('data:')) return false;
+  return true;
+}
+
+export function compactMedia(item) {
+  if (!item || typeof item !== 'object') return null;
+  const videoId = item.video_id || item.media_id || item.id;
+  if (!videoId) return null;
+  const cover = item.cover_url || item.thumbnail || item.cover || '';
+  const filePath = item.file_path || '';
+  return {
+    video_id: String(videoId),
+    platform: item.platform || '',
+    title: item.title || item.filename || '',
+    author: item.author || '',
+    file_path: isSafeUrl(filePath) || (typeof filePath === 'string' && filePath.startsWith('data/')) ? filePath : '',
+    cover_url: isSafeUrl(cover) ? cover : '',
+  };
+}
+
+export function compactOptions(options) {
+  if (!options || typeof options !== 'object') return null;
+  const { overlays, ...rest } = options;
+  const cleanOverlays = Array.isArray(overlays)
+    ? overlays
+        .filter((o) => o && typeof o === 'object')
+        .map((o) => ({
+          id: o.id,
+          kind: o.kind,
+          src: isSafeUrl(o.src) ? o.src : '',
+          x: o.x,
+          y: o.y,
+          w: o.w,
+          h: o.h,
+        }))
+        .filter((o) => o.src)
+    : [];
+  return { ...rest, overlays: cleanOverlays };
+}
+
+function compactSession(raw) {
+  const src = { ...EMPTY_SESSION, ...(raw || {}) };
+  const list = Array.isArray(src.extractedMediaList)
+    ? src.extractedMediaList.map(compactMedia).filter(Boolean).slice(0, 80)
+    : [];
+  const platforms = Array.isArray(src.targetPlatforms)
+    ? src.targetPlatforms.map(String).filter(Boolean).slice(0, 8)
+    : EMPTY_SESSION.targetPlatforms;
+  return {
+    ...EMPTY_SESSION,
+    activeTab: src.activeTab || 'extract',
+    collapsed: !!src.collapsed,
+    selectedMedia: compactMedia(src.selectedMedia),
+    extractedMediaList: list,
+    workbenchOptions: compactOptions(src.workbenchOptions),
+    extractMode: src.extractMode === 'channel' ? 'channel' : 'video',
+    extractUrl: typeof src.extractUrl === 'string' ? src.extractUrl.slice(0, 4000) : '',
+    maxVideos: Math.max(1, Math.min(50, Number(src.maxVideos) || 8)),
+    autoReup: src.autoReup !== false,
+    selectedChannelId: src.selectedChannelId || null,
+    targetPlatforms: platforms.length ? platforms : EMPTY_SESSION.targetPlatforms,
+    savedAt: Number(src.savedAt) || Date.now(),
+  };
+}
 
 export function loadSession() {
   try {
-    const raw = localStorage.getItem(KEY);
-    if (!raw) return { ...EMPTY };
-    const parsed = JSON.parse(raw);
-    return {
-      ...EMPTY,
-      ...parsed,
-      extractedMediaList: Array.isArray(parsed.extractedMediaList) ? parsed.extractedMediaList : [],
-    };
+    const raw = localStorage.getItem(KEY) || localStorage.getItem(LEGACY_KEY);
+    if (!raw) return { ...EMPTY_SESSION };
+    return compactSession(JSON.parse(raw));
   } catch {
-    return { ...EMPTY };
+    return { ...EMPTY_SESSION };
   }
 }
 
 export function saveSession(partial) {
   try {
-    const prev = loadSession();
-    const next = { ...prev, ...partial, savedAt: Date.now() };
-    localStorage.setItem(KEY, JSON.stringify(next));
+    const next = compactSession({ ...loadSession(), ...partial, savedAt: Date.now() });
+    const json = JSON.stringify(next);
+    try {
+      localStorage.setItem(KEY, json);
+    } catch {
+      const slim = compactSession({ ...next, extractedMediaList: next.extractedMediaList.slice(0, 12) });
+      localStorage.setItem(KEY, JSON.stringify(slim));
+    }
+    scheduleServerPush(next);
     return next;
   } catch {
-    return partial;
+    return compactSession(partial);
   }
+}
+
+let pushTimer = null;
+let lastPushedAt = 0;
+function scheduleServerPush(payload) {
+  if (typeof window === 'undefined') return;
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => {
+    pushServerSession(payload).catch(() => {});
+  }, 450);
+}
+
+export async function pushServerSession(payload) {
+  const body = compactSession(payload || loadSession());
+  if (body.savedAt && body.savedAt === lastPushedAt) return;
+  const { getApiBase } = await import('./api');
+  const res = await fetch(`${getApiBase()}/studio/session`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (res.ok) lastPushedAt = body.savedAt;
+}
+
+export async function hydrateSession() {
+  const local = loadSession();
+  try {
+    const { getApiBase } = await import('./api');
+    const res = await fetch(`${getApiBase()}/studio/session`);
+    if (!res.ok) return local;
+    const remote = compactSession(await res.json());
+    if ((remote.savedAt || 0) >= (local.savedAt || 0)) {
+      try {
+        localStorage.setItem(KEY, JSON.stringify(remote));
+      } catch {
+        /* ignore quota */
+      }
+      return remote;
+    }
+  } catch {
+    /* offline — keep local */
+  }
+  return local;
 }

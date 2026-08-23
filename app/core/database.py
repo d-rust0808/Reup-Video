@@ -115,6 +115,14 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chan_vid_channel ON channel_videos(channel_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chan_vid_status ON channel_videos(publish_status)")
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS studio_state (
+                id TEXT PRIMARY KEY,
+                payload TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL
+            )
+        """)
         conn.commit()
 
     logger.info(f"Database initialized successfully at: {db_path}")

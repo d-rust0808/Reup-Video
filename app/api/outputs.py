@@ -38,16 +38,51 @@ async def list_outputs(request: Request):
     completed_jobs = qm.list_jobs(status_filter="COMPLETED")
 
     outputs = []
+    seen = set()
     for j in completed_jobs:
         out_p = j.get("output_file_path") or j.get("output_path")
         if out_p and os.path.exists(out_p):
+            seen.add(os.path.abspath(out_p))
             outputs.append({
                 "job_id": j["job_id"],
                 "output_path": out_p,
                 "output_file_path": out_p,
+                "filename": os.path.basename(out_p),
                 "file_size": os.path.getsize(out_p),
                 "created_at": j.get("created_at"),
             })
+
+    from app.services.platform_export import PRESETS
+    out_dir = getattr(settings, "OUTPUT_DIR", "data/outputs")
+    if os.path.isdir(out_dir):
+        for fname in sorted(os.listdir(out_dir)):
+            if not fname.endswith(".mp4"):
+                continue
+            path = os.path.join(out_dir, fname)
+            if not os.path.isfile(path):
+                continue
+            abs_p = os.path.abspath(path)
+            if abs_p in seen:
+                continue
+            stem = fname[:-4]
+            plat = None
+            parent = stem
+            bits = stem.split(".")
+            if len(bits) >= 2 and bits[-1] in PRESETS:
+                plat = bits[-1]
+                parent = ".".join(bits[:-1])
+            outputs.append({
+                "job_id": stem,
+                "parent_job_id": parent,
+                "platform": plat,
+                "output_path": path,
+                "output_file_path": path,
+                "filename": fname,
+                "file_size": os.path.getsize(path),
+                "created_at": None,
+            })
+            seen.add(abs_p)
+
     return {"outputs": outputs}
 
 
@@ -58,10 +93,12 @@ async def download_output(job_id: str, request: Request):
     """
     qm = _get_queue_manager(request)
     job = qm.get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job ID not found")
-
-    out_p = job.get("output_file_path") or job.get("output_path")
+    out_p = None
+    if job:
+        out_p = job.get("output_file_path") or job.get("output_path")
+    if not out_p or not os.path.exists(out_p):
+        from app.api.stream import _resolve_media_file_path
+        out_p = _resolve_media_file_path(job_id)
     if not out_p or not os.path.exists(out_p):
         raise HTTPException(status_code=404, detail="Output video file missing from disk")
 

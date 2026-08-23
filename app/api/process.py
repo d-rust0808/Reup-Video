@@ -61,6 +61,7 @@ class ReupPayload(BaseModel):
     frame_enabled: Optional[bool] = True
     frame_color: Optional[str] = "black"
     frame_thickness: Optional[int] = 16
+    target_platforms: Optional[List[str]] = None
 
 
 class ProcessJobRequest(BaseModel):
@@ -105,6 +106,7 @@ class ProcessJobRequest(BaseModel):
     frame_enabled: Optional[bool] = True
     frame_color: Optional[str] = "black"
     frame_thickness: Optional[int] = 16
+    target_platforms: Optional[List[str]] = None
 
     # Nested payload fields (from React frontend)
     watermark: Optional[WatermarkPayload] = None
@@ -311,6 +313,11 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         frame_thickness=(
             req.reup.frame_thickness if req.reup and getattr(req.reup, "frame_thickness", None) is not None
             else (req.frame_thickness if getattr(req, "frame_thickness", None) is not None else 16)
+        ),
+        target_platforms=(
+            (req.reup.target_platforms if req.reup and getattr(req.reup, "target_platforms", None) else None)
+            or getattr(req, "target_platforms", None)
+            or ["tiktok", "youtube_shorts", "facebook"]
         ),
     )
 

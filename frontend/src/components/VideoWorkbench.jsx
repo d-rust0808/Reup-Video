@@ -47,6 +47,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     frame_color: 'black',
     frame_thickness: 16,
     overlays: [],
+    target_platforms: ['tiktok', 'youtube_shorts', 'facebook'],
     ...(saved || {}),
     };
   });
@@ -209,6 +210,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         frame_color: options.frame_color || 'black',
         frame_thickness: options.frame_thickness || 16,
         overlays: options.overlays || [],
+        target_platforms: options.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
       },
     };
 

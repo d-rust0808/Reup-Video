@@ -19,6 +19,8 @@ import {
   BookOpen,
   Smile,
   Captions,
+  Share2,
+  Frame,
 } from 'lucide-react';
 
 import { fetchChannels, getMediaUrl, uploadStudioOverlay } from '../services/api';
@@ -576,9 +578,56 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
         <div className="p-4 bg-gradient-to-br from-blue-50/70 via-indigo-50/40 to-slate-50 rounded-2xl border border-blue-100/90 space-y-3.5">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2">
+              <Share2 className="w-4 h-4 text-blue-600" />
+              <span className="text-xs font-extrabold text-slate-900">
+                Xuất đa nền tảng
+              </span>
+            </div>
+            <span className="text-[10px] bg-blue-100/80 text-blue-700 px-2 py-0.5 rounded-full font-bold">
+              1 reup → nhiều bản
+            </span>
+          </div>
+          <p className="text-[10px] text-slate-500 font-medium">
+            Mỗi nền tảng nhận file đúng tỷ lệ (9:16 Shorts/Reels, 16:9 YouTube). Bản cùng tỷ lệ được copy, không encode lại.
+          </p>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+            {[
+              { id: 'tiktok', label: 'TikTok', ratio: '9:16' },
+              { id: 'youtube_shorts', label: 'YT Shorts', ratio: '9:16' },
+              { id: 'facebook', label: 'FB Reels', ratio: '9:16' },
+              { id: 'instagram', label: 'IG Reels', ratio: '9:16' },
+              { id: 'youtube', label: 'YouTube', ratio: '16:9' },
+              { id: 'douyin', label: 'Douyin', ratio: '9:16' },
+            ].map((p) => {
+              const selected = (options.target_platforms || []).includes(p.id);
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => {
+                    const cur = Array.isArray(options.target_platforms) ? [...options.target_platforms] : [];
+                    const next = selected ? cur.filter((x) => x !== p.id) : [...cur, p.id];
+                    handleChange('target_platforms', next);
+                  }}
+                  className={`text-left rounded-xl border px-2.5 py-2 transition-all ${
+                    selected
+                      ? 'bg-blue-600 border-blue-700 text-white shadow-sm'
+                      : 'bg-white border-slate-200 text-slate-700 hover:border-blue-300'
+                  }`}
+                >
+                  <div className="text-[11px] font-extrabold leading-tight">{p.label}</div>
+                  <div className={`text-[9px] font-bold mt-0.5 ${selected ? 'text-blue-100' : 'text-slate-400'}`}>
+                    {p.ratio}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex items-center justify-between pt-1">
+            <div className="flex items-center space-x-2">
               <Tv className="w-4 h-4 text-blue-600" />
               <span className="text-xs font-extrabold text-slate-900">
-                Phân Bổ Kênh Xuất Bản (Channel Assignment)
+                Phân Bổ Kênh Xuất Bản
               </span>
             </div>
             <span className="text-[10px] bg-blue-100/80 text-blue-700 px-2 py-0.5 rounded-full font-bold">

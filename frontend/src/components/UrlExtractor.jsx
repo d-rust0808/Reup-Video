@@ -24,10 +24,12 @@ import {
   fetchLibrary,
   getStreamUrl,
 } from '../services/api';
+import { loadSession, saveSession } from '../services/session';
 
 export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbench, onJobsQueued }) {
-  const [mode, setMode] = useState('video'); // 'video' | 'channel'
-  const [inputUrl, setInputUrl] = useState('');
+  const boot = loadSession();
+  const [mode, setMode] = useState(boot.extractMode === 'channel' ? 'channel' : 'video'); // 'video' | 'channel'
+  const [inputUrl, setInputUrl] = useState(boot.extractUrl || '');
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState(null);
@@ -35,14 +37,23 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
   const [pasteTip, setPasteTip] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [samples, setSamples] = useState([]);
-  const [maxVideos, setMaxVideos] = useState(8);
-  const [autoReup, setAutoReup] = useState(true);
+  const [maxVideos, setMaxVideos] = useState(boot.maxVideos || 8);
+  const [autoReup, setAutoReup] = useState(boot.autoReup !== false);
   const [channelProfile, setChannelProfile] = useState(null);
   const [channelHint, setChannelHint] = useState('');
   const [channelMessage, setChannelMessage] = useState('');
   const [queuedJobs, setQueuedJobs] = useState([]);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    saveSession({
+      extractMode: mode,
+      extractUrl: inputUrl,
+      maxVideos,
+      autoReup,
+    });
+  }, [mode, inputUrl, maxVideos, autoReup]);
 
   useEffect(() => {
     if (Array.isArray(initialMedia) && initialMedia.length) {

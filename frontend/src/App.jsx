@@ -8,7 +8,7 @@ import { OutputGallery } from './components/OutputGallery';
 import { ChannelManager } from './components/ChannelManager';
 import { fetchJobs, fetchOutputs, fetchLibrary } from './services/api';
 import { WebSocketClient } from './services/websocket';
-import { loadSession, saveSession } from './services/session';
+import { loadSession, saveSession, hydrateSession } from './services/session';
 
 function mergeMedia(a = [], b = []) {
   const map = new Map();
@@ -39,6 +39,25 @@ export default function App() {
       extractedMediaList,
     });
   }, [activeTab, collapsed, selectedMedia, extractedMediaList]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const remote = await hydrateSession();
+      if (cancelled) return;
+      if (remote.activeTab) setActiveTab(remote.activeTab);
+      setCollapsed(!!remote.collapsed);
+      if (remote.extractedMediaList?.length) {
+        setExtractedMediaList((prev) => mergeMedia(prev, remote.extractedMediaList));
+      }
+      if (remote.selectedMedia) {
+        setSelectedMedia((prev) => prev || remote.selectedMedia);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

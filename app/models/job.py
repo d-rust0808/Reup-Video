@@ -150,6 +150,10 @@ class ReupConfig(BaseModel):
 
     # Channel auto-distribution
     channel_id: Optional[str] = Field(default=None, description="Target distribution channel ID")
+    target_platforms: List[str] = Field(
+        default_factory=lambda: ["tiktok", "youtube_shorts", "facebook"],
+        description="Destination platforms to export after the master reup",
+    )
     post_title: Optional[str] = Field(default=None, description="Title for post upon completion")
     post_caption: Optional[str] = Field(default=None, description="Caption/Hashtags for post upon completion")
     post_tags: Optional[List[str]] = Field(default_factory=list, description="Tags/Labels for channel video")

@@ -15,6 +15,7 @@ import { ConfirmModal } from './ConfirmModal';
 import { Toast } from './Toast';
 import { VideoModal } from './VideoModal';
 import { ChannelOverlayEditor } from './ChannelOverlayEditor';
+import { loadSession, saveSession } from '../services/session';
 import {
   Tv2,
   Plus,
@@ -55,7 +56,7 @@ const COLOR_THEMES = [
 
 export function ChannelManager() {
   const [channels, setChannels] = useState([]);
-  const [selectedChannelId, setSelectedChannelId] = useState(null);
+  const [selectedChannelId, setSelectedChannelId] = useState(() => loadSession().selectedChannelId || null);
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadingVideos, setLoadingVideos] = useState(false);
@@ -143,6 +144,10 @@ export function ChannelManager() {
   useEffect(() => {
     loadChannels();
   }, [loadChannels]);
+
+  useEffect(() => {
+    saveSession({ selectedChannelId: selectedChannelId || null });
+  }, [selectedChannelId]);
 
   useEffect(() => {
     if (selectedChannelId) {
