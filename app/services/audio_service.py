@@ -174,12 +174,13 @@ def extract_vocals_demucs(
 
 def build_timed_speech_ducking_filter(
     speech_intervals: List[Tuple[float, float]],
-    duck_volume: float = 0.03
+    duck_volume: float = 0.12
 ) -> str:
     """
-    Constructs an intelligent FFmpeg volume ducking filter that mutes ONLY human speech
-    during detected speech timestamps, while leaving 100% full volume for animal noises
-    (meow, purr, barking), ambient effects, and natural background sounds.
+    Constructs an FFmpeg volume ducking filter around detected speech timestamps. The
+    original track remains present at a low level, preserving effects such as meows,
+    footsteps, and room ambience instead of replacing the whole soundtrack with a
+    Demucs music stem.
     """
     if not speech_intervals:
         return ""

@@ -9,12 +9,10 @@ import {
   updateChannelVideo,
   removeVideoFromChannel,
   fetchOutputs,
-  getMediaUrl,
 } from '../services/api';
 import { ConfirmModal } from './ConfirmModal';
 import { Toast } from './Toast';
 import { VideoModal } from './VideoModal';
-import { ChannelOverlayEditor } from './ChannelOverlayEditor';
 import { loadSession, saveSession } from '../services/session';
 import {
   Tv2,
@@ -218,7 +216,8 @@ export function ChannelManager() {
         if (res.channel_id) setSelectedChannelId(res.channel_id);
       }
       setShowChannelModal(false);
-      loadChannels();
+      await loadChannels();
+      window.dispatchEvent(new Event('reup:channels-changed'));
     } catch (err) {
       setToast({ type: 'error', title: 'Lỗi', message: err.message || 'Thao tác kênh thất bại' });
     }
@@ -230,7 +229,8 @@ export function ChannelManager() {
       await deleteChannel(deleteChannelTarget.channel_id);
       setToast({ type: 'success', title: 'Đã Xóa', message: 'Đã xóa kênh khỏi hệ thống.' });
       setDeleteChannelTarget(null);
-      loadChannels();
+      await loadChannels();
+      window.dispatchEvent(new Event('reup:channels-changed'));
     } catch (err) {
       setToast({ type: 'error', title: 'Lỗi', message: err.message || 'Xóa kênh thất bại' });
     }
@@ -521,11 +521,6 @@ export function ChannelManager() {
                         </span>
                         <div className="flex items-center gap-2">
                           <span className="text-slate-600">{chan.video_count || 0} video</span>
-                          {(chan.overlays || []).length > 0 && (
-                            <span className="text-indigo-600 bg-indigo-50 px-1.5 py-0.2 rounded font-bold">
-                              {chan.overlays.length} khung/logo
-                            </span>
-                          )}
                           {chan.ready_count > 0 && (
                             <span className="text-emerald-600 bg-emerald-50 px-1.5 py-0.2 rounded font-bold">
                               {chan.ready_count} sẵn sàng
@@ -579,23 +574,6 @@ export function ChannelManager() {
                   </button>
                 </div>
               </div>
-
-              <ChannelOverlayEditor
-                channel={activeChannel}
-                previewSrc={
-                  videos[0]?.job_id
-                    ? getMediaUrl(`/api/v1/stream/${videos[0].job_id}`)
-                    : null
-                }
-                onOverlaysChange={(overlays) => {
-                  setChannels((prev) =>
-                    prev.map((c) =>
-                      c.channel_id === activeChannel.channel_id ? { ...c, overlays } : c
-                    )
-                  );
-                }}
-                onToast={setToast}
-              />
 
               {/* Channel Tags & Search / Filter Controls */}
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">

@@ -154,6 +154,7 @@ class AIScriptwriterService:
                 f"{vibe}"
                 f"- BẮT BUỘC trả về đúng {len(chunk)} dòng được đánh số từ 1 đến {len(chunk)} theo định dạng: 1. <bản dịch>\n"
                 "- Không gộp dòng, không bỏ bớt câu nào, không thêm lời chào hay giải thích.\n\n"
+                "- Mỗi dòng phải có lời thoại có thể đọc thành tiếng; không trả về dòng chỉ có dấu câu.\n"
                 f"{numbered}"
             )
             headers = {
@@ -278,12 +279,10 @@ class AIScriptwriterService:
             elif any(w in lower_text for w in ["suy nghĩ", "ngươi nghe đây", "cẩn thận"]):
                 emotion = "dramatic"
 
-            # 4. Pacing Compaction: Trim excessively long translated sentences using smart compaction
-            from app.services.lipsync_service import compact_for_duration
-            compacted_text = compact_for_duration(raw_text, dur)
-
             copied = dict(s)
-            copied["translated_text"] = compacted_text
+            # A mechanical character cut can turn a valid sentence into nonsense.
+            # Keep the complete line; the TTS stage already adjusts speaking rate/timeline.
+            copied["translated_text"] = raw_text
             copied["speaker_id"] = speaker_id
             copied["character_name"] = character_name
             copied["gender"] = gender
@@ -297,11 +296,12 @@ class AIScriptwriterService:
         self,
         segments: List[Dict[str, Any]],
         target_lang: str = "vi",
-        genre: str = "anime_drama"
+        genre: str = "anime_drama",
+        title: str = "",
     ) -> List[Dict[str, Any]]:
         """
         Localizes a list of timed dialogue segments using DeepSeek LLM with speaker diarization
-        and strict pacing constraints.
+        and meaning-first pacing guidance.
         
         Args:
             segments: List of dicts with keys 'index', 'start_time', 'end_time', 'duration', 'text'
@@ -318,43 +318,53 @@ class AIScriptwriterService:
             logger.info("DeepSeek API key not configured. Using heuristic speaker diarization and pacing.")
             return self.heuristic_diarize_and_localize(segments, target_lang=target_lang)
 
-        # Prepare compact payload for DeepSeek
+        # Send source and draft separately so the model can repair ASR/translation
+        # errors from neighboring lines instead of polishing a bad draft blindly.
         dialogue_items = []
         for s in segments:
             dur = round(float(s.get("duration", 2.0)), 2)
-            max_words = max(2, int(round(dur * 3.0)))
+            recommended_words = max(4, int(round(dur * 3.5)))
             dialogue_items.append({
                 "index": s["index"],
                 "start_time": s.get("start_time", 0.0),
                 "end_time": s.get("end_time", 0.0),
                 "duration_sec": dur,
-                "max_words": max_words,
-                "text": s.get("translated_text") or s.get("text", "")
+                "recommended_words": recommended_words,
+                "source_text": s.get("text", ""),
+                "draft_translation": s.get("translated_text", ""),
             })
 
         system_prompt = (
-            "Bạn là một Đạo Diễn Lồng Tiếng & Biên Kịch Phim Điện Ảnh / Hoạt Hình / Kiếm Hiệp hàng đầu. "
-            "Nhiệm vụ của bạn là phân tích kịch bản đối thoại, nhận diện phân vai từng nhân vật (Speaker Diarization), "
-            "và chuyển thể kịch bản sang Tiếng Việt cực kỳ tự nhiên, giàu cảm xúc, khớp khẩu hình.\n\n"
+            "Bạn là biên kịch chuyển ngữ và đạo diễn lồng tiếng chuyên nghiệp. "
+            "Hãy đọc TOÀN BỘ danh sách theo đúng thứ tự như một kịch bản liên tục, đối chiếu source_text "
+            "với draft_translation (nếu có), rồi viết lại bằng ngôn ngữ đích thật tự nhiên, rõ nghĩa và đúng diễn biến.\n\n"
             "QUY TẮC BẮT BUỘC:\n"
-            "1. PHÂN VAI & GIỮ TÍNH NHẤT QUÁN CỦA NHÂN VẬT:\n"
+            "1. ĐÚNG KỊCH BẢN, KHÔNG DỊCH MÁY:\n"
+            "   - Giữ nguyên sự kiện, quan hệ nguyên nhân-kết quả, tên riêng, con số, phủ định và ý định của người nói.\n"
+            "   - CẤM bịa thêm tình tiết hoặc đổi nghĩa để câu nghe kêu hơn.\n"
+            "   - ASR có thể cắt một câu thành nhiều index hoặc nhận sai từ đồng âm. Phải dùng các câu trước/sau để khôi phục ý hợp lý; không dịch word-by-word một mảnh bị lỗi.\n"
+            "   - Mỗi translated_text phải có chủ-vị/ý hoàn chỉnh hoặc là một vế nối tự nhiên với câu kề bên; cấm các mảnh vô nghĩa như 'đã niêm yết', 'ống', 'đạt được' khi ngữ cảnh không nói vậy.\n"
+            "2. PHÂN VAI & GIỮ TÍNH NHẤT QUÁN CỦA NHÂN VẬT:\n"
             "   - Gán 'speaker_id' cố định cho mỗi nhân vật (ví dụ: 'spk_1', 'spk_2', 'spk_3', 'spk_narrator'). Cùng một nhân vật nói ở nhiều phân đoạn khác nhau PHẢI dùng chung một 'speaker_id'.\n"
             "   - Gán 'character_name' (ví dụ: 'Nam chính', 'Nữ chính', 'Sư phụ', 'Tiểu muội', 'Người dẫn').\n"
             "   - Gán 'gender' chính xác: 'male' (nam trẻ), 'female' (nữ trẻ), 'elder_male' (nam già/trung niên), 'elder_female' (nữ già/trung niên), 'child' (trẻ em), 'narrator' (dẫn chuyện).\n"
-            "2. TỐI ƯU THỜI LƯỢNG & KHỚP KHẨU HÌNH (PACING):\n"
-            "   - Số từ Tiếng Việt của từng câu trong 'translated_text' TUYỆT ĐỐI KHÔNG ĐƯỢC VƯỢT QUÁ giá trị 'max_words' được cung cấp cho câu đó.\n"
-            "   - Nếu câu dịch quá dài so với 'max_words', bạn phải chủ động viết lại câu dịch ngắn gọn hơn, lược bỏ các từ đệm không cần thiết, sử dụng các từ ngắn gọn nhưng vẫn giữ nguyên ý nghĩa cốt lõi của câu thoại gốc.\n"
-            "3. XƯNG HÔ ĐÚNG NGỮ CẢNH:\n"
+            "3. THỜI LƯỢNG CHỈ LÀ MỤC TIÊU MỀM:\n"
+            "   - Cố gắng gần recommended_words bằng cách bỏ từ đệm và chọn cách nói gọn.\n"
+            "   - Không được cắt mất chủ thể, hành động, phủ định hoặc ý chính chỉ để đủ số từ; đúng nghĩa luôn ưu tiên hơn độ ngắn.\n"
+            "4. XƯNG HÔ ĐÚNG NGỮ CẢNH:\n"
             "   - Xưng hô nhất quán xuyên suốt (Huynh - Muội, Ta - Nàng, Sư phụ - Đồ nhi, Anh - Em, Tôi - Cậu).\n"
-            "4. GÁN CẢM XÚC (EMOTION):\n"
+            "5. GÁN CẢM XÚC (EMOTION):\n"
             "   - Gán 1 trong các nhãn: 'cheerful', 'angry', 'sad', 'whisper', 'terrified', 'dramatic', 'gentle', 'neutral'.\n"
-            "5. ĐỊNH DẠNG ĐẦU RA:\n"
+            "6. ĐỊNH DẠNG ĐẦU RA:\n"
+            "   - Trả về đúng một dialogue cho mỗi index đầu vào, giữ nguyên index và thứ tự.\n"
+            "   - Mỗi 'translated_text' phải là lời thoại có thể đọc thành tiếng, tuyệt đối không chỉ chứa dấu câu.\n"
             "   - Trả về duy nhất 1 JSON object có key 'dialogues' chứa danh sách object:\n"
             "     { 'index': 1, 'speaker_id': 'spk_1', 'character_name': 'Nam chính', 'gender': 'male', 'emotion': 'dramatic', 'translated_text': '...' }"
         )
 
         user_content = json.dumps({
             "genre": genre,
+            "video_title": title,
             "target_language": target_lang,
             "dialogues": dialogue_items
         }, ensure_ascii=False)
@@ -370,7 +380,8 @@ class AIScriptwriterService:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content}
             ],
-            "temperature": 0.4,
+            "temperature": 0.25,
+            "max_tokens": 8000,
             "response_format": {"type": "json_object"}
         }
 
@@ -380,7 +391,7 @@ class AIScriptwriterService:
                 data=json.dumps(payload).encode("utf-8"),
                 headers=headers
             )
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=120) as resp:
                 result_json = json.loads(resp.read().decode("utf-8"))
                 content_str = result_json["choices"][0]["message"]["content"]
                 parsed = json.loads(content_str)

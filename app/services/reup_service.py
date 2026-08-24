@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import logging
+import tempfile
 from typing import Dict, Any, Optional, Tuple, List
 
 from app.models.job import ReupConfig
@@ -253,10 +254,10 @@ def build_reup_filtergraph(
         elif cfg.enable_vocal_mute:
             if speech_intervals:
                 from app.services.audio_service import build_timed_speech_ducking_filter
-                timed_filter = build_timed_speech_ducking_filter(speech_intervals, duck_volume=0.03)
+                timed_filter = build_timed_speech_ducking_filter(speech_intervals, duck_volume=0.12)
                 if timed_filter:
                     af_nodes.append(timed_filter)
-            elif not getattr(cfg, "enable_tts", False):
+            else:
                 from app.services.audio_service import build_vocal_mute_ffmpeg_filter
                 vm_filter = build_vocal_mute_ffmpeg_filter(
                     preserve_bgm=cfg.preserve_bgm,
@@ -335,7 +336,7 @@ def apply_vietnamese_dubbing(video_path: str, text_to_translate: str, output_pat
             if not vi_text or _is_invalid_translation(vi_text):
                 vi_text = text_to_translate
 
-            communicator = edge_tts.Communicate(vi_text, "en-US-AvaMultilingualNeural")
+            communicator = edge_tts.Communicate(vi_text, "vi-VN-HoaiMyNeural")
             await communicator.save(tts_file)
             
         try:
@@ -434,6 +435,20 @@ def _probe_video_size(path: str) -> Tuple[int, int]:
         except Exception:
             pass
     return 1080, 1920
+
+
+def _filtered_video_size(path: str, cfg: ReupConfig) -> Tuple[int, int]:
+    """Estimate the stable output dimensions before overlays are appended."""
+    width, height = _probe_video_size(path)
+    bottom = float(getattr(cfg, "subtitle_bottom_crop", 0.0) or 0.0)
+    if bottom > 0:
+        height = int(height * (1.0 - bottom))
+    if not getattr(cfg, "dynamic_motion", False):
+        crop = float(getattr(cfg, "crop_percent", 0.0) or 0.0)
+        if crop > 0:
+            width = int(width * (1.0 - 2.0 * crop))
+            height = int(height * (1.0 - 2.0 * crop))
+    return max(2, width // 2 * 2), max(2, height // 2 * 2)
 
 
 def _burn_hardsub_overlay(ffmpeg_bin: str, video_path: str, srt_path: str, output_path: str) -> bool:
@@ -546,16 +561,22 @@ def burn_vietnamese_hardsub(video_path: str, srt_path: str, output_path: str, sp
 def build_tts_bgm_mix_filter() -> str:
     """Strip center-channel speech (Chinese voice) from background track, then duck under Vietnamese TTS voiceover."""
     return (
-        "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.30,highpass=f=80,lowpass=f=12000,"
+        "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.12,highpass=f=80,lowpass=f=12000,"
         "acompressor=threshold=-22dB:ratio=2.5:attack=8:release=90:makeup=2.0[voice];"
         "[voice]asplit=2[sc][vox];"
-        "[0:a]asplit=2[bg_bass_in][bg_mid_in];"
-        "[bg_bass_in]lowpass=f=160:poles=2,volume=0.85[bg_bass];"
-        "[bg_mid_in]highpass=f=160,stereotools=mlev=0.02:slev=1.35[bg_sides];"
-        "[bg_bass][bg_sides]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,volume=0.35[bgraw];"
+        "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=0.85[bgraw];"
         "[bgraw][sc]sidechaincompress=threshold=0.03:ratio=6:attack=15:release=250:makeup=1:knee=3[bg];"
         "[bg][vox]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amixed];"
         "[amixed]alimiter=limit=0.95[aout]"
+    )
+
+
+def should_use_demucs_for_dubbing(cfg: ReupConfig, _speech_intervals: Optional[List[Tuple[float, float]]]) -> bool:
+    """Reserve slow neural separation for users who explicitly select Demucs."""
+    return bool(
+        cfg.enable_vocal_mute
+        and cfg.preserve_bgm
+        and cfg.vocal_mute_strategy == "demucs"
     )
 
 
@@ -715,21 +736,25 @@ def process_reup_video(
         except Exception:
             lib_bgm_path = raw_bgm if os.path.isfile(str(raw_bgm)) else None
     srt_override = kwargs.get("srt_override")
-    # Only bake subtitles into the master graph when this ffmpeg has libass.
-    # Otherwise burn them in a second pass (native subtitles= or PIL overlay).
-    burn_in_graph = bool(
-        srt_override and os.path.exists(srt_override)
+    # Bake subtitles into the master graph via libass or one timed APNG track.
+    wants_hardsub = bool(
+        srt_override
+        and os.path.exists(srt_override)
         and getattr(cfg, "burn_subtitles", True)
-        and ffmpeg_supports_libass()
     )
+    libass_hardsub = bool(wants_hardsub and ffmpeg_supports_libass())
+    burn_in_graph = libass_hardsub
+    subtitle_track_dir: Optional[str] = None
 
-    if (not lib_bgm_path) and has_audio and cfg.enable_vocal_mute and cfg.vocal_mute_strategy in ("auto", "demucs"):
+    speech_intervals = kwargs.get("speech_intervals")
+    # Prefer a separated music stem for the "remove speech, keep BGM" mode.
+    use_demucs = should_use_demucs_for_dubbing(cfg, speech_intervals)
+    if (not lib_bgm_path) and has_audio and cfg.enable_vocal_mute and cfg.vocal_mute_strategy in ("auto", "demucs") and use_demucs:
         from app.services.audio_service import check_demucs_available, extract_audio_stream, process_vocal_muting
         if not check_demucs_available():
             if cfg.vocal_mute_strategy == "demucs":
                 raise RuntimeError("Demucs strategy requested but demucs is not installed")
         else:
-            import tempfile
             extracted_a: Optional[str] = None
             bgm_out: Optional[str] = None
             try:
@@ -760,33 +785,50 @@ def process_reup_video(
                         pass
 
     try:
-        speech_intervals = kwargs.get("speech_intervals")
+        # A Demucs BGM stem is already voice-free; only apply visual and timing FX to it.
+        graph_cfg = cfg.model_copy(update={"enable_vocal_mute": False}) if demucs_bgm_path else cfg
+        audio_speech_intervals = None if cfg.enable_vocal_mute else speech_intervals
         filter_complex, includes_audio, vf_str, af_str = build_reup_filtergraph(
-            cfg,
+            graph_cfg,
             has_audio=has_audio,
-            burn_srt_path=srt_override if burn_in_graph else None,
-            speech_intervals=speech_intervals,
+            burn_srt_path=srt_override if libass_hardsub else None,
+            speech_intervals=audio_speech_intervals,
         )
         from app.services.overlay_service import append_overlay_filter, normalize_overlays, overlay_input_args
         overlay_items = normalize_overlays(getattr(cfg, "overlays", None))
         overlay_paths: List[str] = []
         extra_audio = bool(lib_bgm_path) or bool(demucs_bgm_path and os.path.exists(demucs_bgm_path))
+        first_ov = 2 if extra_audio else 1
         if overlay_items:
-            first_ov = 2 if extra_audio else 1
-            main_size = None
-            try:
-                import cv2
-                cap = cv2.VideoCapture(input_path)
-                mw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-                mh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-                cap.release()
-                if mw > 0 and mh > 0:
-                    main_size = (mw, mh)
-            except Exception:
-                main_size = None
+            main_size = _filtered_video_size(input_path, cfg)
             filter_complex, overlay_paths = append_overlay_filter(
                 filter_complex, overlay_items, first_overlay_index=first_ov, main_size=main_size
             )
+        subtitle_input_args: List[str] = []
+        if wants_hardsub and not libass_hardsub and not getattr(cfg, "dynamic_motion", False):
+            from app.services.subtitle_overlay import (
+                append_timed_subtitle_filter,
+                render_srt_to_apng,
+            )
+
+            subtitle_track_dir = tempfile.mkdtemp(prefix="visub_track_")
+            timed_srt = srt_override
+            if abs(float(cfg.speed_factor or 1.0) - 1.0) > 1e-3:
+                timed_srt = scale_srt_timestamps(
+                    srt_override,
+                    cfg.speed_factor,
+                    os.path.join(subtitle_track_dir, "timed.srt"),
+                )
+            subtitle_track = render_srt_to_apng(
+                timed_srt,
+                *_filtered_video_size(input_path, cfg),
+                os.path.join(subtitle_track_dir, "subtitles.png"),
+            )
+            if subtitle_track:
+                subtitle_index = first_ov + len(overlay_paths)
+                filter_complex = append_timed_subtitle_filter(filter_complex, subtitle_index)
+                subtitle_input_args = ["-i", subtitle_track]
+                burn_in_graph = True
         input_md5 = calculate_file_md5(input_path)
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -815,6 +857,7 @@ def process_reup_video(
                 else:
                     fc = filter_complex
                 cmd.extend(overlay_input_args(overlay_paths))
+                cmd.extend(subtitle_input_args)
                 cmd.extend(["-filter_complex", fc])
 
                 cmd.extend(["-map", "[v_out]"])
@@ -831,11 +874,30 @@ def process_reup_video(
                 else:
                     err = (res.stderr or res.stdout or "")
                     logger.error("FFmpeg reup failed (%s): %s", res.returncode, err[-1500:])
-                    if "delogo" in fc and "Logo area is outside" in err:
+                    if encoder_name := (encode_args[1] if len(encode_args) > 1 else ""):
+                        if encoder_name != "libx264" and (
+                            "Cannot create compression session" in err
+                            or "Error while opening encoder" in err
+                        ):
+                            logger.warning("Hardware H.264 encoder unavailable; retrying with libx264")
+                            software_args = [
+                                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                                "-profile:v", "main", "-level", "4.0",
+                            ]
+                            video_arg_index = cmd.index("-c:v")
+                            cmd[video_arg_index:video_arg_index + len(encode_args)] = software_args
+                            res_sw = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                            if res_sw.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                                ffmpeg_success = True
+                    if not ffmpeg_success and "delogo" in fc and "Logo area is outside" in err:
                         logger.warning("Retrying encode without mid-text delogo")
                         cfg.text_cover_vf = ""
                         filter_complex, includes_audio, vf_str, af_str = build_reup_filtergraph(
-                            cfg, has_audio=has_audio, burn_srt_path=srt_override if burn_in_graph else None
+                            graph_cfg,
+                            has_audio=has_audio,
+                            burn_srt_path=srt_override if burn_in_graph else None,
+                            speech_intervals=audio_speech_intervals,
                         )
                         cmd[cmd.index("-filter_complex") + 1] = filter_complex
                         res2 = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -844,6 +906,8 @@ def process_reup_video(
             except Exception as e:
                 logger.warning(f"FFmpeg execution skipped/failed ({e}), falling back to direct stream copy")
     finally:
+        if subtitle_track_dir:
+            shutil.rmtree(subtitle_track_dir, ignore_errors=True)
         if demucs_bgm_path and os.path.exists(demucs_bgm_path):
             try:
                 os.remove(demucs_bgm_path)
@@ -1212,24 +1276,31 @@ class ReupService:
                             engine=cfg.tts_engine,
                             total_duration=vid_dur,
                             enable_lipsync=getattr(cfg, "enable_lipsync", True) and style == "dub",
+                            timeline_speed=cfg.speed_factor,
                         )
 
+                    tts_result = None
                     try:
                         loop = asyncio.get_event_loop()
                         if loop.is_running():
                             import threading
+                            result_holder = {}
                             def _run():
-                                asyncio.run(_run_tts())
+                                result_holder["value"] = asyncio.run(_run_tts())
                             t = threading.Thread(target=_run)
                             t.start()
                             t.join()
+                            tts_result = result_holder.get("value")
                         else:
-                            loop.run_until_complete(_run_tts())
+                            tts_result = loop.run_until_complete(_run_tts())
                     except Exception:
-                        asyncio.run(_run_tts())
+                        tts_result = asyncio.run(_run_tts())
 
                     if os.path.exists(tts_out_path) and os.path.getsize(tts_out_path) > 2048:
                         synced_tts_audio = tts_out_path
+                        aligned_srt = (tts_result or {}).get("aligned_srt_path")
+                        if aligned_srt and os.path.exists(aligned_srt):
+                            translated_srt = aligned_srt
                     else:
                         tts_warning = (tts_warning or "") + " TTS tạo file rỗng/im lặng — giữ audio gốc."
                         logger.warning(tts_warning)
@@ -1258,26 +1329,33 @@ class ReupService:
                         engine=cfg.tts_engine,
                         total_duration=vid_dur,
                         enable_lipsync=getattr(cfg, "enable_lipsync", True) and (getattr(cfg, "vietsub_style", "dub") == "dub"),
+                        timeline_speed=cfg.speed_factor,
                     )
 
+                tts_result = None
                 try:
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
                         import threading
+                        result_holder = {}
 
                         def _run():
-                            asyncio.run(_run_preset_tts())
+                            result_holder["value"] = asyncio.run(_run_preset_tts())
 
                         t = threading.Thread(target=_run)
                         t.start()
                         t.join()
+                        tts_result = result_holder.get("value")
                     else:
-                        loop.run_until_complete(_run_preset_tts())
+                        tts_result = loop.run_until_complete(_run_preset_tts())
                 except Exception:
-                    asyncio.run(_run_preset_tts())
+                    tts_result = asyncio.run(_run_preset_tts())
 
                 if os.path.exists(tts_out_path) and os.path.getsize(tts_out_path) > 2048:
                     synced_tts_audio = tts_out_path
+                    aligned_srt = (tts_result or {}).get("aligned_srt_path")
+                    if aligned_srt and os.path.exists(aligned_srt):
+                        translated_srt = aligned_srt
             except Exception as e:
                 logger.warning(f"Preset-SRT TTS synthesis failed: {e}")
 

@@ -249,6 +249,19 @@ export async function fetchVoices() {
   return res.json();
 }
 
+export async function previewVoice({ voice, lang, engine }) {
+  const res = await fetch(`${API_BASE}/voices/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ voice, lang, engine }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || 'Không thể tạo bản nghe thử');
+  }
+  return res.blob();
+}
+
 // -----------------------------------------------------------------------------
 // Channel & Content Management APIs
 // -----------------------------------------------------------------------------
@@ -524,4 +537,3 @@ export async function importOnlineBgm(track) {
   }
   return res.json();
 }
-

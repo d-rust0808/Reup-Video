@@ -82,6 +82,8 @@ data/frames/*
 !data/frames/.gitkeep
 data/bgm/*
 !data/bgm/.gitkeep
+data/channels/*
+!data/channels/.gitkeep
 
 # Module runtime temp and output directories
 app/modules/tmp/

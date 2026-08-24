@@ -894,42 +894,6 @@ class BatchQueueManager:
                     reup_config.tts_audio_path = sidecar_tts
                     reup_config.enable_tts = True
 
-            # Merge channel branding overlays (logos / khung) onto this job
-            chan_id = getattr(reup_config, "channel_id", None)
-            if chan_id:
-                try:
-                    with self._get_conn() as conn:
-                        crow = conn.execute(
-                            "SELECT overlays FROM channels WHERE channel_id = ?", (chan_id,)
-                        ).fetchone()
-                    if crow:
-                        raw_ov = crow["overlays"] if "overlays" in crow.keys() else "[]"
-                        parsed = json.loads(raw_ov) if isinstance(raw_ov, str) and raw_ov.strip() else (raw_ov or [])
-                        if isinstance(parsed, list) and parsed:
-                            from app.models.job import OverlayItem
-                            existing = list(getattr(reup_config, "overlays", None) or [])
-                            seen = set()
-                            merged = []
-                            for src in list(parsed) + list(existing):
-                                d = src if isinstance(src, dict) else (src.model_dump() if hasattr(src, "model_dump") else {})
-                                pth = d.get("image_path") or ""
-                                if not pth or pth in seen or not os.path.exists(pth):
-                                    continue
-                                seen.add(pth)
-                                try:
-                                    merged.append(OverlayItem(**{k: v for k, v in d.items() if k in OverlayItem.model_fields}))
-                                except Exception:
-                                    continue
-                            reup_config.overlays = merged
-                            self.append_job_log(
-                                job_id,
-                                f"🖼️ Gắn {len(merged)} logo/khung kênh xuyên suốt video",
-                                level="INFO",
-                                stage="REUP_TRANSFORM",
-                            )
-                except Exception as e:
-                    logger.warning(f"Failed to load channel overlays for {chan_id}: {e}")
-
             stage2_res_path = None
             fold_algo = (algo_name or "auto").lower()
             fold_skip = fold_algo in ("crop", "none", "off", "disabled")
@@ -1054,7 +1018,7 @@ class BatchQueueManager:
             if getattr(reup_config, "enable_tts", False):
                 self.append_job_log(
                     job_id,
-                    f"🎙️ Đang tổng hợp thuyết minh Tiếng Việt (Giọng: {getattr(reup_config, 'tts_voice', 'HoaiMy')})...",
+                    f"🎙️ Đang tổng hợp thuyết minh Tiếng Việt (Giọng: {getattr(reup_config, 'tts_voice', 'vi-VN-HoaiMy-Fast')})...",
                     level="INFO",
                     stage="REUP_TRANSFORM",
                     progress=0.85

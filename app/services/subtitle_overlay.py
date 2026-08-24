@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import subprocess
+import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -146,3 +149,88 @@ def build_overlay_filter(overlays: List[Dict[str, Any]]) -> Tuple[str, List[str]
         )
         cur = f"[ov{i}]"
     return ";".join(parts), inputs
+
+
+def render_srt_to_apng(
+    srt_path: str,
+    video_w: int,
+    video_h: int,
+    output_path: str,
+) -> Optional[str]:
+    """Render all timed cues into one transparent APNG subtitle track."""
+    from PIL import Image
+
+    with tempfile.TemporaryDirectory(prefix="visub_frames_") as frame_dir:
+        overlays = render_srt_to_overlays(srt_path, video_w, video_h, frame_dir)
+        if not overlays:
+            return None
+
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return None
+        transparent_path = os.path.join(frame_dir, "transparent.png")
+        Image.new("RGBA", (video_w, video_h), (0, 0, 0, 0)).save(transparent_path)
+        entries: List[Tuple[str, float]] = []
+        cursor = 0.0
+        for overlay in overlays:
+            start = max(cursor, float(overlay["start"]))
+            end = max(start + 0.04, float(overlay["end"]))
+            if start > cursor:
+                entries.append((transparent_path, start - cursor))
+            entries.append((overlay["png"], end - start))
+            cursor = end
+        entries.append((transparent_path, 0.04))
+
+        concat_path = os.path.join(frame_dir, "frames.txt")
+        with open(concat_path, "w", encoding="utf-8") as concat_file:
+            for path, duration in entries:
+                escaped = os.path.abspath(path).replace("'", "'\\''")
+                concat_file.write(f"file '{escaped}'\n")
+                concat_file.write(f"duration {duration:.3f}\n")
+            escaped = os.path.abspath(entries[-1][0]).replace("'", "'\\''")
+            concat_file.write(f"file '{escaped}'\n")
+
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                concat_path,
+                "-vf",
+                "format=rgba",
+                "-plays",
+                "1",
+                "-f",
+                "apng",
+                output_path,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.warning("Timed subtitle APNG failed: %s", (result.stderr or "")[-400:])
+            return None
+    return output_path if os.path.exists(output_path) and os.path.getsize(output_path) > 0 else None
+
+
+def append_timed_subtitle_filter(
+    filter_complex: str,
+    input_index: int,
+) -> str:
+    """Overlay a single timed APNG track after the existing video filters."""
+    if "[v_out]" not in filter_complex:
+        return filter_complex
+    base = filter_complex.replace("[v_out]", "[v_sub_base]", 1)
+    return (
+        f"{base};[{input_index}:v]format=rgba[v_sub_track];"
+        "[v_sub_base][v_sub_track]overlay=0:0:eof_action=pass:repeatlast=0[v_out]"
+    )

@@ -65,7 +65,7 @@ export function VideoModal({ isOpen, onClose, video }) {
             controls
             autoPlay
             playsInline
-            preload="auto"
+            preload="metadata"
             type="video/mp4"
             className="w-full h-full object-contain"
           >

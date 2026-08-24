@@ -1,4 +1,5 @@
 import React from 'react';
+import logoImg from '../assets/logo.jpg';
 import {
   Link2,
   Sliders,
@@ -142,7 +143,7 @@ export function Sidebar({
         <div className={`flex items-center ${collapsed ? 'justify-center' : 'space-x-3 px-1'} py-1`} style={{ WebkitAppRegion: 'no-drag' }}>
           <div className="w-10 h-10 rounded-2xl overflow-hidden shadow-md shadow-blue-600/15 border border-slate-200/80 shrink-0 bg-white flex items-center justify-center cursor-pointer">
             <img
-              src="/logo.jpg"
+              src={logoImg}
               alt="Reup Studio AI"
               className="w-full h-full object-cover transform hover:scale-105 transition-transform"
             />

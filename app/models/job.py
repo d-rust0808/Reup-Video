@@ -143,9 +143,9 @@ class ReupConfig(BaseModel):
     )
     text_cover_vf: str = Field(default="", description="Extra ffmpeg vf nodes to cover mid-frame source text")
     burn_subtitles: bool = Field(default=True, description="Burns translated Vietnamese SRT as hardsub onto the video")
-    tts_voice: str = Field(default="en-US-AvaMultilingualNeural", description="Voice model/role for TTS synthesis")
+    tts_voice: str = Field(default="vi-VN-HoaiMy-Fast", description="Voice model/role for TTS synthesis")
     target_lang: str = Field(default="vi", description="Target language code for TTS dubbing")
-    tts_engine: str = Field(default="edge-tts", description="TTS engine name ('edge-tts', 'gtts', 'coqui-tts', 'kokoro')")
+    tts_engine: str = Field(default="edge-tts", description="TTS engine name ('vieneu', 'edge-tts', 'gtts', 'coqui-tts', 'kokoro')")
     source_lang: str = Field(default="auto", description="Source language code for STT/translation")
     srt_path: Optional[str] = Field(default=None, description="Optional pre-built SRT to burn (skips STT)")
     tts_audio_path: Optional[str] = Field(default=None, description="Optional pre-built TTS audio to mix")
@@ -189,6 +189,14 @@ class ReupConfig(BaseModel):
     @model_validator(mode="after")
 
     def _apply_platform_presets(self) -> "ReupConfig":
+        voice_lower = (self.tts_voice or "").lower()
+        if (self.target_lang or "vi").lower() == "vi" and (
+            self.tts_engine in ("vieneu", "vieneu-tts")
+            or voice_lower.startswith("vieneu:")
+            or (voice_lower.startswith("en-us-") and "multilingual" in voice_lower)
+        ):
+            self.tts_voice = "vi-VN-HoaiMy-Fast"
+            self.tts_engine = "edge-tts"
         if self.youtube_compliance_mode:
             self.hflip = True
             if self.speed_factor == 1.03 or self.speed_factor == 1.0:

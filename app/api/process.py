@@ -6,10 +6,12 @@ Target Path: app/api/process.py
 
 import os
 import uuid
+import hashlib
 import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Union
 from fastapi import APIRouter, HTTPException, Request, status, BackgroundTasks
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app.config import settings
@@ -19,6 +21,22 @@ from app.services.queue_manager import BatchQueueManager
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+VOICE_PREVIEW_SAMPLES = {
+    "vi": "Xin chào, đây là giọng đọc tiếng Việt để bạn nghe thử.",
+    "en": "Hello, this is a short English voice preview.",
+    "th": "สวัสดี นี่คือตัวอย่างเสียงภาษาไทยสั้น ๆ",
+    "id": "Halo, ini adalah contoh singkat suara bahasa Indonesia.",
+    "ja": "こんにちは。これは日本語音声の短いサンプルです。",
+    "ko": "안녕하세요. 한국어 음성 미리듣기입니다.",
+    "pt": "Olá, esta é uma pequena amostra de voz em português.",
+}
+
+
+class VoicePreviewRequest(BaseModel):
+    voice: str = Field(min_length=1, max_length=100)
+    lang: str = Field(default="vi", min_length=2, max_length=8)
+    engine: str = Field(default="edge-tts", min_length=2, max_length=30)
 
 
 class WatermarkPayload(BaseModel):
@@ -39,11 +57,12 @@ class ReupPayload(BaseModel):
     saturation: Optional[float] = 1.03
     modify_md5: Optional[bool] = True
     enable_vocal_mute: Optional[bool] = False
+    preserve_bgm: Optional[bool] = True
     enable_tts: Optional[bool] = False
     enable_lipsync: Optional[bool] = True
     vietsub_style: Optional[str] = "dub"
     burn_subtitles: Optional[bool] = True
-    tts_voice: Optional[str] = "en-US-AvaMultilingualNeural"
+    tts_voice: Optional[str] = "vi-VN-HoaiMy-Fast"
     tts_engine: Optional[str] = "edge-tts"
     target_lang: Optional[str] = "vi"
     source_lang: Optional[str] = "auto"
@@ -90,11 +109,12 @@ class ProcessJobRequest(BaseModel):
     saturation: Optional[float] = 1.03
     modify_md5: Optional[bool] = True
     enable_vocal_mute: Optional[bool] = False
+    preserve_bgm: Optional[bool] = True
     enable_tts: Optional[bool] = False
     enable_lipsync: Optional[bool] = True
     vietsub_style: Optional[str] = "dub"
     burn_subtitles: Optional[bool] = True
-    tts_voice: Optional[str] = "en-US-AvaMultilingualNeural"
+    tts_voice: Optional[str] = "vi-VN-HoaiMy-Fast"
     tts_engine: Optional[str] = "edge-tts"
     target_lang: Optional[str] = "vi"
     source_lang: Optional[str] = "auto"
@@ -240,6 +260,7 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
     reup_sat = req.reup.saturation if req.reup and req.reup.saturation is not None else req.saturation
     reup_md5 = req.reup.modify_md5 if req.reup and req.reup.modify_md5 is not None else req.modify_md5
     reup_vocal_mute = req.reup.enable_vocal_mute if req.reup and req.reup.enable_vocal_mute is not None else req.enable_vocal_mute
+    reup_preserve_bgm = req.reup.preserve_bgm if req.reup and req.reup.preserve_bgm is not None else req.preserve_bgm
     reup_tts = req.reup.enable_tts if req.reup and req.reup.enable_tts is not None else req.enable_tts
     reup_lipsync = True
     if req.reup and getattr(req.reup, "enable_lipsync", None) is not None:
@@ -251,17 +272,26 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         reup_burn = req.reup.burn_subtitles
     elif getattr(req, "burn_subtitles", None) is not None:
         reup_burn = req.burn_subtitles
-    reup_tts_voice = (req.reup.tts_voice if req.reup and req.reup.tts_voice else req.tts_voice) or "en-US-AvaMultilingualNeural"
+    reup_target_lang = (req.reup.target_lang if req.reup and req.reup.target_lang else req.target_lang) or "vi"
+    reup_tts_voice = (req.reup.tts_voice if req.reup and req.reup.tts_voice else req.tts_voice) or "vi-VN-HoaiMy-Fast"
     reup_tts_engine = "edge-tts"
     if req.reup and getattr(req.reup, "tts_engine", None):
         reup_tts_engine = req.reup.tts_engine
     elif getattr(req, "tts_engine", None):
         reup_tts_engine = req.tts_engine
-    if (reup_tts_voice or "").lower().startswith("kokoro"):
+    reup_voice_lower = (reup_tts_voice or "").lower()
+    if reup_voice_lower.startswith("kokoro"):
         reup_tts_engine = "kokoro"
+    elif reup_target_lang.lower() == "vi" and (
+        reup_voice_lower.startswith("vieneu:")
+        or (reup_voice_lower.startswith("en-us-") and "multilingual" in reup_voice_lower)
+    ):
+        reup_tts_voice = "vi-VN-HoaiMy-Fast"
+        reup_tts_engine = "edge-tts"
+    elif reup_voice_lower.startswith("vi-vn-"):
+        reup_tts_engine = "edge-tts"
     elif (reup_tts_voice or "").lower().startswith("gtts"):
         reup_tts_engine = "gtts"
-    reup_target_lang = (req.reup.target_lang if req.reup and req.reup.target_lang else req.target_lang) or "vi"
     platform = (req.platform or "auto").lower()
     reup_source_lang = "auto"
     if req.reup and getattr(req.reup, "source_lang", None):
@@ -326,6 +356,7 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         saturation=reup_sat if reup_sat is not None else 1.03,
         modify_md5=reup_md5 if reup_md5 is not None else True,
         enable_vocal_mute=reup_vocal_mute if reup_vocal_mute is not None else True,
+        preserve_bgm=reup_preserve_bgm if reup_preserve_bgm is not None else True,
         enable_tts=reup_tts if reup_tts is not None else False,
         enable_lipsync=reup_lipsync if reup_lipsync is not None else True,
         vietsub_style=(
@@ -417,6 +448,54 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
 
 
 
+@router.post("/voices/preview")
+async def preview_voice(req: VoicePreviewRequest):
+    """Generates and caches a short preview for the selected language and voice."""
+    lang = (req.lang or "vi").lower()
+    text = VOICE_PREVIEW_SAMPLES.get(lang, VOICE_PREVIEW_SAMPLES["en"])
+    voice = req.voice.strip()
+    engine = (req.engine or "").strip().lower()
+    voice_lower = voice.lower()
+    if lang == "vi" and (
+        voice_lower.startswith("vieneu:")
+        or (voice_lower.startswith("en-us-") and "multilingual" in voice_lower)
+    ):
+        voice = "vi-VN-HoaiMy-Fast"
+        engine = "edge-tts"
+    elif voice_lower.startswith("vi-vn-"):
+        engine = "edge-tts"
+    elif not engine or (engine == "vieneu" and lang not in ("vi", "en")):
+        engine = "edge-tts"
+
+    ext = ".wav" if engine in ("vieneu", "vieneu-tts") else ".mp3"
+    cache_dir = os.path.join(settings.CACHE_DIR, "tts_previews")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_key = hashlib.sha256(f"{engine}|{lang}|{voice}|{text}".encode("utf-8")).hexdigest()[:24]
+    output_path = os.path.join(cache_dir, f"{cache_key}{ext}")
+
+    if not os.path.exists(output_path) or os.path.getsize(output_path) < 256:
+        from app.services.tts_service import tts_service
+
+        try:
+            await tts_service.generate_speech(
+                text=text,
+                lang=lang,
+                voice=voice,
+                engine=engine,
+                output_path=output_path,
+            )
+        except Exception as e:
+            logger.exception("Voice preview failed for %s/%s", engine, voice)
+            raise HTTPException(status_code=502, detail=f"Không thể tạo bản nghe thử: {e}") from e
+
+    return FileResponse(
+        output_path,
+        media_type="audio/wav" if ext == ".wav" else "audio/mpeg",
+        filename=f"voice-preview{ext}",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @router.get("/voices")
 async def get_supported_voices():
     """
@@ -437,11 +516,11 @@ async def get_supported_voices():
     ]
 
     voices = [
-        # Tiếng Việt — multilingual neural (Hoài My/gTTS đã bỏ vì nghe dở)
-        {"id": "en-US-AvaMultilingualNeural", "lang": "vi", "name": "Ava (nữ, tự nhiên)", "gender": "Female", "desc": "Nói tiếng Việt rõ, không ngọng — mặc định reup", "tag": "BEST"},
-        {"id": "en-US-EmmaMultilingualNeural", "lang": "vi", "name": "Emma (nữ, trẻ)", "gender": "Female", "desc": "Nhẹ, vlog, review", "tag": "HOT"},
-        {"id": "en-US-AndrewMultilingualNeural", "lang": "vi", "name": "Andrew (nam, dẫn chuyện)", "gender": "Male", "desc": "Trầm, tài liệu / kể lại", "tag": "PRO"},
-        {"id": "en-US-BrianMultilingualNeural", "lang": "vi", "name": "Brian (nam, ấm)", "gender": "Male", "desc": "Ấm, review", "tag": "PRO"},
+        # Tiếng Việt — native Edge-TTS voices commonly used for short-form reviews
+        {"id": "vi-VN-HoaiMy-Fast", "lang": "vi", "name": "Hoài My — review nhanh", "gender": "Female", "desc": "Nữ Việt, sáng và rõ, hợp TikTok/Reels", "tag": "BEST"},
+        {"id": "vi-VN-HoaiMy-Warm", "lang": "vi", "name": "Hoài My — kể chuyện ấm", "gender": "Female", "desc": "Nữ Việt, chậm và ấm, hợp kể chuyện", "tag": "HOT"},
+        {"id": "vi-VN-NamMinh-Fast", "lang": "vi", "name": "Nam Minh — review nam", "gender": "Male", "desc": "Nam Việt, chắc và nhanh, hợp review", "tag": "PRO"},
+        {"id": "vi-VN-NamMinh-Deep", "lang": "vi", "name": "Nam Minh — giọng trầm", "gender": "Male", "desc": "Nam Việt, trầm và rõ, hợp recap", "tag": "PRO"},
 
         # Tiếng Anh Global
         {"id": "en-US-GuyNeural", "lang": "en", "name": "Guy (Nam US)", "gender": "Male", "desc": "Giọng nam trầm cuốn hút, cực kỳ viral trên TikTok & Shorts", "tag": "HOT"},
@@ -477,6 +556,6 @@ async def get_supported_voices():
     return {
         "languages": languages,
         "voices": voices,
-        "default_voice": "en-US-AvaMultilingualNeural",
+        "default_voice": "vi-VN-HoaiMy-Fast",
         "default_lang": "vi"
     }

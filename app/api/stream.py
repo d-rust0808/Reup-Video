@@ -11,12 +11,54 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Header, Query, Request, Response, UploadFile, File
 import uuid
 import aiofiles
+from fastapi.responses import StreamingResponse
 
 from app.config import settings
 from app.core.database import get_db_connection
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+STREAM_CHUNK_SIZE = 1024 * 1024
+MAX_OPEN_ENDED_RANGE_SIZE = 4 * 1024 * 1024
+
+
+def _iter_file_range(file_path: str, start: int, end: int):
+    """Yield a bounded byte range without loading the whole video into memory."""
+    remaining = end - start + 1
+    with open(file_path, "rb") as media_file:
+        media_file.seek(start)
+        while remaining > 0:
+            chunk = media_file.read(min(STREAM_CHUNK_SIZE, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+def _parse_byte_range(range_header: str, file_size: int):
+    """Parse one HTTP byte range and cap open-ended requests for fast startup."""
+    unit, range_str = range_header.strip().split("=", 1)
+    if unit.lower() != "bytes" or "," in range_str:
+        raise ValueError("Invalid range unit")
+
+    start_str, end_str = range_str.split("-", 1)
+    if start_str:
+        start = int(start_str)
+        if end_str:
+            end = min(int(end_str), file_size - 1)
+        else:
+            end = min(start + MAX_OPEN_ENDED_RANGE_SIZE - 1, file_size - 1)
+    elif end_str:
+        suffix_length = min(int(end_str), file_size)
+        start = file_size - suffix_length
+        end = file_size - 1
+    else:
+        raise ValueError("Malformed range header")
+
+    if start < 0 or start >= file_size or start > end:
+        raise ValueError("Requested range not satisfiable")
+    return start, end
 
 
 def _resolve_media_file_path(media_id: str, db_path: str = settings.DB_PATH) -> Optional[str]:
@@ -140,13 +182,11 @@ async def stream_video(
 
     # Full Content Stream (HTTP 200) if no Range header is supplied
     if not range:
-        with open(file_path, "rb") as f:
-            content = f.read()
-        return Response(
-            content=content,
+        return StreamingResponse(
+            _iter_file_range(file_path, 0, file_size - 1),
             status_code=200,
+            media_type="video/mp4",
             headers={
-                "Content-Type": "video/mp4",
                 "Accept-Ranges": "bytes",
                 "Content-Length": str(file_size),
             },
@@ -154,43 +194,20 @@ async def stream_video(
 
     # Handle Range Header (HTTP 206 Partial Content)
     try:
-        unit, range_str = range.strip().split("=")
-        if unit.lower() != "bytes":
-            raise HTTPException(status_code=416, detail="Invalid range unit")
-
-        parts = range_str.split("-")
-        start_str, end_str = parts[0], parts[1]
-
-        if start_str and end_str:
-            start = int(start_str)
-            end = int(end_str)
-        elif start_str:
-            start = int(start_str)
-            end = file_size - 1
-        elif end_str:
-            start = file_size - int(end_str)
-            end = file_size - 1
-        else:
-            raise HTTPException(status_code=416, detail="Malformed range header")
-
-        if start < 0 or end >= file_size or start > end:
-            raise HTTPException(status_code=416, detail="Requested range not satisfiable")
-
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=416, detail="Invalid Range Header")
+        start, end = _parse_byte_range(range, file_size)
+    except (TypeError, ValueError, IndexError):
+        raise HTTPException(
+            status_code=416,
+            detail="Invalid Range Header",
+            headers={"Content-Range": f"bytes */{file_size}"},
+        )
 
     chunk_length = end - start + 1
-    with open(file_path, "rb") as f:
-        f.seek(start)
-        data = f.read(chunk_length)
-
-    return Response(
-        content=data,
+    return StreamingResponse(
+        _iter_file_range(file_path, start, end),
         status_code=206,
+        media_type="video/mp4",
         headers={
-            "Content-Type": "video/mp4",
             "Content-Range": f"bytes {start}-{end}/{file_size}",
             "Content-Length": str(chunk_length),
             "Accept-Ranges": "bytes",
@@ -294,4 +311,3 @@ async def upload_video(file: UploadFile = File(...)):
         "platform": "upload",
         "title": file.filename,
     }
-

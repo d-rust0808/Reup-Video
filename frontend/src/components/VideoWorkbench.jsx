@@ -1,7 +1,7 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { RoiCanvas } from './RoiCanvas';
 import { ReupFxControls } from './ReupFxControls';
-import { getStreamUrl, submitJob, uploadVideoFile, fetchChannels } from '../services/api';
+import { getStreamUrl, submitJob, uploadVideoFile } from '../services/api';
 import { loadSession, saveSession } from '../services/session';
 import { Video, AlertCircle, CheckCircle2, Upload, Loader2 } from 'lucide-react';
 
@@ -16,9 +16,9 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
   const [isDragOver, setIsDragOver] = useState(false);
   const [options, setOptions] = useState(() => {
     const saved = loadSession().workbenchOptions;
-    return {
-      preset_id: 'tiktok_clean',
-      wm_method: 'none',
+    const merged = {
+      preset_id: 'clean_keep_bgm',
+      wm_method: 'auto',
       hflip: false,
       speed_ratio: 1.03,
       pitch_shift: true,
@@ -31,13 +31,14 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       saturation: 1.03,
       film_grain: 3,
       modify_md5: true,
-      enable_vocal_mute: false,
-      vocal_mute_strategy: 'demucs',
+      enable_vocal_mute: true,
+      vocal_mute_strategy: 'auto',
+      preserve_bgm: true,
       enable_tts: false,
       enable_lipsync: true,
       vietsub_style: 'dub',
-      burn_subtitles: false,
-      tts_voice: 'en-US-AvaMultilingualNeural',
+      burn_subtitles: true,
+      tts_voice: 'vi-VN-HoaiMy-Fast',
       tts_engine: 'edge-tts',
       target_lang: 'vi',
       source_lang: 'auto',
@@ -53,11 +54,32 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     bgm_path: '',
     bgm_id: '',
     bgm_volume: 0.85,
-    ...(saved || {}),
+      ...(saved || {}),
     };
+    const cleaningDisabled = ['none', 'off', 'disabled'].includes(merged.wm_method);
+    if (merged.preset_id === 'clean_mute_all') {
+      if (cleaningDisabled) merged.wm_method = 'auto';
+      merged.enable_vocal_mute = true;
+      merged.preserve_bgm = false;
+      merged.vocal_mute_strategy = 'mute_all';
+    } else {
+      const isCurrentPreset = merged.preset_id === 'clean_keep_bgm';
+      merged.preset_id = 'clean_keep_bgm';
+      if (!isCurrentPreset || cleaningDisabled) merged.wm_method = 'auto';
+      merged.enable_vocal_mute = true;
+      merged.preserve_bgm = true;
+      merged.vocal_mute_strategy = 'auto';
+    }
+    const isRetiredVietnameseVoice = merged.target_lang === 'vi'
+      && (
+        merged.tts_engine === 'vieneu'
+        || /^vieneu:/i.test(merged.tts_voice || '')
+        || /^en-US-.*MultilingualNeural$/i.test(merged.tts_voice || '')
+      );
+    return isRetiredVietnameseVoice
+      ? { ...merged, tts_voice: 'vi-VN-HoaiMy-Fast', tts_engine: 'edge-tts' }
+      : merged;
   });
-  const [channelOverlays, setChannelOverlays] = useState([]);
-
   useEffect(() => {
     const sess = loadSession();
     const sessionOvs = sess.workbenchOptions?.overlays || [];
@@ -88,27 +110,6 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       videoRef.current.src = getStreamUrl(currentMedia.video_id);
     }
   }, [currentMedia?.video_id]);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      if (!options.channel_id) {
-        setChannelOverlays([]);
-        return;
-      }
-      try {
-        const data = await fetchChannels();
-        const list = data.channels || [];
-        const ch = list.find((c) => (c.channel_id || c.id) === options.channel_id);
-        if (!cancelled) setChannelOverlays(ch?.overlays || []);
-      } catch {
-        if (!cancelled) setChannelOverlays([]);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [options.channel_id]);
 
   const handleFileUpload = async (e) => {
     const file = e.target?.files?.[0] || e;
@@ -174,9 +175,11 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     // Slider is always percent (0–5). Never send 0.4 as 40% crop.
     const normCrop = Number(options.crop_percent || 0) / 100.0;
     const cleanMethod = options.wm_method === 'opencv_telea' ? 'telea' : (options.wm_method === 'opencv_ns' ? 'ns' : options.wm_method);
-    const voice = options.tts_voice || 'en-US-AvaMultilingualNeural';
+    const voice = options.tts_voice || 'vi-VN-HoaiMy-Fast';
     let ttsEngine = options.tts_engine || 'edge-tts';
     if (String(voice).toLowerCase().startsWith('kokoro')) ttsEngine = 'kokoro';
+    if (String(voice).toLowerCase().startsWith('vieneu:')) ttsEngine = 'vieneu';
+    if (String(voice).toLowerCase().startsWith('vi-vn-')) ttsEngine = 'edge-tts';
     if (String(voice).toLowerCase().startsWith('gtts')) ttsEngine = 'gtts';
 
     const sess = loadSession();
@@ -212,7 +215,8 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         film_grain: options.film_grain ?? 3,
         modify_md5: options.modify_md5,
         enable_vocal_mute: options.enable_vocal_mute,
-        vocal_mute_strategy: options.vocal_mute_strategy || 'demucs',
+        vocal_mute_strategy: options.vocal_mute_strategy || 'auto',
+        preserve_bgm: options.preserve_bgm !== false,
         enable_tts: options.enable_tts,
         enable_lipsync: options.enable_lipsync !== false,
         vietsub_style: options.vietsub_style || 'auto',
@@ -353,7 +357,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
           </div>
         </div>
 
-        <RoiCanvas videoRef={videoRef} onRoiChange={setRoi} overlays={channelOverlays} />
+        <RoiCanvas videoRef={videoRef} onRoiChange={setRoi} />
       </div>
 
       {msg && (

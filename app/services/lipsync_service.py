@@ -5,10 +5,10 @@ Does not warp pixels (Wav2Lip needs a GPU). Matches dubbed speech to the
 original mouth window:
 
 1. Word-level STT cues (pause / punctuation splits)
-2. Compact translation to the source duration budget
+2. Use the exact subtitle text as the spoken script
 3. Edge-TTS speaking rate aimed at that window
-4. Rubberband formant-preserving stretch to the exact length
-5. Hard trim so a line never spills into the next mouth flap
+4. Apply only a bounded, formant-preserving speed-up
+5. Let the synchronized timeline move instead of cutting off speech
 """
 
 from __future__ import annotations
@@ -138,7 +138,7 @@ def write_cues_srt(srt_path: str, cues: List[Dict[str, Any]]) -> int:
 
 
 def rubberband_fit(input_path: str, output_path: str, target_dur: float) -> bool:
-    """Time-stretch with formants preserved so pitch stays human."""
+    """Speed up toward the target window without trimming spoken words."""
     from app.services.audio_service import find_ffmpeg_binary
     from app.services.tts_service import get_audio_duration
 
@@ -149,14 +149,9 @@ def rubberband_fit(input_path: str, output_path: str, target_dur: float) -> bool
     td = max(0.12, float(target_dur))
     if actual <= 0.05:
         return False
-    tempo = actual / td
-    # Keep voice human — stretching past ~12% sounds like "mắc ỉa"
-    tempo = max(0.92, min(1.12, tempo))
+    tempo = max(1.0, min(1.18, actual / td))
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
-    af = (
-        f"rubberband=tempo={tempo:.4f}:pitch=1:formant=preserved:transients=smooth,"
-        f"atrim=0:{td:.3f}"
-    )
+    af = f"rubberband=tempo={tempo:.4f}:pitch=1:formant=preserved:transients=smooth"
     cmd = [
         ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
         "-i", input_path, "-af", af, "-ar", "44100", "-ac", "1",
@@ -171,38 +166,29 @@ def rubberband_fit(input_path: str, output_path: str, target_dur: float) -> bool
 
 
 def fit_clip_to_window(input_path: str, output_path: str, target_dur: float) -> bool:
-    """Rubberband then hard-trim so the clip equals the mouth window."""
+    """Fit a clip naturally; long speech may extend beyond the original window."""
     from app.services.audio_service import find_ffmpeg_binary
     from app.services.tts_service import get_audio_duration
 
-    if rubberband_fit(input_path, output_path, target_dur):
+    actual = get_audio_duration(input_path)
+    td = max(0.12, float(target_dur))
+    if actual <= td + 0.04:
+        # Silence before the next delayed clip is already preserved by the mixer;
+        # padding every cue here creates one unnecessary FFmpeg process per line.
+        return False
+    if actual > td + 0.04 and rubberband_fit(input_path, output_path, target_dur):
         return True
     ffmpeg_bin = find_ffmpeg_binary()
     if not ffmpeg_bin:
         return False
-    actual = get_audio_duration(input_path)
-    td = max(0.12, float(target_dur))
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
-    if actual > td + 0.04:
-        cmd = [
-            ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
-            "-i", input_path, "-af", f"atrim=0:{td:.3f}", "-ar", "44100",
-            output_path,
-        ]
-    else:
-        pad = max(0.0, td - actual)
-        cmd = [
-            ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
-            "-i", input_path, "-af", f"apad=pad_dur={pad:.3f}", "-t", f"{td:.3f}",
-            "-ar", "44100", output_path,
-        ]
-    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    return res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 256
+    from app.services.tts_service import scale_audio_speed_ffmpeg
+    return scale_audio_speed_ffmpeg(input_path, output_path, min(1.18, actual / td))
 
 
 def lipsync_prepare_segment(text: str, duration: float) -> Dict[str, Any]:
-    """Return compacted text + Edge rate for one mouth window."""
-    spoken = compact_for_duration(text, duration)
+    """Return the exact subtitle text plus a bounded Edge speaking rate."""
+    spoken = re.sub(r"\s+", " ", (text or "").strip())
     natural = estimate_tts_duration(spoken)
     rate = edge_rate_tag(natural, duration)
     return {

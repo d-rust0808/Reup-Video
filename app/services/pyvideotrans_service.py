@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODULE_VIDEOTRANS_PATH = str(PROJECT_ROOT / "app" / "modules" / "videotrans")
-_WHISPER_CACHE = {"model": None, "name": None, "device": None}
+_WHISPER_CACHE: Dict[str, Any] = {"model": None, "name": None, "device": None}
 
 
 def _is_invalid_translation(text: Optional[str]) -> bool:
@@ -55,10 +55,77 @@ def _translation_matches_target(text: Optional[str], target_lang: str) -> bool:
     """Reject source-language leakage before a translated cue reaches hardsub/TTS."""
     if _is_invalid_translation(text):
         return False
+    if not any(char.isalnum() for char in text or ""):
+        return False
     lang = (target_lang or "").lower().split("-")[0]
     if lang == "vi" and _contains_cjk(text or ""):
         return False
     return True
+
+
+_DETACHED_CJK_PARTICLES = {
+    "吗", "呢", "吧", "嘛", "么", "啊", "呀", "啦", "呗", "了", "的", "地", "得",
+}
+
+
+def _merge_fragmented_cues(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Join nearby ASR fragments into sentence-sized cues before translation/TTS."""
+    merged: List[Dict[str, Any]] = []
+    for segment in segments:
+        copied = dict(segment)
+        text = re.sub(r"\s+", " ", str(copied.get("text") or "").strip())
+        compact = re.sub(r"\s+", "", text)
+        cjk_only = "".join(char for char in compact if _contains_cjk(char))
+        has_spoken_content = any(char.isalnum() for char in text)
+        duration = max(
+            0.0,
+            float(copied.get("end_time") or 0.0) - float(copied.get("start_time") or 0.0),
+        )
+        is_fragment = (
+            not has_spoken_content
+            or cjk_only in _DETACHED_CJK_PARTICLES
+            or (bool(cjk_only) and len(cjk_only) <= 3 and duration <= 0.9)
+        )
+
+        if merged:
+            previous = merged[-1]
+            gap = float(copied.get("start_time") or 0.0) - float(previous.get("end_time") or 0.0)
+            previous_text = str(previous.get("text") or "").rstrip()
+            combined_duration = (
+                float(copied.get("end_time") or 0.0)
+                - float(previous.get("start_time") or 0.0)
+            )
+            combined_chars = len(re.sub(r"\s+", "", previous_text + text))
+            has_terminal = bool(re.search(r"[.!?。！？…]$", previous_text))
+            should_join_sentence = (
+                gap <= 0.12
+                and not has_terminal
+                and combined_duration <= 5.0
+                and combined_chars <= 42
+            )
+            if gap <= 0.35 and (is_fragment or should_join_sentence):
+                separator = ""
+                if has_spoken_content and not (_contains_cjk(previous_text[-1:]) and _contains_cjk(text[:1])):
+                    separator = " "
+                previous["text"] = f"{previous_text}{separator}{text}".strip()
+                previous["end_time"] = max(
+                    float(previous.get("end_time") or 0.0),
+                    float(copied.get("end_time") or 0.0),
+                )
+                previous["duration"] = max(
+                    0.0,
+                    float(previous["end_time"]) - float(previous.get("start_time") or 0.0),
+                )
+                continue
+
+        if not has_spoken_content:
+            continue
+        copied["text"] = text
+        merged.append(copied)
+
+    for index, segment in enumerate(merged, start=1):
+        segment["index"] = index
+    return merged
 
 
 def subtitle_matches_target_language(srt_path: Optional[str], target_lang: str = "vi") -> bool:
@@ -358,26 +425,31 @@ class PyVideoTransService:
 
         target_dir = os.path.abspath(output_dir) if output_dir else os.path.dirname(os.path.abspath(subtitle_file_path))
         os.makedirs(target_dir, exist_ok=True)
+        ai_provider_available = False
 
-        # 1. DeepSeek AI Localization (Top Priority - High Quality & Context-Aware)
+        # 1. DeepSeek AI screenplay localization in one context-aware request.
         try:
             from app.services.ai_scriptwriter_service import ai_scriptwriter_service
             from app.services.tts_service import parse_srt_segments, format_srt_timestamp
             if ai_scriptwriter_service.is_available():
-                segs = parse_srt_segments(subtitle_file_path)
-                src_texts = [(s.get("text") or "").strip() for s in segs]
-                if src_texts and any(src_texts):
-                    deepseek_out = ai_scriptwriter_service.translate_cues(
-                        src_texts,
+                ai_provider_available = True
+                segs = _merge_fragmented_cues(parse_srt_segments(subtitle_file_path))
+                if segs and any((s.get("text") or "").strip() for s in segs):
+                    localized = ai_scriptwriter_service.localize_script(
+                        segs,
                         target_lang=target_lang,
-                        style=style or "dub",
+                        genre=style or "dub",
                         title=title or "",
                     )
-                    if deepseek_out and len(deepseek_out) == len(segs):
+                    if localized and len(localized) == len(segs):
+                        final_texts = [
+                            (item.get("translated_text") or "").strip()
+                            for item in localized
+                        ]
                         base_stem = os.path.splitext(os.path.basename(subtitle_file_path))[0]
                         out_srt = os.path.join(target_dir, f"{base_stem}_{target_lang}.srt")
                         lines = []
-                        for i, (seg, vi) in enumerate(zip(segs, deepseek_out), start=1):
+                        for i, (seg, vi) in enumerate(zip(segs, final_texts), start=1):
                             text = (vi or "").strip()
                             if not _translation_matches_target(text, target_lang):
                                 lines = []
@@ -388,8 +460,13 @@ class PyVideoTransService:
                         with open(out_srt, "w", encoding="utf-8") as f:
                             f.write("\n".join(lines) + ("\n" if lines else ""))
                         if subtitle_matches_target_language(out_srt, target_lang):
-                            logger.info(f"DeepSeek translated {len(lines)} cues -> {out_srt}")
-                            return {"status": "success", "srt_path": out_srt, "provider": "deepseek"}
+                            logger.info(f"DeepSeek localized {len(lines)} screenplay cues -> {out_srt}")
+                            return {
+                                "status": "success",
+                                "srt_path": out_srt,
+                                "provider": "deepseek",
+                                "localized": True,
+                            }
         except Exception as e:
             logger.warning(f"DeepSeek subtitle translation failed: {e}. Falling back to next provider.")
 
@@ -398,7 +475,8 @@ class PyVideoTransService:
             from app.services.xai_media_service import translate_cues, is_available as grok_ok
             from app.services.tts_service import parse_srt_segments, format_srt_timestamp
             if grok_ok():
-                segs = parse_srt_segments(subtitle_file_path)
+                ai_provider_available = True
+                segs = _merge_fragmented_cues(parse_srt_segments(subtitle_file_path))
                 src_texts = [(s.get("text") or "").strip() for s in segs]
                 if src_texts and all(src_texts):
                     grok_out = translate_cues(
@@ -426,6 +504,13 @@ class PyVideoTransService:
                             return {"status": "success", "srt_path": out_srt, "provider": "grok"}
         except Exception as e:
             logger.warning(f"Grok subtitle translation failed: {e}. Falling back to Google.")
+
+        # A configured AI returning invalid output is safer to surface as a clear
+        # failure than to silently burn a fragmented word-by-word machine translation.
+        if ai_provider_available:
+            warning = "AI không tạo được kịch bản Việt hợp lệ; đã bỏ qua Vietsub để tránh xuất bản dịch vô nghĩa."
+            logger.error(warning)
+            return {"status": "failed", "srt_path": None, "warning": warning}
 
         # 3. Native Deep Translator (with strict error filtering)
         try:
@@ -483,7 +568,7 @@ class PyVideoTransService:
             out_lines = list(lines)
             for local_i, line_idx in enumerate(text_indices):
                 vi = translated_map.get(local_i)
-                if _translation_matches_target(vi, target_lang):
+                if isinstance(vi, str) and _translation_matches_target(vi, target_lang):
                     out_lines[line_idx] = vi + "\n"
 
             if len(translated_map) != len(text_payload) or any(

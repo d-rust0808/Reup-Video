@@ -1,5 +1,27 @@
 from typing import Union
-from PySide6.QtCore import QObject, Signal, Slot
+
+try:
+    from PySide6.QtCore import QObject, Signal, Slot
+except ImportError:
+    class QObject:
+        def __init__(self, parent=None):
+            self.parent = parent
+
+    class Signal:
+        def __init__(self, *_types):
+            self._callbacks = []
+
+        def connect(self, callback):
+            self._callbacks.append(callback)
+
+        def emit(self, *args):
+            for callback in tuple(self._callbacks):
+                callback(*args)
+
+    def Slot(*_types):
+        def decorator(func):
+            return func
+        return decorator
 
 from videotrans.task.taskcfg import SignMsg
 

@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import heroBanner from '../assets/hero_banner.jpg';
 import {
   Download,
   CheckCircle2,
@@ -163,6 +164,8 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             tts_engine: opts.tts_engine,
             enable_tts: opts.enable_tts !== false,
             enable_vocal_mute: opts.enable_vocal_mute !== false,
+            preserve_bgm: opts.preserve_bgm !== false,
+            vocal_mute_strategy: opts.vocal_mute_strategy || 'auto',
             enable_lipsync: opts.enable_lipsync !== false,
             burn_subtitles: opts.burn_subtitles !== false,
             overlays: opts.overlays || [],
@@ -296,11 +299,13 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             film_grain: opts.film_grain ?? 3,
             modify_md5: opts.modify_md5 !== false,
             enable_vocal_mute: opts.enable_vocal_mute !== false,
+            preserve_bgm: opts.preserve_bgm !== false,
+            vocal_mute_strategy: opts.vocal_mute_strategy || 'auto',
             enable_tts: opts.enable_tts !== false,
             enable_lipsync: opts.enable_lipsync !== false,
             vietsub_style: opts.vietsub_style || 'dub',
             burn_subtitles: opts.burn_subtitles !== false,
-            tts_voice: opts.tts_voice || 'en-US-AvaMultilingualNeural',
+            tts_voice: opts.tts_voice || 'vi-VN-HoaiMy-Fast',
             tts_engine: opts.tts_engine || 'edge-tts',
             target_lang: 'vi',
             channel_id: opts.channel_id,
@@ -410,7 +415,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
           <div className="lg:col-span-5 flex justify-center">
             <div className="w-full max-w-sm rounded-2xl overflow-hidden shadow-2xl border-2 border-white/40 bg-white/10 backdrop-blur-xs transform hover:scale-102 transition-transform duration-300">
               <img
-                src="/hero_banner.jpg"
+                src={heroBanner}
                 alt="AI Video Editor Workspace"
                 className="w-full h-auto object-cover block"
               />

@@ -14,7 +14,6 @@ import {
   FileText,
   Sparkles,
   Loader2,
-  Layers,
   ImagePlus,
   BookOpen,
   Smile,
@@ -24,33 +23,78 @@ import {
   ChevronDown,
   Music,
   Scissors,
+  Play,
+  Square,
 } from 'lucide-react';
 
-import { fetchChannels, getMediaUrl, uploadStudioOverlay, fetchBgmLibrary } from '../services/api';
+import { fetchChannels, uploadStudioOverlay, fetchBgmLibrary, previewVoice } from '../services/api';
+
+const VOICE_OPTIONS = {
+  vi: [
+    { value: 'vi-VN-HoaiMy-Fast', label: 'Hoài My — review nhanh, nữ Việt' },
+    { value: 'vi-VN-HoaiMy-Warm', label: 'Hoài My — kể chuyện ấm, nữ Việt' },
+    { value: 'vi-VN-NamMinh-Fast', label: 'Nam Minh — review chắc, nam Việt' },
+    { value: 'vi-VN-NamMinh-Deep', label: 'Nam Minh — recap trầm, nam Việt' },
+  ],
+  en: [
+    { value: 'en-US-AvaMultilingualNeural', label: 'Ava — nữ, tự nhiên' },
+    { value: 'en-US-AndrewMultilingualNeural', label: 'Andrew — nam, dẫn chuyện' },
+  ],
+  th: [
+    { value: 'th-TH-PremwadeeNeural', label: 'Premwadee — nữ Thái' },
+    { value: 'th-TH-NiwatNeural', label: 'Niwat — nam Thái' },
+  ],
+  id: [
+    { value: 'id-ID-GadisNeural', label: 'Gadis — nữ Indonesia' },
+    { value: 'id-ID-ArdiNeural', label: 'Ardi — nam Indonesia' },
+  ],
+  ja: [
+    { value: 'ja-JP-NanamiNeural', label: 'Nanami — nữ Nhật' },
+    { value: 'ja-JP-KeitaNeural', label: 'Keita — nam Nhật' },
+  ],
+  ko: [
+    { value: 'ko-KR-SunHiNeural', label: 'Sun-Hi — nữ Hàn' },
+    { value: 'ko-KR-InJoonNeural', label: 'InJoon — nam Hàn' },
+  ],
+  pt: [
+    { value: 'pt-BR-FranciscaNeural', label: 'Francisca — nữ Brazil' },
+    { value: 'pt-BR-AntonioNeural', label: 'Antonio — nam Brazil' },
+  ],
+};
 
 export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
   const [channels, setChannels] = useState([]);
-  const [loadingChannels, setLoadingChannels] = useState(false);
   const [showWmAdvanced, setShowWmAdvanced] = useState(false);
   const [bgmList, setBgmList] = useState([]);
+  const [previewingVoice, setPreviewingVoice] = useState(false);
+  const [voicePreviewError, setVoicePreviewError] = useState('');
+  const [voicePreviewAudio, setVoicePreviewAudio] = useState(null);
+
+  useEffect(() => () => {
+    if (voicePreviewAudio) {
+      voicePreviewAudio.pause();
+      URL.revokeObjectURL(voicePreviewAudio.src);
+    }
+  }, [voicePreviewAudio]);
 
   useEffect(() => {
     loadChannels();
     fetchBgmLibrary()
       .then((d) => setBgmList(d.items || []))
       .catch(() => setBgmList([]));
+
+    const refreshChannels = () => loadChannels();
+    window.addEventListener('reup:channels-changed', refreshChannels);
+    return () => window.removeEventListener('reup:channels-changed', refreshChannels);
   }, []);
 
   const loadChannels = async () => {
-    setLoadingChannels(true);
     try {
       const data = await fetchChannels();
       const list = Array.isArray(data) ? data : (data.channels || []);
       setChannels(list);
     } catch {
       setChannels([]);
-    } finally {
-      setLoadingChannels(false);
     }
   };
 
@@ -58,45 +102,66 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
     onChange({ ...options, [key]: value });
   };
 
+  const handleVoicePreview = async () => {
+    if (voicePreviewAudio && !voicePreviewAudio.paused) {
+      voicePreviewAudio.pause();
+      voicePreviewAudio.currentTime = 0;
+      setPreviewingVoice(false);
+      return;
+    }
+
+    setPreviewingVoice(true);
+    setVoicePreviewError('');
+    try {
+      const blob = await previewVoice({
+        voice: options.tts_voice || 'vi-VN-HoaiMy-Fast',
+        lang: options.target_lang || 'vi',
+        engine: options.tts_engine || 'edge-tts',
+      });
+      if (voicePreviewAudio) {
+        voicePreviewAudio.pause();
+        URL.revokeObjectURL(voicePreviewAudio.src);
+      }
+      const audio = new Audio(URL.createObjectURL(blob));
+      audio.onended = () => setPreviewingVoice(false);
+      audio.onerror = () => {
+        setPreviewingVoice(false);
+        setVoicePreviewError('Không phát được bản nghe thử.');
+      };
+      setVoicePreviewAudio(audio);
+      await audio.play();
+    } catch (error) {
+      setPreviewingVoice(false);
+      setVoicePreviewError(error.message || 'Không thể tạo bản nghe thử.');
+    }
+  };
+
   const handlePresetSelect = (presetId) => {
-    if (presetId === 'tiktok_clean') {
+    if (presetId === 'clean_keep_bgm') {
       onChange({
         ...options,
-        preset_id: 'tiktok_clean',
+        preset_id: 'clean_keep_bgm',
         subtitle_bottom_crop: 7.0,
-        enable_vocal_mute: false,
-        burn_subtitles: false,
-        enable_tts: false,
-        wm_method: 'none',
+        enable_vocal_mute: true,
+        preserve_bgm: true,
+        vocal_mute_strategy: 'auto',
+        wm_method: 'auto',
         hflip: false,
         speed_ratio: 1.03,
         crop_percent: 2.0,
       });
-    } else if (presetId === 'tiktok_dub') {
+    } else if (presetId === 'clean_mute_all') {
       onChange({
         ...options,
-        preset_id: 'tiktok_dub',
-        subtitle_bottom_crop: 0.0,
-        enable_vocal_mute: false,
-        burn_subtitles: true,
-        enable_tts: true,
-        wm_method: 'none',
+        preset_id: 'clean_mute_all',
+        subtitle_bottom_crop: 7.0,
+        enable_vocal_mute: true,
+        preserve_bgm: false,
+        vocal_mute_strategy: 'mute_all',
+        wm_method: 'auto',
         hflip: false,
         speed_ratio: 1.03,
         crop_percent: 2.0,
-      });
-    } else if (presetId === 'tiktok_original') {
-      onChange({
-        ...options,
-        preset_id: 'tiktok_original',
-        subtitle_bottom_crop: 0.0,
-        enable_vocal_mute: false,
-        burn_subtitles: false,
-        enable_tts: false,
-        wm_method: 'none',
-        hflip: false,
-        speed_ratio: 1.0,
-        crop_percent: 0.0,
       });
     }
   };
@@ -147,6 +212,54 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
         Tùy chỉnh Reup
       </h3>
 
+      <div className="rounded-2xl border border-blue-200 bg-gradient-to-r from-blue-50 via-white to-emerald-50 p-4 space-y-3">
+        <div>
+          <h4 className="text-sm font-black text-slate-900">Chọn âm thanh sau khi làm sạch</h4>
+          <p className="text-[11px] text-slate-600 mt-0.5">
+            Cả hai chế độ đều xóa chữ/logo trước. Vietsub và lồng tiếng được chọn độc lập ở mục Âm thanh & Dịch.
+          </p>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          {[
+            {
+              id: 'clean_keep_bgm',
+              icon: Music,
+              label: 'Làm sạch + Giữ nhạc nền',
+              desc: 'Xóa thoại gốc, giữ nhạc và hiệu ứng âm thanh.',
+            },
+            {
+              id: 'clean_mute_all',
+              icon: VolumeX,
+              label: 'Làm sạch + Xóa nhạc nền',
+              desc: 'Tắt toàn bộ âm thanh gốc; phù hợp khi chỉ dùng lồng tiếng AI.',
+            },
+          ].map((mode) => {
+            const active = options.preset_id === mode.id;
+            const Icon = mode.icon;
+            return (
+              <button
+                key={mode.id}
+                type="button"
+                onClick={() => handlePresetSelect(mode.id)}
+                className={`flex items-start gap-3 text-left rounded-2xl border px-4 py-3 transition-all ${
+                  active
+                    ? 'bg-blue-600 border-blue-700 text-white shadow-sm'
+                    : 'bg-white border-slate-200 hover:border-blue-300'
+                }`}
+              >
+                <Icon className={`w-5 h-5 mt-0.5 shrink-0 ${active ? 'text-white' : 'text-blue-600'}`} />
+                <span>
+                  <span className="text-xs font-extrabold block">{mode.label}</span>
+                  <span className={`text-[10px] block mt-0.5 ${active ? 'text-blue-100' : 'text-slate-500'}`}>
+                    {mode.desc}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {/* Cột 1: Hình ảnh & FX */}
         <div className="space-y-4 bg-slate-50/30 p-4 rounded-2xl border border-slate-100">
@@ -155,45 +268,17 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
             Hình ảnh & FX
           </h4>
 
-          <div className="grid grid-cols-3 gap-2">
-            {[
-              { id: 'tiktok_clean', label: 'Sạch Chữ & Giữ Nhạc', desc: 'Cắt sub cũ, giữ 100% âm gốc' },
-              { id: 'tiktok_dub', label: 'Vietsub + Lồng Tiếng', desc: 'Vietsub đè sub, lồng tiếng AI' },
-              { id: 'tiktok_original', label: 'Nguyên Bản', desc: 'Giữ 100% âm hình gốc' },
-            ].map((p) => {
-              const on =
-                options.preset_id === p.id ||
-                (!options.preset_id && p.id === 'tiktok_clean' && !options.burn_subtitles && !options.enable_tts);
-              return (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => handlePresetSelect(p.id)}
-                  className={`text-left rounded-2xl border px-3 py-2.5 transition-all ${
-                    on ? 'bg-blue-600 border-blue-700 text-white shadow-sm' : 'bg-white border-slate-200 hover:border-blue-300'
-                  }`}
-                >
-                  <span className="text-xs font-extrabold block">{p.label}</span>
-                  <span className={`text-[10px] ${on ? 'text-blue-100' : 'text-slate-500'}`}>{p.desc}</span>
-                </button>
-              );
-            })}
-          </div>
-
           <div className="p-4 bg-emerald-50/70 rounded-2xl border border-emerald-200 space-y-2">
             <div className="flex items-center justify-between">
               <div>
                 <label className="text-xs font-extrabold text-slate-800 block">Tự xoá chữ & logo</label>
                 <span className="text-[11px] text-slate-500">
-                  Tự động phát hiện và xóa watermark.
+                  Luôn chạy trước Vietsub và lồng tiếng.
                 </span>
               </div>
-              <input
-                type="checkbox"
-                checked={options.wm_method !== 'none' && options.wm_method !== 'off' && options.wm_method !== 'disabled'}
-                onChange={(e) => handleChange('wm_method', e.target.checked ? 'auto' : 'none')}
-                className="w-4 h-4 rounded text-emerald-600 accent-emerald-600 border-slate-300 cursor-pointer"
-              />
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-600 px-2.5 py-1 text-[10px] font-black text-white">
+                <CheckCircle2 className="w-3 h-3" /> Luôn bật
+              </span>
             </div>
             <button
               type="button"
@@ -210,7 +295,6 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                     { id: 'auto', label: 'Tự động (LaMa + Telea)', desc: 'Chữ mỏng Telea, khối lớn LaMa neural' },
                     { id: 'all', label: 'All + delogo', desc: 'Inpaint rồi phủ nốt vệt sót' },
                     { id: 'crop', label: 'Chỉ cắt đáy', desc: 'Khi phụ đề dính cứng dưới chân' },
-                    { id: 'none', label: 'Không xoá', desc: 'Giữ nguyên hình gốc' },
                   ].map((item) => {
                     const isSelected =
                       options.wm_method === item.id ||
@@ -230,7 +314,10 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                             name="wm_method"
                             value={item.id}
                             checked={isSelected}
-                            onChange={() => handleChange('wm_method', item.id)}
+                            onChange={() => onChange({
+                              ...options,
+                              wm_method: item.id,
+                            })}
                             className="text-emerald-600 focus:ring-emerald-500"
                           />
                           <span className="text-xs font-bold text-slate-800">{item.label}</span>
@@ -571,26 +658,6 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
               />
             </div>
 
-            {/* Audio Vocal Mute */}
-            <div className="flex items-center justify-between p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80">
-              <div className="flex items-center space-x-2.5">
-                <VolumeX className="w-4 h-4 text-rose-600 shrink-0" />
-                <div>
-                  <label className="text-xs font-bold text-slate-700 cursor-pointer block" htmlFor="vocal-mute-toggle">
-                    Tắt tiếng gốc (khử thoại, giữ BGM)
-                  </label>
-                  <span className="text-[10px] text-slate-500 block">Khử giọng nói gốc, giữ lại nhạc nền.</span>
-                </div>
-              </div>
-              <input
-                id="vocal-mute-toggle"
-                type="checkbox"
-                checked={options.enable_vocal_mute !== false}
-                onChange={(e) => handleChange('enable_vocal_mute', e.target.checked)}
-                className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 shrink-0 cursor-pointer"
-              />
-            </div>
-
             {/* BGM Selector */}
             <div className="p-3.5 bg-indigo-50/70 rounded-2xl border border-indigo-200 space-y-2">
               <div className="flex items-center gap-2">
@@ -660,10 +727,10 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
               <div className="flex items-center justify-between pt-1 p-2.5 bg-white/70 rounded-xl border border-purple-100">
                 <div>
                   <label className="text-xs font-extrabold text-purple-950 cursor-pointer block" htmlFor="burnsub-toggle">
-                    Hiển thị chữ Vietsub trên video
+                    Vietsub trên bản đã làm sạch
                   </label>
                   <span className="text-[10px] text-purple-700 font-medium block">
-                    Bật để in chữ phụ đề lên video, tắt nếu chỉ muốn nghe lồng tiếng.
+                    In phụ đề dịch lên video sau khi chữ tiếng Trung đã được xóa.
                   </span>
                 </div>
                 <input
@@ -757,7 +824,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                       onChange={(e) => {
                         const lang = e.target.value;
                         const voices = {
-                          vi: 'en-US-AvaMultilingualNeural',
+                          vi: 'vi-VN-HoaiMy-Fast',
                           en: 'en-US-AvaMultilingualNeural',
                           th: 'th-TH-PremwadeeNeural',
                           id: 'id-ID-GadisNeural',
@@ -765,8 +832,12 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                           ko: 'ko-KR-SunHiNeural',
                           pt: 'pt-BR-FranciscaNeural',
                         };
-                        handleChange('target_lang', lang);
-                        onChange({ ...options, target_lang: lang, tts_voice: voices[lang] || options.tts_voice });
+                        onChange({
+                          ...options,
+                          target_lang: lang,
+                          tts_voice: voices[lang] || options.tts_voice,
+                          tts_engine: 'edge-tts',
+                        });
                       }}
                       className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2.5 text-xs text-slate-900 font-bold outline-none focus:ring-2 focus:ring-purple-400 cursor-pointer shadow-2xs mb-2"
                     >
@@ -781,24 +852,50 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                   </div>
                   <div>
                     <label className="block text-[11px] font-bold text-purple-900 mb-1.5 flex items-center justify-between">
-                      <span>Chọn Giọng Đọc Thuyết Minh Tiếng Việt:</span>
+                      <span>Chọn giọng đọc cho ngôn ngữ đích:</span>
                     </label>
                     <select
-                      value={options.tts_voice || 'en-US-AvaMultilingualNeural'}
+                      value={options.tts_voice || 'vi-VN-HoaiMy-Fast'}
                       onChange={(e) => {
-                        handleChange('tts_voice', e.target.value);
+                        const voice = e.target.value;
+                        onChange({
+                          ...options,
+                          tts_voice: voice,
+                          tts_engine: 'edge-tts',
+                        });
                       }}
                       className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2.5 text-xs text-slate-900 font-bold outline-none focus:ring-2 focus:ring-purple-400 cursor-pointer shadow-2xs"
                     >
-                      <optgroup label="Nữ — hay, tự nhiên (khuyên dùng)">
-                        <option value="en-US-AvaMultilingualNeural">Ava — rõ, không ngọng, hợp reup</option>
-                        <option value="en-US-EmmaMultilingualNeural">Emma — trẻ, nhẹ, vlog</option>
-                      </optgroup>
-                      <optgroup label="Nam — dẫn chuyện">
-                        <option value="en-US-AndrewMultilingualNeural">Andrew — trầm, tài liệu / kể lại</option>
-                        <option value="en-US-BrianMultilingualNeural">Brian — ấm, review</option>
-                      </optgroup>
+                      {(VOICE_OPTIONS[options.target_lang || 'vi'] || VOICE_OPTIONS.en).map((item) => (
+                        <option key={item.value} value={item.value}>{item.label}</option>
+                      ))}
                     </select>
+                    <button
+                      type="button"
+                      onClick={handleVoicePreview}
+                      className="mt-2 w-full flex items-center justify-center gap-2 rounded-xl border border-purple-300 bg-white px-3 py-2 text-[11px] font-extrabold text-purple-800 hover:bg-purple-50 disabled:cursor-wait disabled:opacity-70"
+                    >
+                      {previewingVoice && (!voicePreviewAudio || voicePreviewAudio.paused) ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : previewingVoice ? (
+                        <Square className="w-3.5 h-3.5 fill-current" />
+                      ) : (
+                        <Play className="w-3.5 h-3.5 fill-current" />
+                      )}
+                      {previewingVoice && (!voicePreviewAudio || voicePreviewAudio.paused)
+                        ? 'Đang tạo bản nghe thử...'
+                        : previewingVoice
+                          ? 'Dừng nghe thử'
+                          : 'Nghe thử giọng đã chọn'}
+                    </button>
+                    {voicePreviewError && (
+                      <p className="mt-1.5 text-[10px] font-semibold text-rose-600">{voicePreviewError}</p>
+                    )}
+                    {(options.tts_engine || 'edge-tts') === 'edge-tts' && (
+                      <p className="mt-1.5 text-[10px] text-purple-600">
+                        Dùng giọng Edge-TTS tiếng Việt gốc; bấm nghe thử trước khi chạy video.
+                      </p>
+                    )}
                   </div>
                 </div>
               )}
@@ -881,6 +978,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
               <select
                 value={options.channel_id || 'none'}
                 onChange={(e) => handleChannelSelect(e.target.value)}
+                onFocus={loadChannels}
                 className="w-full text-xs font-semibold bg-white border border-slate-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 shadow-2xs"
               >
                 <option value="none">📦 Không gán kênh (chỉ lưu kho)</option>
@@ -891,27 +989,6 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                 ))}
               </select>
             </div>
-
-            {activeChannel && (activeChannel.overlays || []).length > 0 && (
-              <div className="flex items-start gap-2.5 p-2.5 rounded-xl bg-white border border-indigo-200/80">
-                <Layers className="w-3.5 h-3.5 text-indigo-600 shrink-0 mt-0.5" />
-                <div className="min-w-0">
-                  <p className="text-[11px] font-extrabold text-slate-800">
-                    Gắn {activeChannel.overlays.length} overlay của kênh
-                  </p>
-                  <div className="flex items-center gap-1.5 mt-1.5">
-                    {activeChannel.overlays.slice(0, 5).map((ov) => (
-                      <img
-                        key={ov.id}
-                        src={getMediaUrl(ov.url)}
-                        alt=""
-                        className="w-7 h-7 rounded-md object-contain bg-slate-900 border border-slate-200"
-                      />
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
 
             {/* If Channel is Selected: Metadata & Caption Form */}
             {options.channel_id && options.channel_id !== 'none' && (

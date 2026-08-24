@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, Notification, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const http = require('http');
-const { spawn, execSync } = require('child_process');
+const { spawn, spawnSync, execSync } = require('child_process');
 const fs = require('fs');
 
 let mainWindow = null;
@@ -9,49 +9,137 @@ let pythonProcess = null;
 let tray = null;
 let isQuitting = false;
 
+// 1. Fix PATH on macOS GUI applications to reach Homebrew, Python, FFmpeg & Conda
+if (process.platform === 'darwin') {
+  const home = process.env.HOME || '';
+  const searchPaths = [
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    '/opt/homebrew/opt/python@3.11/bin',
+    '/usr/local/bin',
+    '/usr/local/sbin',
+    path.join(home, '.local', 'bin'),
+    path.join(home, '.pyenv', 'shims'),
+    path.join(home, 'miniforge3', 'bin'),
+    path.join(home, 'miniconda3', 'bin'),
+    path.join(home, 'anaconda3', 'bin'),
+    '/usr/bin',
+    '/bin',
+    '/usr/sbin',
+    '/sbin',
+  ];
+  const existingPath = process.env.PATH || '';
+  process.env.PATH = Array.from(new Set([...searchPaths.filter((p) => fs.existsSync(p)), ...existingPath.split(':')])).join(':');
+}
+
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
-const ROOT_DIR = path.resolve(__dirname, '..', '..');
+const ROOT_DIR = isDev
+  ? path.resolve(__dirname, '..', '..')
+  : (fs.existsSync(path.join(process.resourcesPath, 'app')) ? process.resourcesPath : path.resolve(__dirname, '..', '..'));
 const BACKEND_PORT = 8000;
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 
 // --- PYTHON BACKEND LIFECYCLE ---
 
+function testPythonRuntime(bin) {
+  if (!bin || !fs.existsSync(bin)) return false;
+  try {
+    const res = spawnSync(bin, ['-c', 'import uvicorn, fastapi; print("RUNTIME_OK")'], {
+      timeout: 4000,
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        PYTHONPATH: [ROOT_DIR, path.join(ROOT_DIR, 'app'), path.resolve(__dirname, '..', '..')].join(process.platform === 'win32' ? ';' : ':'),
+      },
+    });
+    return res.status === 0 && res.stdout && res.stdout.includes('RUNTIME_OK');
+  } catch {
+    return false;
+  }
+}
+
 function findPythonExecutable() {
-  if (process.env.PYTHON_PATH && fs.existsSync(process.env.PYTHON_PATH)) {
+  if (process.env.PYTHON_PATH && testPythonRuntime(process.env.PYTHON_PATH)) {
     return process.env.PYTHON_PATH;
   }
 
-  // Check local venvs first
+  const home = process.env.HOME || '';
+  const devWorkspaceRoot = path.resolve(__dirname, '..', '..');
+
   const candidates = [
+    // 1. Packaged or local venvs inside project
     path.join(ROOT_DIR, 'venv311', 'bin', 'python'),
     path.join(ROOT_DIR, 'venv311', 'bin', 'python3'),
-    path.join(ROOT_DIR, '.venv', 'bin', 'python'),
-    path.join(ROOT_DIR, '.venv', 'bin', 'python3'),
     path.join(ROOT_DIR, 'venv', 'bin', 'python'),
     path.join(ROOT_DIR, 'venv', 'bin', 'python3'),
-    path.join(ROOT_DIR, '.venv', 'Scripts', 'python.exe'),
+    path.join(ROOT_DIR, '.venv', 'bin', 'python'),
+    path.join(ROOT_DIR, '.venv', 'bin', 'python3'),
+    path.join(devWorkspaceRoot, 'venv311', 'bin', 'python'),
+    path.join(devWorkspaceRoot, 'venv', 'bin', 'python'),
+
+    // 2. ExtraResources location if bundled
+    path.join(process.resourcesPath, 'venv311', 'bin', 'python'),
+    path.join(process.resourcesPath, 'venv311', 'bin', 'python3'),
+    path.join(process.resourcesPath, 'venv', 'bin', 'python'),
+
+    // 3. User Application Support venv
+    path.join(home, 'Library', 'Application Support', 'Reup-Video Studio', 'venv', 'bin', 'python'),
+    path.join(home, '.reup-video', 'venv', 'bin', 'python'),
+
+    // 4. Standard macOS Python versions (Homebrew, Pyenv, Conda)
+    '/opt/homebrew/bin/python3.11',
+    '/opt/homebrew/opt/python@3.11/bin/python3.11',
+    '/opt/homebrew/bin/python3.12',
+    '/opt/homebrew/bin/python3.10',
+    '/opt/homebrew/bin/python3',
+    '/usr/local/bin/python3.11',
+    '/usr/local/bin/python3.12',
+    '/usr/local/bin/python3',
+    path.join(home, '.pyenv', 'shims', 'python3'),
+    path.join(home, 'miniforge3', 'bin', 'python3'),
+    path.join(home, 'miniconda3', 'bin', 'python3'),
+
+    // Windows candidates
     path.join(ROOT_DIR, 'venv', 'Scripts', 'python.exe'),
+    path.join(ROOT_DIR, 'venv311', 'Scripts', 'python.exe'),
+    path.join(ROOT_DIR, '.venv', 'Scripts', 'python.exe'),
+    path.join(devWorkspaceRoot, 'venv', 'Scripts', 'python.exe'),
+    path.join(process.resourcesPath, 'venv', 'Scripts', 'python.exe'),
   ];
 
+  // Pick first candidate that actually passes the fastapi/uvicorn test
   for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
+    if (testPythonRuntime(p)) {
+      console.log(`[Electron] Selected verified Python runtime: ${p}`);
+      return p;
+    }
   }
 
-  // Check system python3 or python
+  // Fallback: search which python3 in enriched PATH
   try {
-    const whichCmd = process.platform === 'win32' ? 'where python' : 'which python3 || which python';
-    const out = execSync(whichCmd, { encoding: 'utf-8' }).trim().split('\n')[0];
-    if (out && fs.existsSync(out)) return out;
+    const whichCmd = process.platform === 'win32' ? 'where python' : 'which -a python3.11 python3 python 2>/dev/null';
+    const out = execSync(whichCmd, { encoding: 'utf-8', env: process.env }).trim().split('\n');
+    for (const line of out) {
+      const trimmed = line.trim();
+      if (trimmed && testPythonRuntime(trimmed)) {
+        console.log(`[Electron] Selected PATH Python runtime: ${trimmed}`);
+        return trimmed;
+      }
+    }
   } catch {
     // fallback
   }
 
+  // Last resort: return first existing path or default
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
   return process.platform === 'win32' ? 'python.exe' : 'python3';
 }
 
 function checkBackendHealth() {
   return new Promise((resolve) => {
-    const req = http.get(`${BACKEND_URL}/health`, { timeout: 4000 }, (res) => {
+    const req = http.get(`${BACKEND_URL}/health`, { timeout: 3000 }, (res) => {
       resolve(res.statusCode === 200);
     });
     req.on('error', () => resolve(false));
@@ -62,7 +150,7 @@ function checkBackendHealth() {
   });
 }
 
-async function waitForBackend(maxAttempts = 40, interval = 300) {
+async function waitForBackend(maxAttempts = 50, interval = 300) {
   for (let i = 0; i < maxAttempts; i++) {
     const healthy = await checkBackendHealth();
     if (healthy) return true;
@@ -72,12 +160,10 @@ async function waitForBackend(maxAttempts = 40, interval = 300) {
 }
 
 async function startPythonBackend() {
-  // Retry the probe: when a job saturates the CPU, one slow /health must not make
-  // us spawn a second uvicorn that then fails to bind port 8000.
-  const isAlreadyRunning = await waitForBackend(3, 400);
+  const isAlreadyRunning = await waitForBackend(3, 300);
   if (isAlreadyRunning) {
     console.log('[Electron] Backend is already running on port', BACKEND_PORT);
-    return;
+    return true;
   }
 
   const pythonBin = findPythonExecutable();
@@ -85,31 +171,66 @@ async function startPythonBackend() {
 
   const args = ['-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT)];
 
+  const logDir = app.getPath('userData');
+  if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir, { recursive: true });
+  }
+  const logFile = path.join(logDir, 'backend.log');
+  const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+  logStream.write(`\n--- [${new Date().toISOString()}] Starting Backend (${pythonBin}) ---\n`);
+
+  const pythonEnv = {
+    ...process.env,
+    PYTHONUNBUFFERED: '1',
+    PYTHONPATH: [
+      ROOT_DIR,
+      path.join(ROOT_DIR, 'app'),
+      path.resolve(__dirname, '..', '..'),
+      process.env.PYTHONPATH,
+    ]
+      .filter(Boolean)
+      .join(process.platform === 'win32' ? ';' : ':'),
+  };
+
   try {
     pythonProcess = spawn(pythonBin, args, {
       cwd: ROOT_DIR,
-      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+      env: pythonEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
     pythonProcess.stdout.on('data', (data) => {
-      console.log(`[FastAPI] ${data.toString().trim()}`);
+      const msg = data.toString();
+      console.log(`[FastAPI] ${msg.trim()}`);
+      logStream.write(`[STDOUT] ${msg}`);
     });
 
     pythonProcess.stderr.on('data', (data) => {
-      console.error(`[FastAPI Stderr] ${data.toString().trim()}`);
+      const msg = data.toString();
+      console.error(`[FastAPI Stderr] ${msg.trim()}`);
+      logStream.write(`[STDERR] ${msg}`);
     });
 
     pythonProcess.on('error', (err) => {
-      console.error('[Electron] Failed to start Python backend:', err);
+      console.error('[Electron] Failed to spawn Python process:', err);
+      logStream.write(`[ERROR] Failed to spawn: ${err.message}\n`);
     });
 
     pythonProcess.on('exit', (code, signal) => {
       console.log(`[Electron] Python backend exited with code ${code}, signal ${signal}`);
+      logStream.write(`[EXIT] code: ${code}, signal: ${signal}\n`);
       pythonProcess = null;
     });
+
+    const isReady = await waitForBackend(45, 400);
+    if (!isReady) {
+      console.warn('[Electron] Backend did not respond within timeout.');
+    }
+    return isReady;
   } catch (err) {
     console.error('[Electron] Exception spawning python process:', err);
+    logStream.write(`[EXCEPTION] ${err.stack || err.message}\n`);
+    return false;
   }
 }
 
@@ -146,22 +267,22 @@ function createMainWindow() {
     : undefined;
 
   mainWindow = new BrowserWindow({
-    width: 1300,
-    height: 860,
+    width: 1320,
+    height: 880,
     minWidth: 1080,
     minHeight: 720,
     title: 'Reup-Video Studio',
     icon: iconToUse,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     trafficLightPosition: { x: 16, y: 18 },
-    backgroundColor: '#0f172a', // Deep slate dark background
+    backgroundColor: '#ffffff',
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: false,
-      webSecurity: true,
+      webSecurity: false, // Allows seamless local blob / media playback under file:// protocol
     },
   });
 
@@ -216,7 +337,6 @@ function createTray() {
     const contextMenu = Menu.buildFromTemplate([
       {
         label: 'Mở Reup-Video Studio',
-
         click: () => {
           if (mainWindow) {
             mainWindow.show();
@@ -254,7 +374,6 @@ function createTray() {
 // --- IPC HANDLERS ---
 
 function setupIpcHandlers() {
-  // Select directory native dialog
   ipcMain.handle('dialog:openDirectory', async () => {
     const res = await dialog.showOpenDialog(mainWindow, {
       properties: ['openDirectory', 'createDirectory'],
@@ -266,7 +385,6 @@ function setupIpcHandlers() {
     return null;
   });
 
-  // Show item in Finder / Explorer
   ipcMain.handle('shell:showItemInFolder', async (event, filePath) => {
     if (!filePath) return false;
     let fullPath = filePath;
@@ -277,7 +395,6 @@ function setupIpcHandlers() {
       shell.showItemInFolder(fullPath);
       return true;
     }
-    // If specific file doesn't exist, open its directory or root output dir
     const outputDir = path.join(ROOT_DIR, 'data', 'outputs');
     if (fs.existsSync(outputDir)) {
       shell.openPath(outputDir);
@@ -286,7 +403,6 @@ function setupIpcHandlers() {
     return false;
   });
 
-  // Open external URL in default browser
   ipcMain.handle('shell:openExternal', async (event, url) => {
     if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
       await shell.openExternal(url);
@@ -295,7 +411,6 @@ function setupIpcHandlers() {
     return false;
   });
 
-  // Native notification
   ipcMain.handle('notify:jobCompleted', async (event, { title, body }) => {
     if (Notification.isSupported()) {
       new Notification({
@@ -308,7 +423,6 @@ function setupIpcHandlers() {
     return false;
   });
 
-  // App & Backend Information
   ipcMain.handle('app:getInfo', async () => {
     const isBackendReady = await checkBackendHealth();
     return {
@@ -319,14 +433,12 @@ function setupIpcHandlers() {
     };
   });
 
-  // Restart backend on demand
   ipcMain.handle('backend:restart', async () => {
     killPythonBackend();
     await startPythonBackend();
     return await waitForBackend();
   });
 
-  // Window Controls
   ipcMain.handle('window:minimize', () => mainWindow?.minimize());
   ipcMain.handle('window:maximize', () => {
     if (mainWindow?.isMaximized()) {
@@ -341,7 +453,6 @@ function setupIpcHandlers() {
 // --- APP LIFECYCLE ---
 
 app.whenReady().then(async () => {
-  // Set custom Dock icon on macOS
   if (process.platform === 'darwin' && app.dock) {
     try {
       const iconImg = nativeImage.createFromPath(APP_ICON_PATH);
@@ -354,15 +465,13 @@ app.whenReady().then(async () => {
   }
 
   setupIpcHandlers();
-
   createTray();
 
-  // Start Python Backend
+  // 1. Start Python Backend
   await startPythonBackend();
 
-  // Create UI Window
+  // 2. Create UI Window
   createMainWindow();
-
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

@@ -65,7 +65,7 @@ class EdgeTTSProvider(BaseTTSProvider):
             raise RuntimeError("edge-tts package is not installed.") from e
 
         if not voice:
-            voice = "en-US-AvaMultilingualNeural" if lang == "vi" else "en-US-AvaNeural"
+            voice = "vi-VN-HoaiMy-Fast" if lang == "vi" else "en-US-AvaNeural"
 
         # Voice style presets mapping for Vietnamese
         actual_voice = voice
@@ -74,28 +74,30 @@ class EdgeTTSProvider(BaseTTSProvider):
         caller_forced_rate = bool(rate and rate != "+0%")
 
         vlow = str(actual_voice or "").lower()
-        # Hoài My / gTTS / Kokoro-on-Vietnamese all sound bad for VI dubs.
-        # Multilingual Ava/Andrew speak Vietnamese with natural intonation.
-        if (
-            actual_voice == "gtts-vi"
-            or vlow.startswith("kokoro")
-            or "hoaimy" in vlow
-            or actual_voice in ("vi-VN-HoaiMyNeural", "vi-VN-HoaiMy-Fast", "vi-VN-HoaiMy-Warm")
-        ):
-            actual_voice = "en-US-AvaMultilingualNeural"
+        # UI presets resolve to the two native Vietnamese Edge voices with
+        # pacing tuned for short-form review and narration.
+        if actual_voice == "vi-VN-HoaiMy-Fast":
+            actual_voice = "vi-VN-HoaiMyNeural"
             if not caller_forced_rate:
-                actual_rate = "-3%"
+                actual_rate = "+10%"
+        elif actual_voice == "vi-VN-HoaiMy-Warm":
+            actual_voice = "vi-VN-HoaiMyNeural"
+            if not caller_forced_rate:
+                actual_rate = "-4%"
+            if actual_pitch == "+0Hz":
+                actual_pitch = "-2Hz"
         elif actual_voice == "vi-VN-NamMinh-Fast":
-            actual_voice = "en-US-AndrewMultilingualNeural"
+            actual_voice = "vi-VN-NamMinhNeural"
             if not caller_forced_rate:
                 actual_rate = "+8%"
         elif actual_voice == "vi-VN-NamMinh-Deep":
-            actual_voice = "en-US-AndrewMultilingualNeural"
+            actual_voice = "vi-VN-NamMinhNeural"
             if not caller_forced_rate:
                 actual_rate = "-6%"
-                actual_pitch = actual_pitch if caller_forced_rate else "-1Hz"
-        elif actual_voice == "vi-VN-NamMinhNeural":
-            actual_voice = "en-US-AndrewMultilingualNeural"
+            if actual_pitch == "+0Hz":
+                actual_pitch = "-3Hz"
+        elif actual_voice == "gtts-vi" or vlow.startswith("kokoro"):
+            actual_voice = "vi-VN-HoaiMyNeural"
 
         if not output_path:
             filename = f"edge_{hash(text) & 0xffffffff:08x}.mp3"
@@ -244,6 +246,8 @@ class VieNeuTTSProvider(BaseTTSProvider):
         selected_voice = (voice or "Adam").strip()
         if selected_voice.lower().startswith("vieneu:"):
             selected_voice = selected_voice.split(":", 1)[1].strip() or "Adam"
+        if "-" in selected_voice or selected_voice.lower() in {"female", "male", "neutral"}:
+            selected_voice = "Adam"
 
         def _synthesize() -> str:
             # The model is expensive to initialize and its inference state is not
@@ -305,7 +309,7 @@ class KokoroTTSProvider(BaseTTSProvider):
         except ImportError as e:
             logger.warning(f"Kokoro package not available ({e}). Falling back to Edge-TTS.")
             edge_prov = EdgeTTSProvider()
-            return await edge_prov.generate(text=text, lang="vi", voice="en-US-AvaMultilingualNeural", output_path=output_path)
+            return await edge_prov.generate(text=text, lang="vi", voice="vi-VN-HoaiMy-Fast", output_path=output_path)
 
         if not output_path:
             filename = f"kokoro_{hash(text) & 0xffffffff:08x}.wav"
@@ -338,7 +342,7 @@ class KokoroTTSProvider(BaseTTSProvider):
         except Exception as e:
             logger.warning(f"Kokoro-82M synthesis error ({e}). Falling back to Edge-TTS.")
             edge_prov = EdgeTTSProvider()
-            return await edge_prov.generate(text=text, lang="vi", voice="en-US-AvaMultilingualNeural", output_path=output_path)
+            return await edge_prov.generate(text=text, lang="vi", voice="vi-VN-HoaiMy-Fast", output_path=output_path)
 
         return output_path
 

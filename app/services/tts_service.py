@@ -7,6 +7,7 @@ supporting Edge-TTS, gTTS, and Coqui TTS engines integrated via app.modules.tts.
 
 import os
 import logging
+import re
 import subprocess
 import asyncio
 import shutil
@@ -25,13 +26,13 @@ SUPPORTED_ENGINES = [
 
 DEFAULT_VOICES = {
     "vi": {
-        "female": "en-US-AvaMultilingualNeural",
-        "male": "en-US-AndrewMultilingualNeural",
-        "elder_male": "en-US-AndrewMultilingualNeural",
-        "elder_female": "en-US-AvaMultilingualNeural",
-        "child": "en-US-EmmaMultilingualNeural",
-        "narrator": "en-US-AndrewMultilingualNeural",
-        "neutral": "en-US-AvaMultilingualNeural"
+        "female": "vi-VN-HoaiMy-Fast",
+        "male": "vi-VN-NamMinh-Fast",
+        "elder_male": "vi-VN-NamMinh-Deep",
+        "elder_female": "vi-VN-HoaiMy-Warm",
+        "child": "vi-VN-HoaiMyNeural",
+        "narrator": "vi-VN-NamMinh-Deep",
+        "neutral": "vi-VN-HoaiMy-Fast"
     },
     "en": {
         "female": "en-US-JennyNeural",
@@ -252,6 +253,39 @@ class TTSServiceError(Exception):
     pass
 
 
+def group_long_form_tts_segments(
+    segments: List[Dict[str, Any]],
+    min_segment_count: int = 60,
+) -> List[Dict[str, Any]]:
+    """Reduce remote TTS calls for long clips by joining nearby translated cues."""
+    if len(segments) < min_segment_count:
+        return segments
+
+    grouped: List[Dict[str, Any]] = []
+    for segment in segments:
+        current = dict(segment)
+        current["text"] = re.sub(r"\s+", " ", str(current.get("text") or "").strip())
+        if not grouped:
+            grouped.append(current)
+            continue
+
+        previous = grouped[-1]
+        gap = float(current["start_time"]) - float(previous["end_time"])
+        combined_span = float(current["end_time"]) - float(previous["start_time"])
+        combined_text = f"{previous.get('text', '').rstrip()} {current.get('text', '').lstrip()}".strip()
+        if gap <= 1.5 and combined_span <= 12.0 and len(combined_text) <= 180:
+            previous["text"] = combined_text
+            previous["end_time"] = float(current["end_time"])
+            previous["duration"] = combined_span
+            continue
+        grouped.append(current)
+
+    for index, segment in enumerate(grouped, start=1):
+        segment["index"] = index
+    logger.info("Grouped %d subtitle cues into %d long-form TTS requests", len(segments), len(grouped))
+    return grouped
+
+
 class TTSService:
     """Unified Speech Generation Manager."""
 
@@ -263,7 +297,7 @@ class TTSService:
     async def generate_speech_edge_tts(
         self,
         text: str,
-        voice: str = "en-US-AvaMultilingualNeural",
+        voice: str = "vi-VN-HoaiMy-Fast",
         output_path: Optional[str] = None,
         rate: str = "+0%",
         pitch: str = "+0Hz",
@@ -328,7 +362,7 @@ class TTSService:
     ) -> str:
         """Main method to synthesize speech based on engine selection with fallback strategy."""
         target_engine = (engine or self.default_engine or "edge-tts").lower()
-        selected_voice = voice or DEFAULT_VOICES.get(lang, {}).get("female", "en-US-AvaMultilingualNeural")
+        selected_voice = voice or DEFAULT_VOICES.get(lang, {}).get("female", "vi-VN-HoaiMy-Fast")
 
         # Voice id implies engine
         vlow = (selected_voice or "").lower()
@@ -336,6 +370,10 @@ class TTSService:
             target_engine = "kokoro"
         elif vlow.startswith("vieneu:"):
             target_engine = "vieneu"
+        elif vlow.startswith("vi-vn-"):
+            target_engine = "edge-tts"
+        elif vlow.startswith("en-us-") and "multilingual" in vlow and lang == "vi":
+            target_engine = "edge-tts"
         elif vlow.startswith("gtts") or vlow == "gtts-vi":
             target_engine = "gtts"
         elif vlow.startswith("melo"):
@@ -344,8 +382,8 @@ class TTSService:
         # Unknown Edge voice ids (kokoro-af_heart, HoaiMy-Fast already mapped in provider)
         EDGE_PREFIXES = ("vi-vn-", "en-us-", "en-gb-", "zh-cn-", "ja-jp-", "ko-kr-", "th-th-", "fr-fr-", "es-es-", "de-de-", "ru-ru-", "id-id-")
         if target_engine == "edge-tts" and selected_voice and not any(vlow.startswith(p) for p in EDGE_PREFIXES) and vlow not in ("gtts-vi",):
-            logger.warning(f"Unknown Edge-TTS voice '{selected_voice}', remapping to Ava multilingual")
-            selected_voice = "en-US-AvaMultilingualNeural"
+            logger.warning(f"Unknown Edge-TTS voice '{selected_voice}', remapping to the language default")
+            selected_voice = DEFAULT_VOICES.get(lang, {}).get("female", "vi-VN-HoaiMy-Fast")
 
         if target_engine in ("vieneu", "vieneu-tts"):
             provider = get_tts_provider("vieneu")
@@ -363,7 +401,7 @@ class TTSService:
             except Exception as e:
                 logger.warning(f"Kokoro TTS failed ({e}), falling back to Edge-TTS Hoài My")
                 target_engine = "edge-tts"
-                selected_voice = DEFAULT_VOICES.get(lang, {}).get("female", "en-US-AvaMultilingualNeural")
+                selected_voice = DEFAULT_VOICES.get(lang, {}).get("female", "vi-VN-HoaiMy-Fast")
 
         if target_engine in ("melo", "melo-tts"):
             try:
@@ -372,7 +410,7 @@ class TTSService:
             except Exception as e:
                 logger.warning(f"Melo TTS failed ({e}), falling back to Edge-TTS")
                 target_engine = "edge-tts"
-                selected_voice = DEFAULT_VOICES.get(lang, {}).get("female", "en-US-AvaMultilingualNeural")
+                selected_voice = DEFAULT_VOICES.get(lang, {}).get("female", "vi-VN-HoaiMy-Fast")
 
         if target_engine == "edge-tts":
             try:
@@ -418,15 +456,11 @@ class TTSService:
         for idx, item in enumerate(clips_sorted):
             clip_path = item["clip_path"]
             start = float(item["segment"]["start_time"])
-            dur = float(item.get("final_dur") or item["segment"].get("duration") or 0.3)
-            if idx + 1 < len(clips_sorted):
-                nxt = float(clips_sorted[idx + 1]["segment"]["start_time"])
-                dur = min(dur, max(0.10, nxt - start - 0.05))
             start_ms = max(0, int(start * 1000))
             inputs.extend(["-i", clip_path])
             label = f"a{idx}"
             filter_nodes.append(
-                f"[{idx}:a]aresample=44100,aformat=channel_layouts=stereo,atrim=0:{dur:.3f},asetpts=PTS-STARTPTS,adelay={start_ms}|{start_ms}:all=1[{label}]"
+                f"[{idx}:a]aresample=44100,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS,adelay={start_ms}|{start_ms}:all=1[{label}]"
             )
             map_labels.append(f"[{label}]")
 
@@ -460,13 +494,14 @@ class TTSService:
         self,
         srt_path: str,
         output_audio_path: str,
-        voice: str = "en-US-AvaMultilingualNeural",
+        voice: str = "vi-VN-HoaiMy-Fast",
         lang: str = "vi",
         engine: Optional[str] = None,
         total_duration: Optional[float] = None,
         enable_lipsync: bool = True,
+        timeline_speed: float = 1.0,
     ) -> Dict[str, Any]:
-        """Synthesizes synchronized TTS audio with DeepSeek AI dialogue localization and emotion prosody."""
+        """Synthesizes exact subtitle text and keeps its spoken timeline synchronized."""
         if not os.path.exists(srt_path):
             raise FileNotFoundError(f"SRT file not found: {srt_path}")
 
@@ -474,16 +509,20 @@ class TTSService:
         if not raw_segments:
             raise TTSServiceError(f"No valid subtitle segments found in SRT file: {srt_path}")
 
-        # 1. Localize script with DeepSeek AI Scriptwriter
-        from app.services.ai_scriptwriter_service import ai_scriptwriter_service
-        if ai_scriptwriter_service.is_available():
-            try:
-                segments = ai_scriptwriter_service.localize_script(raw_segments, target_lang=lang)
-            except Exception as e:
-                logger.warning(f"AI scriptwriter error: {e}. Using raw segments.")
-                segments = raw_segments
-        else:
-            segments = raw_segments
+        # Translation already produced this SRT. Rewriting it here made the visible
+        # subtitle and spoken script disagree, so TTS must use this exact text.
+        speed = max(0.1, float(timeline_speed or 1.0))
+        segments = [
+            {
+                **seg,
+                "start_time": float(seg["start_time"]) / speed,
+                "end_time": float(seg["end_time"]) / speed,
+                "duration": float(seg["duration"]) / speed,
+            }
+            for seg in raw_segments
+        ]
+        if (engine or self.default_engine or "edge-tts").lower() == "edge-tts":
+            segments = group_long_form_tts_segments(segments)
 
         temp_dir = tempfile.mkdtemp(prefix="tts_sync_")
         processed_clips = []
@@ -491,19 +530,26 @@ class TTSService:
         try:
             srt_max_end = max(seg["end_time"] for seg in segments) if segments else 0.0
             if total_duration is not None and total_duration > 0:
-                effective_total_duration = max(total_duration, srt_max_end)
+                effective_total_duration = max(total_duration / speed, srt_max_end)
             else:
                 effective_total_duration = srt_max_end
 
             async def _synth_one(seg, next_start: Optional[float] = None):
                 raw_clip_path = os.path.join(temp_dir, f"seg_{seg['index']}_raw.mp3")
                 scaled_clip_path = os.path.join(temp_dir, f"seg_{seg['index']}_scaled.wav")
-                text_to_speak = (seg.get("translated_text") or seg.get("text", "")).strip()
-                if not text_to_speak or text_to_speak.startswith("["):
+                text_to_speak = (seg.get("text") or "").strip()
+                if (
+                    not text_to_speak
+                    or text_to_speak.startswith("[")
+                    or not any(char.isalnum() for char in text_to_speak)
+                ):
+                    logger.info(
+                        "Skipping non-spoken TTS segment %s: %r",
+                        seg["index"],
+                        text_to_speak,
+                    )
                     return None
                 srt_dur = float(seg.get("duration") or 0.0)
-                if next_start is not None:
-                    srt_dur = min(srt_dur, max(0.18, float(next_start) - float(seg["start_time"]) - 0.04))
                 emotion = seg.get("emotion", "neutral")
                 rate_val = "+0%"
                 pitch_val = "+0Hz"
@@ -528,13 +574,12 @@ class TTSService:
                     elif emotion in ("surprised", "excited"):
                         rate_val = "+6%"
 
-                # Smart Voice Mapping: Tự động chọn giọng đọc dựa trên gender/role của nhân vật
+                # Keep an explicitly selected review voice consistent across every segment.
                 seg_gender = (seg.get("gender") or "neutral").lower().strip()
                 seg_voice = voice
                 if lang in DEFAULT_VOICES:
                     lang_voices = DEFAULT_VOICES[lang]
-                    is_default = not voice or voice in lang_voices.values() or voice == "en-US-AvaMultilingualNeural"
-                    if is_default:
+                    if not voice:
                         seg_voice = lang_voices.get(seg_gender) or lang_voices.get("female") or voice
 
                 try:
@@ -599,6 +644,39 @@ class TTSService:
                     elif isinstance(item, Exception):
                         logger.warning(f"TTS batch item failed: {item}")
 
+            # Preserve every spoken word. When a translated sentence needs more
+            # room, move the following cue forward and use the same adjusted
+            # timing for both the audio and the burned subtitle.
+            previous_end = 0.0
+            for item in sorted(processed_clips, key=lambda c: float(c["segment"]["start_time"])):
+                desired_start = float(item["segment"]["start_time"])
+                start = max(desired_start, previous_end + (0.04 if previous_end > 0 else 0.0))
+                duration = max(0.12, float(item.get("final_dur") or 0.0))
+                item["segment"]["start_time"] = start
+                item["segment"]["end_time"] = start + duration
+                item["segment"]["duration"] = duration
+                previous_end = start + duration
+
+            if processed_clips:
+                effective_total_duration = max(
+                    effective_total_duration,
+                    max(float(item["segment"]["end_time"]) for item in processed_clips),
+                )
+
+            aligned_srt_path = os.path.splitext(srt_path)[0] + ".aligned.srt"
+            aligned_lines = []
+            for idx, item in enumerate(sorted(processed_clips, key=lambda c: float(c["segment"]["start_time"])), start=1):
+                seg = item["segment"]
+                # Subtitles are burned before setpts=PTS/speed, so store their
+                # timestamps in the pre-speed timeline.
+                start = float(seg["start_time"]) * speed
+                end = float(seg["end_time"]) * speed
+                aligned_lines.append(
+                    f"{idx}\n{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}\n{seg['text']}\n"
+                )
+            with open(aligned_srt_path, "w", encoding="utf-8") as aligned_file:
+                aligned_file.write("\n".join(aligned_lines) + ("\n" if aligned_lines else ""))
+
             os.makedirs(os.path.dirname(os.path.abspath(output_audio_path)), exist_ok=True)
             if not processed_clips:
                 raise TTSServiceError("No TTS clips were generated from SRT segments")
@@ -611,6 +689,7 @@ class TTSService:
                 "output_audio_path": output_audio_path,
                 "segment_count": len(processed_clips),
                 "total_duration": effective_total_duration,
+                "aligned_srt_path": aligned_srt_path,
                 "clips": processed_clips
             }
         finally:

@@ -57,7 +57,7 @@ def _studio_reup_defaults(platform: str, overrides: Optional[dict] = None) -> Re
         "enable_lipsync": True,
         "vietsub_style": "auto",
         "burn_subtitles": True,
-        "tts_voice": "en-US-AvaMultilingualNeural",
+        "tts_voice": "vi-VN-HoaiMy-Fast",
         "tts_engine": "edge-tts",
         "target_lang": "vi",
         "source_lang": "zh" if platform in ("douyin", "kuaishou", "xiaohongshu") else "auto",
