@@ -9,6 +9,21 @@ let pythonProcess = null;
 let tray = null;
 let isQuitting = false;
 
+function requestCleanQuit(signal) {
+  if (isQuitting) return;
+  isQuitting = true;
+  console.log(`[Electron] Received ${signal}; shutting down cleanly...`);
+  app.quit();
+}
+
+// Dev runners stop child processes with signals. Translating them to app.quit()
+// lets macOS record a normal exit instead of showing its window-restore warning.
+process.once('SIGINT', () => requestCleanQuit('SIGINT'));
+process.once('SIGTERM', () => requestCleanQuit('SIGTERM'));
+if (process.platform === 'darwin') {
+  process.once('SIGHUP', () => requestCleanQuit('SIGHUP'));
+}
+
 // 1. Fix PATH on macOS GUI applications to reach Homebrew, Python, FFmpeg & Conda
 if (process.platform === 'darwin') {
   const home = process.env.HOME || '';
