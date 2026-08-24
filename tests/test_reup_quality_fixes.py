@@ -42,6 +42,37 @@ def test_persisted_job_progress_never_moves_backwards(tmp_path):
         manager.executor.shutdown(wait=False, cancel_futures=True)
 
 
+def test_job_claim_is_atomic_and_deleted_job_requests_abort(tmp_path):
+    from app.services.queue_manager import BatchQueueManager
+
+    manager = BatchQueueManager(db_path=str(tmp_path / "jobs.sqlite"), max_concurrent_jobs=1)
+    try:
+        job_id = manager.enqueue_job("input.mp4", "output.mp4")
+        assert manager._claim_pending_job(job_id) is True
+        assert manager._claim_pending_job(job_id) is False
+
+        assert manager.delete_job(job_id) is True
+        assert manager._abort_requested(job_id) is True
+    finally:
+        manager.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_backend_instance_lock_is_exclusive_and_recoverable(tmp_path):
+    from app.core.instance_lock import BackendInstanceLock
+
+    db_path = str(tmp_path / "jobs.sqlite")
+    first = BackendInstanceLock(db_path)
+    second = BackendInstanceLock(db_path)
+    try:
+        assert first.acquire() is True
+        assert second.acquire() is False
+        first.release()
+        assert second.acquire() is True
+    finally:
+        first.release()
+        second.release()
+
+
 def test_apple_vision_flag_defined_on_linux():
     assert HAS_APPLE_VISION is False or HAS_APPLE_VISION is True
 

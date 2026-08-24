@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.core.database import init_db
+from app.core.instance_lock import BackendInstanceLock
 from app.core.ws_manager import ws_manager
 from app.services.queue_manager import BatchQueueManager
 from app.scraper.manager import ScraperManager
@@ -43,34 +44,46 @@ _seed_sample_media()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager handling application startup and shutdown events."""
+    instance_lock = BackendInstanceLock(settings.DB_PATH)
+    if not instance_lock.acquire():
+        raise RuntimeError(
+            f"Another backend instance already owns the job database: {settings.DB_PATH}"
+        )
+
     logger.info("Initializing application storage directories...")
-    settings.ensure_directories()
-    _seed_sample_media()
+    queue_mgr = None
+    try:
+        settings.ensure_directories()
+        _seed_sample_media()
 
-    logger.info(f"Initializing SQLite database schema at: {settings.DB_PATH}")
-    init_db(settings.DB_PATH)
+        logger.info(f"Initializing SQLite database schema at: {settings.DB_PATH}")
+        init_db(settings.DB_PATH)
 
-    logger.info("Starting Batch Queue Manager workers...")
-    queue_mgr = BatchQueueManager(
-        db_path=settings.DB_PATH,
-        max_concurrent_jobs=settings.MAX_CONCURRENT_JOBS
-    )
-    scraper_mgr = ScraperManager(output_dir=settings.RAW_INPUT_DIR)
+        logger.info("Starting Batch Queue Manager workers...")
+        queue_mgr = BatchQueueManager(
+            db_path=settings.DB_PATH,
+            max_concurrent_jobs=settings.MAX_CONCURRENT_JOBS
+        )
+        scraper_mgr = ScraperManager(output_dir=settings.RAW_INPUT_DIR)
 
-    # Register WebSocket broadcast callback
-    queue_mgr.register_callback(ws_manager.on_queue_update)
-    await queue_mgr.start()
+        # Register WebSocket broadcast callback
+        queue_mgr.register_callback(ws_manager.on_queue_update)
+        await queue_mgr.start()
 
-    # Store singletons on app.state
-    app.state.queue_manager = queue_mgr
-    app.state.ws_manager = ws_manager
-    app.state.scraper_manager = scraper_mgr
+        # Store singletons on app.state
+        app.state.queue_manager = queue_mgr
+        app.state.ws_manager = ws_manager
+        app.state.scraper_manager = scraper_mgr
 
-    yield
-
-    logger.info("Stopping Batch Queue Manager workers...")
-    await queue_mgr.stop()
-    logger.info("Application shutdown complete.")
+        yield
+    finally:
+        try:
+            if queue_mgr is not None:
+                logger.info("Stopping Batch Queue Manager workers...")
+                await queue_mgr.stop()
+        finally:
+            instance_lock.release()
+            logger.info("Application shutdown complete.")
 
 
 app = FastAPI(
@@ -234,4 +247,3 @@ async def frontend_gateway(full_path: str, request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.main:app", host=settings.HOST, port=settings.PORT, reload=True)
-

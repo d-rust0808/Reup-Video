@@ -123,7 +123,21 @@ class BatchQueueManager:
         if self._shutdown.is_set():
             return True
         job = self.get_job(job_id)
-        return bool(job and (job.get("status") or "").upper() == "CANCELLED")
+        return not job or (job.get("status") or "").upper() == "CANCELLED"
+
+    def _claim_pending_job(self, job_id: str) -> bool:
+        """Atomically reserves a queued job so duplicate queue entries cannot run it twice."""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'STARTING', updated_at = ?
+                WHERE job_id = ? AND UPPER(status) IN ('PENDING', 'QUEUED')
+                """,
+                (_utc_now_iso(), job_id),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
 
     def _stage_progress_callback(self, job_id: str, stage: str) -> Callable[[float], None]:
         """Progress sink that doubles as the cancellation checkpoint for worker threads.
@@ -144,7 +158,7 @@ class BatchQueueManager:
         job_ids = []
         with self._get_conn() as conn:
             cursor = conn.execute(
-                "SELECT job_id FROM jobs WHERE status IN ('PENDING', 'DOWNLOADING', 'WATERMARK_REMOVAL', 'REUP_TRANSFORM', 'PROCESSING')"
+                "SELECT job_id FROM jobs WHERE status IN ('PENDING', 'QUEUED', 'STARTING', 'DOWNLOADING', 'WATERMARK_REMOVAL', 'REUP_TRANSFORM', 'PROCESSING')"
             )
             rows = cursor.fetchall()
             for row in rows:
@@ -1233,8 +1247,8 @@ class BatchQueueManager:
 
     async def _process_job_pipeline(self, job_id: str) -> None:
         """Executes full 4-stage job pipeline asynchronously in thread executor."""
-        job = self.get_job(job_id)
-        if not job or job["status"] == "CANCELLED":
+        if not self._claim_pending_job(job_id):
+            logger.info(f"Skipping job {job_id}: it is missing, cancelled, or already claimed")
             return
 
         loop = asyncio.get_running_loop()

@@ -38,6 +38,7 @@ const ROOT_DIR = isDev
   : (fs.existsSync(path.join(process.resourcesPath, 'app')) ? process.resourcesPath : path.resolve(__dirname, '..', '..'));
 const BACKEND_PORT = 8000;
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
+const ELECTRON_MANAGES_BACKEND = !isDev;
 
 // --- PYTHON BACKEND LIFECYCLE ---
 
@@ -137,9 +138,9 @@ function findPythonExecutable() {
   return process.platform === 'win32' ? 'python.exe' : 'python3';
 }
 
-function checkBackendHealth() {
+function checkBackendHealth(timeout = 3000) {
   return new Promise((resolve) => {
-    const req = http.get(`${BACKEND_URL}/health`, { timeout: 3000 }, (res) => {
+    const req = http.get(`${BACKEND_URL}/health`, { timeout }, (res) => {
       resolve(res.statusCode === 200);
     });
     req.on('error', () => resolve(false));
@@ -150,9 +151,9 @@ function checkBackendHealth() {
   });
 }
 
-async function waitForBackend(maxAttempts = 50, interval = 300) {
+async function waitForBackend(maxAttempts = 50, interval = 300, requestTimeout = 3000) {
   for (let i = 0; i < maxAttempts; i++) {
-    const healthy = await checkBackendHealth();
+    const healthy = await checkBackendHealth(requestTimeout);
     if (healthy) return true;
     await new Promise((r) => setTimeout(r, interval));
   }
@@ -160,6 +161,15 @@ async function waitForBackend(maxAttempts = 50, interval = 300) {
 }
 
 async function startPythonBackend() {
+  if (!ELECTRON_MANAGES_BACKEND) {
+    console.log('[Electron] Development backend is managed by the npm dev process; waiting for health...');
+    const isReady = await waitForBackend(60, 500, 500);
+    if (!isReady) {
+      console.error('[Electron] Development backend did not become healthy. Electron will not start a duplicate backend.');
+    }
+    return isReady;
+  }
+
   const isAlreadyRunning = await waitForBackend(3, 300);
   if (isAlreadyRunning) {
     console.log('[Electron] Backend is already running on port', BACKEND_PORT);
@@ -434,6 +444,10 @@ function setupIpcHandlers() {
   });
 
   ipcMain.handle('backend:restart', async () => {
+    if (!ELECTRON_MANAGES_BACKEND) {
+      console.log('[Electron] Backend restart is delegated to the npm dev process.');
+      return await waitForBackend(60, 500, 500);
+    }
     killPythonBackend();
     await startPythonBackend();
     return await waitForBackend();
@@ -467,10 +481,7 @@ app.whenReady().then(async () => {
   setupIpcHandlers();
   createTray();
 
-  // 1. Start Python Backend
-  await startPythonBackend();
-
-  // 2. Create UI Window
+  // Show the UI immediately while the backend is starting or recovering jobs.
   createMainWindow();
 
   app.on('activate', () => {
@@ -480,6 +491,11 @@ app.whenReady().then(async () => {
       mainWindow.show();
     }
   });
+
+  const backendReady = await startPythonBackend();
+  if (!backendReady) {
+    console.error('[Electron] Backend is unavailable; the UI remains open so the error can be surfaced and retried.');
+  }
 });
 
 app.on('before-quit', () => {
