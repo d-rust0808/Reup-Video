@@ -210,7 +210,7 @@ def test_lipsync_default_on():
     assert cfg.vietsub_style == "dub"
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_synchronized_tts_uses_exact_srt_text_without_cutting(monkeypatch, tmp_path):
     from app.services.tts_service import get_audio_duration, parse_srt_segments, tts_service
 
@@ -250,7 +250,7 @@ async def test_synchronized_tts_uses_exact_srt_text_without_cutting(monkeypatch,
     assert get_audio_duration(str(output)) > 0.9
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_synchronized_tts_skips_punctuation_only_cues(monkeypatch, tmp_path):
     from app.services.tts_service import parse_srt_segments, tts_service
 
@@ -354,7 +354,7 @@ def test_default_vietnamese_engine_is_native_edge_tts():
     assert migrated.tts_engine == "edge-tts"
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_vieneu_provider_uses_local_preset_voice(tmp_path, monkeypatch):
     from app.modules.tts.providers import VieNeuTTSProvider
 
@@ -387,7 +387,7 @@ async def test_vieneu_provider_uses_local_preset_voice(tmp_path, monkeypatch):
     assert output.stat().st_size > 256
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_native_vietnamese_review_presets_map_to_edge_voices(tmp_path, monkeypatch):
     from app.modules.tts.providers import EdgeTTSProvider
 
@@ -424,7 +424,7 @@ async def test_native_vietnamese_review_presets_map_to_edge_voices(tmp_path, mon
     assert calls[1]["pitch"] == "-3Hz"
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_native_vietnamese_voice_overrides_stale_engine(tmp_path, monkeypatch):
     from app.services.tts_service import tts_service
 
@@ -450,7 +450,7 @@ async def test_native_vietnamese_voice_overrides_stale_engine(tmp_path, monkeypa
     assert calls["voice"] == "vi-VN-HoaiMy-Fast"
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_voice_preview_uses_selected_language_and_engine(tmp_path, monkeypatch):
     from app.api.process import VoicePreviewRequest, preview_voice
     from app.config import settings
