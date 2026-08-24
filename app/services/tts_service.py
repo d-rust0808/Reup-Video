@@ -17,12 +17,31 @@ from app.modules.tts.providers import get_tts_provider
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_ENGINES = ["edge-tts", "kokoro", "kokoro-tts", "kokoro-82m", "gtts", "coqui-tts", "melo-tts", "melo"]
+SUPPORTED_ENGINES = [
+    "vieneu", "vieneu-tts", "edge-tts", "kokoro", "kokoro-tts", "kokoro-82m",
+    "gtts", "coqui-tts", "melo-tts", "melo"
+]
 
 
 DEFAULT_VOICES = {
-    "vi": {"female": "en-US-AvaMultilingualNeural", "male": "en-US-AndrewMultilingualNeural"},
-    "en": {"female": "en-US-AvaNeural", "male": "en-US-AndrewNeural"},
+    "vi": {
+        "female": "en-US-AvaMultilingualNeural",
+        "male": "en-US-AndrewMultilingualNeural",
+        "elder_male": "en-US-AndrewMultilingualNeural",
+        "elder_female": "en-US-AvaMultilingualNeural",
+        "child": "en-US-EmmaMultilingualNeural",
+        "narrator": "en-US-AndrewMultilingualNeural",
+        "neutral": "en-US-AvaMultilingualNeural"
+    },
+    "en": {
+        "female": "en-US-JennyNeural",
+        "male": "en-US-GuyNeural",
+        "elder_male": "en-US-RyanNeural",
+        "elder_female": "en-US-AriaNeural",
+        "child": "en-US-JennyNeural",
+        "narrator": "en-US-AriaNeural",
+        "neutral": "en-US-AvaNeural"
+    },
     "zh": {"female": "zh-CN-XiaoxiaoNeural", "male": "zh-CN-YunjianNeural"},
     "ja": {"female": "ja-JP-NanamiNeural", "male": "ja-JP-KeitaNeural"},
     "ko": {"female": "ko-KR-SunHiNeural", "male": "ko-KR-InJoonNeural"},
@@ -315,6 +334,8 @@ class TTSService:
         vlow = (selected_voice or "").lower()
         if vlow.startswith("kokoro"):
             target_engine = "kokoro"
+        elif vlow.startswith("vieneu:"):
+            target_engine = "vieneu"
         elif vlow.startswith("gtts") or vlow == "gtts-vi":
             target_engine = "gtts"
         elif vlow.startswith("melo"):
@@ -325,6 +346,15 @@ class TTSService:
         if target_engine == "edge-tts" and selected_voice and not any(vlow.startswith(p) for p in EDGE_PREFIXES) and vlow not in ("gtts-vi",):
             logger.warning(f"Unknown Edge-TTS voice '{selected_voice}', remapping to Ava multilingual")
             selected_voice = "en-US-AvaMultilingualNeural"
+
+        if target_engine in ("vieneu", "vieneu-tts"):
+            provider = get_tts_provider("vieneu")
+            return await provider.generate(
+                text=text,
+                lang=lang,
+                voice=selected_voice,
+                output_path=output_path,
+            )
 
         if target_engine in ("kokoro", "kokoro-tts", "kokoro-82m"):
             try:
@@ -498,11 +528,20 @@ class TTSService:
                     elif emotion in ("surprised", "excited"):
                         rate_val = "+6%"
 
+                # Smart Voice Mapping: Tự động chọn giọng đọc dựa trên gender/role của nhân vật
+                seg_gender = (seg.get("gender") or "neutral").lower().strip()
+                seg_voice = voice
+                if lang in DEFAULT_VOICES:
+                    lang_voices = DEFAULT_VOICES[lang]
+                    is_default = not voice or voice in lang_voices.values() or voice == "en-US-AvaMultilingualNeural"
+                    if is_default:
+                        seg_voice = lang_voices.get(seg_gender) or lang_voices.get("female") or voice
+
                 try:
                     await self.generate_speech(
                         text=text_to_speak,
                         lang=lang,
-                        voice=voice,
+                        voice=seg_voice,
                         engine=engine,
                         output_path=raw_clip_path,
                         rate=rate_val,

@@ -45,7 +45,7 @@ async def list_outputs(request: Request):
     seen = set()
     for j in completed_jobs:
         out_p = j.get("output_file_path") or j.get("output_path")
-        if out_p and os.path.exists(out_p):
+        if out_p and os.path.exists(out_p) and os.path.getsize(out_p) > 0:
             seen.add(os.path.abspath(out_p))
             raw_cfg = j.get("reup_config") or {}
             if isinstance(raw_cfg, str):
@@ -72,7 +72,7 @@ async def list_outputs(request: Request):
             if not fname.endswith(".mp4"):
                 continue
             path = os.path.join(out_dir, fname)
-            if not os.path.isfile(path):
+            if not os.path.isfile(path) or os.path.getsize(path) == 0:
                 continue
             abs_p = os.path.abspath(path)
             if abs_p in seen:
@@ -273,6 +273,31 @@ def _purge_orphan_outputs(job_ids: List[str]) -> int:
     return purged
 
 
+def _purge_all_disk_outputs() -> int:
+    """
+    Removes every top-level .mp4 in OUTPUT_DIR.
+    This mirrors exactly what list_outputs() exposes (see the OUTPUT_DIR scan above),
+    so "clear all" also wipes files whose DB rows are already gone; otherwise they
+    reappear on the next reload.
+    """
+    out_dir = getattr(settings, "OUTPUT_DIR", "data/outputs")
+    if not os.path.isdir(out_dir):
+        return 0
+    purged = 0
+    for fname in os.listdir(out_dir):
+        if not fname.endswith(".mp4"):
+            continue
+        path = os.path.join(out_dir, fname)
+        if not os.path.isfile(path):
+            continue
+        try:
+            os.remove(path)
+            purged += 1
+        except OSError as e:
+            logger.warning(f"Could not delete output file {path}: {e}")
+    return purged
+
+
 @router.delete("/outputs")
 async def clear_all_outputs(request: Request):
     """
@@ -280,13 +305,12 @@ async def clear_all_outputs(request: Request):
     """
     qm = _get_queue_manager(request)
     completed = qm.list_jobs(status_filter="COMPLETED")
-    deleted_count = 0
     for j in completed:
-        if qm.delete_job(j["job_id"]):
-            deleted_count += 1
+        qm.delete_job(j["job_id"])
 
-    extras = _purge_orphan_outputs([j["job_id"] for j in completed])
-    deleted_count += extras
+    # Count from disk instead of DB rows: orphan files (no DB row) are the ones
+    # that used to survive this endpoint.
+    deleted_count = _purge_all_disk_outputs()
 
     return {
         "deleted_count": deleted_count,

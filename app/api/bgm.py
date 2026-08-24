@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import os
 import tempfile
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -17,9 +17,11 @@ from app.services.bgm_library import (
     delete_bgm,
     harvest_bgm,
     import_audio_file,
+    import_remote_track,
     load_catalog,
     resolve_bgm,
 )
+from app.services.bgm_providers import available_providers, search_tracks
 
 router = APIRouter()
 
@@ -31,12 +33,82 @@ class ExtractBgmRequest(BaseModel):
     title: Optional[str] = None
 
 
+class ImportBgmRequest(BaseModel):
+    """One normalised row returned by GET /bgm/search."""
+
+    audio_url: str
+    provider: Optional[str] = None
+    external_id: Optional[str] = None
+    title: Optional[str] = None
+    artist: Optional[str] = None
+    license: Optional[str] = None
+    license_url: Optional[str] = None
+    attribution: Optional[str] = None
+    page_url: Optional[str] = None
+
+
 @router.get("/bgm")
 async def list_bgm():
     items = load_catalog()
     for it in items:
         it["stream_url"] = f"/api/v1/bgm/{it['id']}/audio"
     return {"items": items, "count": len(items)}
+
+
+@router.get("/bgm/providers")
+async def list_bgm_providers():
+    """Which online music catalogs are usable right now."""
+    return {"providers": available_providers()}
+
+
+@router.get("/bgm/search")
+async def search_online_bgm(
+    q: str = Query(..., min_length=1, description="Từ khóa tìm nhạc"),
+    provider: str = Query("openverse", description="openverse | jamendo | all"),
+    limit: int = Query(20, ge=1, le=50),
+    page: int = Query(1, ge=1),
+    instrumental: bool = Query(False, description="Chỉ lấy bản không lời"),
+    commercial_only: bool = Query(True, description="Chỉ license cho phép thương mại + chỉnh sửa"),
+    min_duration: float = Query(0, ge=0, description="Thời lượng tối thiểu (giây)"),
+    max_duration: float = Query(0, ge=0, description="Thời lượng tối đa (giây)"),
+):
+    try:
+        result = search_tracks(
+            q,
+            provider=provider,
+            limit=limit,
+            page=page,
+            instrumental=instrumental,
+            commercial_only=commercial_only,
+            min_duration=min_duration,
+            max_duration=max_duration,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    known: Dict[str, str] = {}
+    for it in load_catalog():
+        ext = str(it.get("external_id") or "")
+        if ext:
+            known[f"{it.get('provider') or ''}:{ext}"] = it["id"]
+
+    items: List[Dict[str, Any]] = result["items"]
+    for it in items:
+        it["in_library"] = known.get(f"{it['provider']}:{it['external_id']}")
+    return result
+
+
+@router.post("/bgm/import")
+async def import_online_bgm(req: ImportBgmRequest):
+    """Download a searched track into the local library."""
+    try:
+        item = import_remote_track(req.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Không tải được bản nhạc: {e}")
+    item["stream_url"] = f"/api/v1/bgm/{item['id']}/audio"
+    return {"item": item}
 
 
 @router.post("/bgm/extract")

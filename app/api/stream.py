@@ -123,6 +123,8 @@ async def stream_video(
         raise HTTPException(status_code=404, detail=f"Media file on disk not found")
 
     file_size = os.path.getsize(file_path)
+    if file_size == 0:
+        raise HTTPException(status_code=400, detail="Media file is empty")
 
     # HEAD request support for browser media players (Safari, Chrome)
     if request.method == "HEAD":

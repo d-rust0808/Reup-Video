@@ -51,7 +51,7 @@ function findPythonExecutable() {
 
 function checkBackendHealth() {
   return new Promise((resolve) => {
-    const req = http.get(`${BACKEND_URL}/health`, { timeout: 1500 }, (res) => {
+    const req = http.get(`${BACKEND_URL}/health`, { timeout: 4000 }, (res) => {
       resolve(res.statusCode === 200);
     });
     req.on('error', () => resolve(false));
@@ -72,7 +72,9 @@ async function waitForBackend(maxAttempts = 40, interval = 300) {
 }
 
 async function startPythonBackend() {
-  const isAlreadyRunning = await checkBackendHealth();
+  // Retry the probe: when a job saturates the CPU, one slow /health must not make
+  // us spawn a second uvicorn that then fails to bind port 8000.
+  const isAlreadyRunning = await waitForBackend(3, 400);
   if (isAlreadyRunning) {
     console.log('[Electron] Backend is already running on port', BACKEND_PORT);
     return;
@@ -172,7 +174,7 @@ function createMainWindow() {
     console.log(`[Renderer] ${message}`);
   });
 
-  const devServerUrl = process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:3000';
+  const devServerUrl = process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5273';
 
   mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
     console.warn(`[Electron] Failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);

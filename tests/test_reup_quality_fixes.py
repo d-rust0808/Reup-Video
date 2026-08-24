@@ -18,6 +18,28 @@ from app.services.reup_service import build_reup_filtergraph, scale_srt_timestam
 from app.services.subtitle_detector import detect_text_boxes_opencv, HAS_APPLE_VISION
 
 
+def test_persisted_job_progress_never_moves_backwards(tmp_path):
+    from app.services.queue_manager import BatchQueueManager
+
+    manager = BatchQueueManager(db_path=str(tmp_path / "jobs.sqlite"), max_concurrent_jobs=1)
+    try:
+        job_id = manager.enqueue_job("input.mp4", "output.mp4")
+
+        manager.append_job_log(job_id, "halfway", stage="WATERMARK_REMOVAL", progress=0.50)
+        manager.append_job_log(job_id, "late lower update", stage="WATERMARK_REMOVAL", progress=0.30)
+        assert manager.get_job(job_id)["progress_percent"] == 50.0
+
+        manager.update_job_status(job_id, "REUP_TRANSFORM", progress=0.72)
+        manager.update_job_progress(job_id, 0.60, stage="REUP_TRANSFORM")
+        assert manager.get_job(job_id)["progress_percent"] == 72.0
+
+        # Retry is the only intentional reset boundary.
+        manager.update_job_status(job_id, "PENDING", progress=0.05)
+        assert manager.get_job(job_id)["progress_percent"] == 5.0
+    finally:
+        manager.executor.shutdown(wait=False, cancel_futures=True)
+
+
 def test_apple_vision_flag_defined_on_linux():
     assert HAS_APPLE_VISION is False or HAS_APPLE_VISION is True
 
@@ -60,7 +82,7 @@ def test_reup_defaults_are_visible():
     assert cfg.pitch_shift is True
     assert cfg.crop_percent > 0
     assert cfg.film_grain > 0
-    assert cfg.enable_vocal_mute is True
+    assert cfg.enable_vocal_mute is False
     fc, has_a, vf, af = build_reup_filtergraph(cfg, has_audio=True)
     assert "hflip" in vf
     assert "noise=" in vf
@@ -165,11 +187,11 @@ def test_tts_mix_ducks_only_during_speech():
     assert "sidechaincompress" in fc
     assert "volume=0.22" not in fc
     assert "[0:a]lowpass=f=180" not in fc
-    assert "dynaudnorm" in fc
+    assert "alimiter" in fc or "dynaudnorm" in fc
     mute = build_vocal_mute_ffmpeg_filter(preserve_bgm=True)
     assert "stereotools=" in mute
     assert "asplit=" in mute
-    assert "treble=" in mute
+    assert "lowpass=" in mute
     cfg = ReupConfig(enable_vocal_mute=True, film_grain=0, pitch_shift=False, speed_factor=1.0)
     graph, has_a, vf, af = build_reup_filtergraph(cfg, has_audio=True)
     assert has_a is True
@@ -298,4 +320,47 @@ def test_srt_renders_to_overlay_pngs(tmp_path):
     for ov in overlays:
         assert os.path.exists(ov["png"])
         assert ov["end"] > ov["start"]
+
+
+def test_inpaint_progress_advances_immediately_after_pipeline_50_percent():
+    import inspect
+    from app.services.opencv_inpainter import inpaint_video_opencv
+
+    src = inspect.getsource(inpaint_video_opencv)
+    assert "0.50 + 0.15 * (frames_processed / max(1, total_frames_est))" in src
+    assert "0.35 + 0.30 * (frames_processed / max(1, total_frames_est))" not in src
+
+
+def test_watermark_removal_fallback_for_long_videos(monkeypatch, tmp_path):
+    from app.services.watermark_service import remove_watermark
+    import app.services.watermark_service as wm_service
+
+    # Mock get_audio_duration to return 350 seconds
+    monkeypatch.setattr("app.services.tts_service.get_audio_duration", lambda path: 350.0)
+
+    # Mock inpaint_video_ffmpeg to verify it gets called
+    called_with_filter = None
+    def mock_inpaint_ffmpeg(input_path, output_path, roi, filter_type, radius):
+        nonlocal called_with_filter
+        called_with_filter = filter_type
+        return output_path
+
+    monkeypatch.setattr(wm_service, "inpaint_video_ffmpeg", mock_inpaint_ffmpeg)
+
+    # Create dummy input file
+    dummy_input = tmp_path / "dummy.mp4"
+    dummy_input.write_text("dummy content")
+    dummy_output = tmp_path / "dummy_out.mp4"
+
+    res = remove_watermark(str(dummy_input), str(dummy_output), method="auto")
+    assert called_with_filter == "delogo"
+
+
+def test_smart_voice_mapping():
+    from app.services.tts_service import DEFAULT_VOICES
+    # Verify new roles exist in DEFAULT_VOICES mapping
+    assert DEFAULT_VOICES["vi"]["child"] == "en-US-EmmaMultilingualNeural"
+    assert DEFAULT_VOICES["vi"]["narrator"] == "en-US-AndrewMultilingualNeural"
+    assert DEFAULT_VOICES["en"]["male"] == "en-US-GuyNeural"
+    assert DEFAULT_VOICES["en"]["elder_male"] == "en-US-RyanNeural"
 

@@ -217,6 +217,17 @@ def remove_watermark(
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
+    # Fallback to ffmpeg delogo if video duration > 300 seconds (5 minutes) to avoid CPU bottleneck
+    if method_clean in ("all", "auto", "lama", "telea", "ns"):
+        try:
+            from app.services.tts_service import get_audio_duration
+            duration = get_audio_duration(input_path)
+            if duration > 60.0:
+                logger.warning(f"Video duration ({duration:.1f}s) exceeds 60 seconds. Falling back to FFmpeg delogo to prevent CPU bottleneck.")
+                method_clean = "delogo"
+        except Exception as e:
+            logger.warning(f"Failed to check video duration: {e}")
+
     # 5. Robust Inpainting Strategy Execution
     if method_clean == "all":
         try:

@@ -159,7 +159,13 @@ def harvest_bgm(
         shutil.rmtree(work, ignore_errors=True)
 
 
-def import_audio_file(src_path: str, title: Optional[str] = None) -> Dict[str, Any]:
+def import_audio_file(
+    src_path: str,
+    title: Optional[str] = None,
+    *,
+    method: str = "upload",
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     if not src_path or not os.path.isfile(src_path):
         raise FileNotFoundError("Không tìm thấy file nhạc")
     track_id = f"bgm_{uuid.uuid4().hex[:10]}"
@@ -174,13 +180,54 @@ def import_audio_file(src_path: str, title: Optional[str] = None) -> Dict[str, A
         "path": dest,
         "duration": round(_duration_sec(dest), 2),
         "bytes": os.path.getsize(dest),
-        "method": "upload",
+        "method": method,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if extra:
+        item.update({k: v for k, v in extra.items() if k not in ("id", "file", "path", "bytes")})
     items = load_catalog()
     items.insert(0, item)
     save_catalog(items)
     return item
+
+
+def import_remote_track(track: Dict[str, Any]) -> Dict[str, Any]:
+    """Download a track found by app.services.bgm_providers and add it to the library.
+
+    `track` is one normalised provider row (needs at least audio_url).
+    License metadata is persisted so credits can be exported later.
+    """
+    from app.services.bgm_providers import download_track_audio  # local import: avoids httpx at import time
+
+    audio_url = (track or {}).get("audio_url") or ""
+    if not audio_url:
+        raise ValueError("Thiếu link nhạc để tải")
+
+    provider = (track.get("provider") or "online").strip().lower()
+    title = (track.get("title") or "Nhạc nền").strip()
+    artist = (track.get("artist") or "").strip()
+
+    work = os.path.join(bgm_dir(), "_work", f"dl_{uuid.uuid4().hex[:8]}")
+    os.makedirs(work, exist_ok=True)
+    tmp_audio = os.path.join(work, "download.bin")
+    try:
+        download_track_audio(audio_url, tmp_audio)
+        return import_audio_file(
+            tmp_audio,
+            title=f"{title} - {artist}" if artist else title,
+            method=provider,
+            extra={
+                "source_url": track.get("page_url") or audio_url,
+                "artist": artist,
+                "license": track.get("license") or "",
+                "license_url": track.get("license_url") or "",
+                "attribution": track.get("attribution") or "",
+                "provider": provider,
+                "external_id": str(track.get("external_id") or ""),
+            },
+        )
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def resolve_bgm(track_id: str) -> Optional[str]:

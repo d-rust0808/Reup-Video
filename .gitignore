@@ -88,6 +88,8 @@ app/modules/tmp/
 app/modules/output/
 app/modules/models/*
 !app/modules/models/.gitkeep
+app/modules/videotrans/cfg.json
+app/modules/videotrans/params.json
 
 # Large AI model weights / binaries
 *.onnx

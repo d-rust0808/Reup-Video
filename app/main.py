@@ -100,7 +100,7 @@ app.include_router(api_router, prefix="/api/v1")
 FRONTEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend"))
 FRONTEND_DIST = os.path.join(FRONTEND_ROOT, "dist")
 FRONTEND_PUBLIC = os.path.join(FRONTEND_ROOT, "public")
-VITE_ORIGIN = os.environ.get("VITE_ORIGIN", "http://127.0.0.1:8080")
+VITE_ORIGIN = os.environ.get("VITE_ORIGIN", "http://127.0.0.1:5273")
 
 if os.path.exists(FRONTEND_DIST):
     assets_dir = os.path.join(FRONTEND_DIST, "assets")

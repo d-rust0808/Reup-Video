@@ -38,7 +38,7 @@ class ReupPayload(BaseModel):
     contrast: Optional[float] = 1.02
     saturation: Optional[float] = 1.03
     modify_md5: Optional[bool] = True
-    enable_vocal_mute: Optional[bool] = True
+    enable_vocal_mute: Optional[bool] = False
     enable_tts: Optional[bool] = False
     enable_lipsync: Optional[bool] = True
     vietsub_style: Optional[str] = "dub"
@@ -58,12 +58,16 @@ class ReupPayload(BaseModel):
     post_tags: Optional[List[str]] = None
     publish_status: Optional[str] = "READY"
     overlays: Optional[List[dict]] = None
-    frame_enabled: Optional[bool] = True
+    frame_enabled: Optional[bool] = False
     frame_color: Optional[str] = "black"
     frame_thickness: Optional[int] = 16
-    target_platforms: Optional[List[str]] = None
     bgm_path: Optional[str] = None
     bgm_volume: Optional[float] = 0.85
+    target_platforms: Optional[List[str]] = None
+    subtitle_bottom_crop: Optional[float] = 0.0
+    vocal_mute_strategy: Optional[str] = "demucs"
+    trim_start_sec: Optional[float] = 0.0
+    trim_end_sec: Optional[float] = 0.0
 
 
 class ProcessJobRequest(BaseModel):
@@ -85,7 +89,7 @@ class ProcessJobRequest(BaseModel):
     contrast: Optional[float] = 1.02
     saturation: Optional[float] = 1.03
     modify_md5: Optional[bool] = True
-    enable_vocal_mute: Optional[bool] = True
+    enable_vocal_mute: Optional[bool] = False
     enable_tts: Optional[bool] = False
     enable_lipsync: Optional[bool] = True
     vietsub_style: Optional[str] = "dub"
@@ -105,12 +109,16 @@ class ProcessJobRequest(BaseModel):
     post_tags: Optional[List[str]] = None
     publish_status: Optional[str] = "READY"
     overlays: Optional[List[dict]] = None
-    frame_enabled: Optional[bool] = True
+    frame_enabled: Optional[bool] = False
     frame_color: Optional[str] = "black"
     frame_thickness: Optional[int] = 16
-    target_platforms: Optional[List[str]] = None
     bgm_path: Optional[str] = None
     bgm_volume: Optional[float] = 0.85
+    target_platforms: Optional[List[str]] = None
+    subtitle_bottom_crop: Optional[float] = 0.0
+    vocal_mute_strategy: Optional[str] = "demucs"
+    trim_start_sec: Optional[float] = 0.0
+    trim_end_sec: Optional[float] = 0.0
 
     # Nested payload fields (from React frontend)
     watermark: Optional[WatermarkPayload] = None
@@ -276,13 +284,43 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         reup_post_caption = build_caption(reup_post_title, platform)
     reup_post_tags = (req.reup.post_tags if req.reup and req.reup.post_tags is not None else req.post_tags) or []
     reup_pub_status = (req.reup.publish_status if req.reup and req.reup.publish_status else req.publish_status) or "READY"
+    reup_platforms: List[str] = ["tiktok", "youtube_shorts", "facebook"]
+    if req.reup and req.reup.target_platforms:
+        reup_platforms = [str(p) for p in req.reup.target_platforms]
+    elif req.target_platforms:
+        reup_platforms = [str(p) for p in req.target_platforms]
+    reup_vocal_strategy = "demucs"
+    if req.reup and getattr(req.reup, "vocal_mute_strategy", None):
+        reup_vocal_strategy = req.reup.vocal_mute_strategy
+    elif getattr(req, "vocal_mute_strategy", None):
+        reup_vocal_strategy = req.vocal_mute_strategy
 
+    reup_bottom_crop = 0.0
+    val_bottom = req.reup.subtitle_bottom_crop if req.reup else req.subtitle_bottom_crop
+    if val_bottom is not None:
+        reup_bottom_crop = float(val_bottom)
+    if reup_bottom_crop >= 0.5:
+        reup_bottom_crop = reup_bottom_crop / 100.0
+
+    reup_trim_start = 0.0
+    val_tstart = req.reup.trim_start_sec if req.reup else req.trim_start_sec
+    if val_tstart is not None:
+        reup_trim_start = max(0.0, float(val_tstart))
+
+    reup_trim_end = 0.0
+    val_tend = req.reup.trim_end_sec if req.reup else req.trim_end_sec
+    if val_tend is not None:
+        reup_trim_end = max(0.0, float(val_tend))
 
     reup_cfg = ReupConfig(
         hflip=reup_hflip if reup_hflip is not None else True,
         speed_factor=reup_speed,
         pitch_shift=reup_pitch if reup_pitch is not None else True,
         crop_percent=reup_crop,
+        subtitle_bottom_crop=reup_bottom_crop,
+        trim_start_sec=reup_trim_start,
+        trim_end_sec=reup_trim_end,
+        vocal_mute_strategy=reup_vocal_strategy,
         brightness=reup_bright if reup_bright is not None else 0.01,
         contrast=reup_contrast if reup_contrast is not None else 1.02,
         saturation=reup_sat if reup_sat is not None else 1.03,
@@ -309,30 +347,26 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         tts_audio_path=(req.reup.tts_audio_path if req.reup and getattr(req.reup, "tts_audio_path", None) else req.tts_audio_path),
         overlays=_parse_overlays(req),
         frame_enabled=(
-            req.reup.frame_enabled if req.reup and getattr(req.reup, "frame_enabled", None) is not None
-            else (req.frame_enabled if getattr(req, "frame_enabled", None) is not None else True)
+            bool(req.reup.frame_enabled) if (req.reup and req.reup.frame_enabled is not None)
+            else bool(req.frame_enabled)
         ),
         frame_color=(
-            (req.reup.frame_color if req.reup and getattr(req.reup, "frame_color", None) else None)
-            or getattr(req, "frame_color", None)
+            (req.reup.frame_color if req.reup and req.reup.frame_color else None)
+            or req.frame_color
             or "black"
         ),
         frame_thickness=(
-            req.reup.frame_thickness if req.reup and getattr(req.reup, "frame_thickness", None) is not None
-            else (req.frame_thickness if getattr(req, "frame_thickness", None) is not None else 16)
+            req.reup.frame_thickness if req.reup and req.reup.frame_thickness is not None
+            else (req.frame_thickness if req.frame_thickness is not None else 16)
         ),
-        target_platforms=(
-            (req.reup.target_platforms if req.reup and getattr(req.reup, "target_platforms", None) else None)
-            or getattr(req, "target_platforms", None)
-            or ["tiktok", "youtube_shorts", "facebook"]
-        ),
+        target_platforms=reup_platforms,
         bgm_path=(
-            (req.reup.bgm_path if req.reup and getattr(req.reup, "bgm_path", None) else None)
-            or getattr(req, "bgm_path", None)
+            (req.reup.bgm_path if req.reup and req.reup.bgm_path else None)
+            or req.bgm_path
         ),
         bgm_volume=(
-            req.reup.bgm_volume if req.reup and getattr(req.reup, "bgm_volume", None) is not None
-            else (req.bgm_volume if getattr(req, "bgm_volume", None) is not None else 0.85)
+            req.reup.bgm_volume if req.reup and req.reup.bgm_volume is not None
+            else (req.bgm_volume if req.bgm_volume is not None else 0.85)
         ),
     )
 

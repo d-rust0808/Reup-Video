@@ -23,6 +23,7 @@ import {
   Frame,
   ChevronDown,
   Music,
+  Scissors,
 } from 'lucide-react';
 
 import { fetchChannels, getMediaUrl, uploadStudioOverlay, fetchBgmLibrary } from '../services/api';
@@ -32,7 +33,6 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
   const [loadingChannels, setLoadingChannels] = useState(false);
   const [showWmAdvanced, setShowWmAdvanced] = useState(false);
   const [bgmList, setBgmList] = useState([]);
-
 
   useEffect(() => {
     loadChannels();
@@ -56,6 +56,49 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
 
   const handleChange = (key, value) => {
     onChange({ ...options, [key]: value });
+  };
+
+  const handlePresetSelect = (presetId) => {
+    if (presetId === 'tiktok_clean') {
+      onChange({
+        ...options,
+        preset_id: 'tiktok_clean',
+        subtitle_bottom_crop: 7.0,
+        enable_vocal_mute: false,
+        burn_subtitles: false,
+        enable_tts: false,
+        wm_method: 'none',
+        hflip: false,
+        speed_ratio: 1.03,
+        crop_percent: 2.0,
+      });
+    } else if (presetId === 'tiktok_dub') {
+      onChange({
+        ...options,
+        preset_id: 'tiktok_dub',
+        subtitle_bottom_crop: 0.0,
+        enable_vocal_mute: false,
+        burn_subtitles: true,
+        enable_tts: true,
+        wm_method: 'none',
+        hflip: false,
+        speed_ratio: 1.03,
+        crop_percent: 2.0,
+      });
+    } else if (presetId === 'tiktok_original') {
+      onChange({
+        ...options,
+        preset_id: 'tiktok_original',
+        subtitle_bottom_crop: 0.0,
+        enable_vocal_mute: false,
+        burn_subtitles: false,
+        enable_tts: false,
+        wm_method: 'none',
+        hflip: false,
+        speed_ratio: 1.0,
+        crop_percent: 0.0,
+      });
+    }
   };
 
   const handleChannelSelect = (channelId) => {
@@ -94,794 +137,866 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
 
   const activeChannel = channels.find((c) => (c.channel_id || c.id) === options.channel_id);
 
+  const hasVertical = (options.target_platforms || []).includes('tiktok');
+  const hasHorizontal = (options.target_platforms || []).includes('youtube');
+
   return (
-    <div className="clean-panel rounded-3xl p-6 sm:p-7 shadow-xs space-y-6">
+    <div className="clean-panel rounded-3xl p-6 sm:p-7 shadow-xs space-y-6 max-w-7xl mx-auto">
       <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2 border-b border-slate-100 pb-3">
         <Wand2 className="w-5 h-5 text-blue-600" />
         Tùy chỉnh Reup
       </h3>
 
-      <div className="grid grid-cols-3 gap-2">
-        {[
-          { id: 'fast', method: 'telea', label: 'Nhanh', desc: 'Telea, bỏ LaMa' },
-          { id: 'balanced', method: 'auto', label: 'Cân bằng', desc: 'Telea + LaMa cách khung' },
-          { id: 'clean', method: 'lama', label: 'Sạch', desc: 'LaMa neural tối đa' },
-        ].map((p) => {
-          const on =
-            (p.method === 'auto' && (!options.wm_method || options.wm_method === 'auto' || options.wm_method === 'all')) ||
-            options.wm_method === p.method;
-          return (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => handleChange('wm_method', p.method)}
-              className={`text-left rounded-2xl border px-3 py-2.5 ${
-                on ? 'bg-blue-600 border-blue-700 text-white' : 'bg-white border-slate-200 hover:border-blue-300'
-              }`}
-            >
-              <span className="text-xs font-extrabold block">{p.label}</span>
-              <span className={`text-[10px] ${on ? 'text-blue-100' : 'text-slate-500'}`}>{p.desc}</span>
-            </button>
-          );
-        })}
-      </div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {/* Cột 1: Hình ảnh & FX */}
+        <div className="space-y-4 bg-slate-50/30 p-4 rounded-2xl border border-slate-100">
+          <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider flex items-center gap-1.5 pb-2 border-b border-slate-100">
+            <Tv className="w-4 h-4 text-blue-600" />
+            Hình ảnh & FX
+          </h4>
 
-      <div className="p-4 bg-emerald-50/70 rounded-2xl border border-emerald-200 space-y-2">
-        <div className="flex items-center justify-between">
-          <div>
-            <label className="text-xs font-extrabold text-slate-800 block">Tự xoá chữ & logo</label>
-            <span className="text-[11px] text-slate-600">
-              Hybrid Telea + LaMa — không khoanh ROI. Tắt nếu clip sạch sẵn.
-            </span>
-          </div>
-          <input
-            type="checkbox"
-            checked={options.wm_method !== 'none' && options.wm_method !== 'off' && options.wm_method !== 'disabled'}
-            onChange={(e) => handleChange('wm_method', e.target.checked ? 'auto' : 'none')}
-            className="w-4 h-4 rounded text-emerald-600 accent-emerald-600 border-slate-300 cursor-pointer"
-          />
-        </div>
-        <button
-          type="button"
-          onClick={() => setShowWmAdvanced((v) => !v)}
-          className="text-[10px] font-bold text-slate-500 hover:text-slate-800 inline-flex items-center gap-1"
-        >
-          <ChevronDown className={`w-3 h-3 transition ${showWmAdvanced ? 'rotate-180' : ''}`} />
-          Nâng cao (chọn tay thuật toán)
-        </button>
-        {showWmAdvanced && (
-      <div className="space-y-2.5 pt-1">
-        <div className="grid grid-cols-2 gap-2 text-xs">
-          {[
-            { id: 'auto', label: 'Tự động (LaMa + Telea)', desc: 'Chữ mỏng Telea, khối lớn LaMa neural' },
-            { id: 'all', label: 'All + delogo', desc: 'Inpaint rồi phủ nốt vệt sót' },
-            { id: 'crop', label: 'Chỉ cắt đáy', desc: 'Khi phụ đề dính cứng dưới chân' },
-            { id: 'none', label: 'Không xoá', desc: 'Giữ nguyên hình gốc' },
-          ].map((item) => {
-            const isSelected =
-              options.wm_method === item.id ||
-              (options.wm_method === 'opencv_telea' && item.id === 'auto');
-            return (
-              <label
-                key={item.id}
-                className={`flex flex-col p-3 rounded-2xl border cursor-pointer transition-all duration-150 ${
-                  isSelected
-                    ? 'bg-white border-emerald-400 text-slate-900 font-bold shadow-xs'
-                    : 'bg-white/70 border-slate-200 text-slate-600 hover:border-slate-300'
-                }`}
-              >
-                <div className="flex items-center space-x-2">
-                  <input
-                    type="radio"
-                    name="wm_method"
-                    value={item.id}
-                    checked={isSelected}
-                    onChange={() => handleChange('wm_method', item.id)}
-                    className="text-emerald-600 focus:ring-emerald-500"
-                  />
-                  <span className="text-xs font-bold text-slate-800">{item.label}</span>
-                </div>
-                <span className="text-[10px] text-slate-500 font-normal pl-5 mt-0.5">{item.desc}</span>
-              </label>
-            );
-          })}
-        </div>
-      </div>
-        )}
-      </div>
-
-      {/* Video & Audio Controls */}
-      <div className="space-y-3 pt-2 border-t border-slate-100">
-        {/* Horizontal Flip */}
-        <div className="flex items-center justify-between p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80">
-          <div className="flex items-center space-x-2.5">
-            <FlipHorizontal className="w-4 h-4 text-blue-600" />
-            <label className="text-xs font-bold text-slate-700 cursor-pointer" htmlFor="hflip-toggle">
-              Lật Ngang Video (HFlip)
-            </label>
-          </div>
-          <input
-            id="hflip-toggle"
-            type="checkbox"
-            checked={options.hflip}
-            onChange={(e) => handleChange('hflip', e.target.checked)}
-            className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer"
-          />
-        </div>
-
-        {/* Speed Ratio Slider */}
-        <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-2">
-          <div className="flex justify-between text-xs">
-            <span className="font-bold text-slate-700">Tốc Độ Video (Speed Factor)</span>
-            <span className="font-mono text-blue-600 font-bold">{options.speed_ratio}x</span>
-          </div>
-          <input
-            type="range"
-            min="0.80"
-            max="1.50"
-            step="0.01"
-            value={options.speed_ratio}
-            onChange={(e) => handleChange('speed_ratio', parseFloat(e.target.value))}
-            className="w-full accent-blue-600 bg-slate-200 rounded-lg cursor-pointer"
-          />
-        </div>
-
-        {/* Audio Pitch Shift */}
-        <div className="flex items-center justify-between p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80">
-          <div className="flex items-center space-x-2.5">
-            <Volume2 className="w-4 h-4 text-indigo-600" />
-            <label className="text-xs font-bold text-slate-700 cursor-pointer" htmlFor="pitch-toggle">
-              Đổi Tone Giọng Âm Thanh (+0.5 semitones)
-            </label>
-          </div>
-          <input
-            id="pitch-toggle"
-            type="checkbox"
-            checked={options.pitch_shift}
-            onChange={(e) => handleChange('pitch_shift', e.target.checked)}
-            className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer"
-          />
-        </div>
-
-        {/* Edge Crop Slider */}
-        <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-2">
-          <div className="flex justify-between text-xs">
-            <span className="font-bold text-slate-700">Cắt Mép Khung Hình (Edge Crop %)</span>
-            <span className="font-mono text-blue-600 font-bold">{options.crop_percent}%</span>
-          </div>
-          <input
-            type="range"
-            min="0.0"
-            max="5.0"
-            step="0.1"
-            value={options.crop_percent}
-            onChange={(e) => handleChange('crop_percent', parseFloat(e.target.value))}
-            className="w-full accent-blue-600 bg-slate-200 rounded-lg cursor-pointer"
-          />
-        </div>
-
-        {/* Color Sliders */}
-        <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-3">
-          <div className="flex items-center space-x-2 text-xs font-bold text-slate-700 uppercase tracking-wider">
-            <Palette className="w-4 h-4 text-purple-600" />
-            <span>Tinh Chỉnh Màu Sắc (Color Filters)</span>
-          </div>
-
-          <div className="grid grid-cols-3 gap-3 text-xs">
-            <div>
-              <span className="text-[10px] font-semibold text-slate-500 block mb-1">Độ Sáng</span>
-              <input
-                type="range"
-                min="-0.1"
-                max="0.1"
-                step="0.01"
-                value={options.brightness}
-                onChange={(e) => handleChange('brightness', parseFloat(e.target.value))}
-                className="w-full accent-blue-600 bg-slate-200 rounded-lg cursor-pointer"
-              />
-              <span className="text-[10px] font-mono text-blue-600 font-bold block text-right mt-0.5">
-                {options.brightness}
-              </span>
-            </div>
-
-            <div>
-              <span className="text-[10px] font-semibold text-slate-500 block mb-1">Độ Tương Phản</span>
-              <input
-                type="range"
-                min="0.8"
-                max="1.3"
-                step="0.01"
-                value={options.contrast}
-                onChange={(e) => handleChange('contrast', parseFloat(e.target.value))}
-                className="w-full accent-blue-600 bg-slate-200 rounded-lg cursor-pointer"
-              />
-              <span className="text-[10px] font-mono text-blue-600 font-bold block text-right mt-0.5">
-                {options.contrast}
-              </span>
-            </div>
-
-            <div>
-              <span className="text-[10px] font-semibold text-slate-500 block mb-1">Độ Bão Hòa</span>
-              <input
-                type="range"
-                min="0.8"
-                max="1.4"
-                step="0.01"
-                value={options.saturation}
-                onChange={(e) => handleChange('saturation', parseFloat(e.target.value))}
-                className="w-full accent-blue-600 bg-slate-200 rounded-lg cursor-pointer"
-              />
-              <span className="text-[10px] font-mono text-blue-600 font-bold block text-right mt-0.5">
-                {options.saturation}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Khung viền + logo — in thẳng vào video */}
-        <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-2.5">
-              <Frame className="w-4 h-4 text-slate-700 shrink-0" />
-              <div>
-                <label className="text-xs font-bold text-slate-700 block">Khung viền (in vào video)</label>
-                <span className="text-[10px] text-slate-500">Viền điện ảnh quanh clip, không che nội dung giữa</span>
-              </div>
-            </div>
-            <input
-              type="checkbox"
-              checked={options.frame_enabled !== false}
-              onChange={(e) => handleChange('frame_enabled', e.target.checked)}
-              className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer"
-            />
-          </div>
-          {options.frame_enabled !== false && (
-            <div className="grid grid-cols-2 gap-2">
-              <label className="text-[10px] font-bold text-slate-600">
-                Màu
-                <select
-                  value={options.frame_color || 'black'}
-                  onChange={(e) => handleChange('frame_color', e.target.value)}
-                  className="mt-1 w-full bg-white border border-slate-200 rounded-xl px-2 py-1.5 text-xs font-bold"
-                >
-                  <option value="black">Đen</option>
-                  <option value="white">Trắng</option>
-                  <option value="0xC9A227">Vàng gold</option>
-                  <option value="0x7C3AED">Tím</option>
-                </select>
-              </label>
-              <label className="text-[10px] font-bold text-slate-600">
-                Dày ({options.frame_thickness || 16}px)
-                <input
-                  type="range" min="6" max="36" step="2"
-                  value={options.frame_thickness || 16}
-                  onChange={(e) => handleChange('frame_thickness', parseInt(e.target.value, 10))}
-                  className="mt-2 w-full accent-blue-600"
-                />
-              </label>
-            </div>
-          )}
-          <div className="pt-1 border-t border-slate-200/80">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                <ImagePlus className="w-3.5 h-3.5" /> Logo / khung PNG
-              </span>
-              <span className="text-[10px] text-slate-500">In xuyên suốt video</span>
-            </div>
-            <div className="flex gap-2">
-              <label className="flex-1 text-center text-[11px] font-bold bg-white border border-slate-200 rounded-xl px-2 py-2 cursor-pointer hover:border-blue-300">
-                + Logo góc
-                <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
-                  onChange={async (e) => {
-                    const f = e.target.files?.[0];
-                    if (!f) return;
-                    try {
-                      const ov = await uploadStudioOverlay(f, { kind: 'logo', x: 0.78, y: 0.04, w: 0.16 });
-                      handleChange('overlays', [...(options.overlays || []), ov]);
-                    } catch (err) {
-                      console.error(err);
-                    }
-                    e.target.value = '';
-                  }}
-                />
-              </label>
-              <label className="flex-1 text-center text-[11px] font-bold bg-white border border-slate-200 rounded-xl px-2 py-2 cursor-pointer hover:border-blue-300">
-                + Khung full
-                <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
-                  onChange={async (e) => {
-                    const f = e.target.files?.[0];
-                    if (!f) return;
-                    try {
-                      const ov = await uploadStudioOverlay(f, { kind: 'frame' });
-                      handleChange('overlays', [...(options.overlays || []), ov]);
-                    } catch (err) {
-                      console.error(err);
-                    }
-                    e.target.value = '';
-                  }}
-                />
-              </label>
-            </div>
-            {(options.overlays || []).length > 0 && (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {(options.overlays || []).map((ov, i) => (
-                  <button
-                    key={ov.id || i}
-                    type="button"
-                    onClick={() => handleChange('overlays', (options.overlays || []).filter((_, j) => j !== i))}
-                    className="text-[10px] bg-white border border-slate-200 rounded-lg px-2 py-1 font-bold text-slate-600"
-                    title="Bỏ"
-                  >
-                    {ov.kind === 'frame' ? 'Khung' : 'Logo'} ×
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Audio Vocal Mute */}
-        <div className="flex items-center justify-between p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80">
-          <div className="flex items-center space-x-2.5">
-            <VolumeX className="w-4 h-4 text-rose-600 shrink-0" />
-            <div>
-              <label className="text-xs font-bold text-slate-700 cursor-pointer block" htmlFor="vocal-mute-toggle">
-                Tắt tiếng gốc (khử thoại, giữ BGM)
-              </label>
-              <span className="text-[10px] text-slate-500 block">Cắt hẳn thoại gốc (chỉ giữ bass nhạc) — hết chồng giọng Việt + Trung</span>
-            </div>
-          </div>
-          <input
-            id="vocal-mute-toggle"
-            type="checkbox"
-            checked={options.enable_vocal_mute !== false}
-            onChange={(e) => handleChange('enable_vocal_mute', e.target.checked)}
-            className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 shrink-0 cursor-pointer"
-          />
-        </div>
-
-        <div className="p-3.5 bg-indigo-50/70 rounded-2xl border border-indigo-200 space-y-2">
-          <div className="flex items-center gap-2">
-            <Music className="w-4 h-4 text-indigo-600" />
-            <span className="text-xs font-extrabold text-slate-800">Nhạc nền lấy từ video khác</span>
-          </div>
-          <select
-            value={options.bgm_id || ''}
-            onChange={(e) => {
-              const id = e.target.value;
-              const hit = bgmList.find((x) => x.id === id);
-              onChange({
-                ...options,
-                bgm_id: hit?.id || '',
-                bgm_path: hit?.path || hit?.id || '',
-                bgm_title: hit?.title || '',
-              });
-            }}
-            className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold"
-          >
-            <option value="">Không — giữ nhạc clip gốc</option>
-            {bgmList.map((t) => (
-              <option key={t.id} value={t.id}>{t.title}</option>
-            ))}
-          </select>
-          {(options.bgm_path || options.bgm_id) && (
-            <label className="flex items-center gap-2 text-[11px] font-bold text-slate-600">
-              Âm lượng
-              <input
-                type="range"
-                min="0.2"
-                max="1.4"
-                step="0.05"
-                value={options.bgm_volume ?? 0.85}
-                onChange={(e) => handleChange('bgm_volume', Number(e.target.value))}
-                className="flex-1"
-              />
-              <span>{Math.round((options.bgm_volume ?? 0.85) * 100)}%</span>
-            </label>
-          )}
-          <p className="text-[10px] text-slate-500">Tách nhạc ở tab Nhạc nền (⌘7), rồi chọn ở đây.</p>
-        </div>
-
-        {/* TTS Dubbing Control - Unified Vietnamese Voice Hub */}
-        <div className="p-4 bg-gradient-to-br from-purple-50/80 via-indigo-50/50 to-slate-50 border border-purple-200/90 rounded-2xl space-y-3.5 shadow-2xs">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-2.5">
-              <Mic className="w-4 h-4 text-purple-600 shrink-0" />
-              <div>
-                <label className="text-xs font-extrabold text-purple-950 cursor-pointer block" htmlFor="tts-toggle">
-                  Tự dịch + lồng tiếng khớp video gốc
-                </label>
-                <span className="text-[10px] text-purple-700 font-medium block">
-                  STT lời thoại → dịch Việt → TTS ghép đúng timestamp, giữ nhạc nền BGM
-                </span>
-              </div>
-            </div>
-            <input
-              id="tts-toggle"
-              type="checkbox"
-              checked={!!options.enable_tts}
-              onChange={(e) => handleChange('enable_tts', e.target.checked)}
-              className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-purple-300 shrink-0 cursor-pointer"
-            />
-          </div>
-
-          <div className="flex items-center justify-between pt-1">
-            <div>
-              <label className="text-xs font-extrabold text-purple-950 cursor-pointer block" htmlFor="burnsub-toggle">
-                Cháy phụ đề Vietsub lên video (Hardsub)
-              </label>
-              <span className="text-[10px] text-purple-700 font-medium block">
-                Nhận lời thoại → dịch tiếng Việt → đốt chữ xuống đáy khung hình
-              </span>
-            </div>
-            <input
-              id="burnsub-toggle"
-              type="checkbox"
-              checked={options.burn_subtitles !== false}
-              onChange={(e) => handleChange('burn_subtitles', e.target.checked)}
-              className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-purple-300 shrink-0 cursor-pointer"
-            />
-          </div>
-
-          <div>
-            <label className="block text-[11px] font-extrabold text-purple-950 mb-1.5">
-              Chế độ Vietsub
-            </label>
-            <p className="text-[10px] text-purple-700 font-medium mb-2">
-              Chọn cách viết lời Việt — vẫn khớp timeline từng đoạn video, không đè chữ gốc.
-            </p>
-            <div className="grid grid-cols-3 gap-1.5">
-              {[
-                {
-                  id: 'dub',
-                  icon: Captions,
-                  title: 'Gốc',
-                  desc: 'Tuân theo đúng lời / chữ trên video. Dịch sát, không thêm.',
-                },
-                {
-                  id: 'narrator',
-                  icon: BookOpen,
-                  title: 'Kể chuyện',
-                  desc: 'Kể lại nội dung ngôi 3, vẫn đúng cảnh đang chạy.',
-                },
-                {
-                  id: 'funny',
-                  icon: Smile,
-                  title: 'Vui nhộn',
-                  desc: 'Viết hài dí dỏm trên đúng cảnh, không lạc đề.',
-                },
-              ].map((mode) => {
-                const active = (options.vietsub_style || 'dub') === mode.id;
-                const Icon = mode.icon;
-                return (
-                  <button
-                    key={mode.id}
-                    type="button"
-                    onClick={() => {
-                      const patch = { vietsub_style: mode.id };
-                      if (mode.id !== 'dub') patch.enable_lipsync = false;
-                      else patch.enable_lipsync = options.enable_lipsync !== false;
-                      onChange({ ...options, ...patch });
-                    }}
-                    className={`text-left rounded-xl border px-2 py-2.5 transition-all ${
-                      active
-                        ? 'bg-purple-600 border-purple-700 text-white shadow-sm'
-                        : 'bg-white border-purple-200 text-purple-950 hover:border-purple-400'
-                    }`}
-                  >
-                    <Icon className={`w-3.5 h-3.5 mb-1 ${active ? 'text-white' : 'text-purple-600'}`} />
-                    <div className="text-[11px] font-extrabold leading-tight">{mode.title}</div>
-                    <div className={`text-[9px] leading-snug mt-0.5 ${active ? 'text-purple-100' : 'text-purple-700'}`}>
-                      {mode.desc}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {options.enable_tts && (
-            <div className="space-y-3 pt-2.5 border-t border-purple-200/70 animate-fadeIn">
-              {(options.vietsub_style || 'dub') === 'dub' && (
-              <div className="flex items-center justify-between">
-                <div>
-                  <label className="text-xs font-extrabold text-purple-950 cursor-pointer block" htmlFor="lipsync-toggle">
-                    Khớp khẩu hình (Lip-sync)
-                  </label>
-                  <span className="text-[10px] text-purple-700 font-medium block">
-                    Canh từng câu đúng cửa sổ miệng gốc: rút câu → chỉnh tốc TTS → rubberband giữ formant
-                  </span>
-                </div>
-                <input
-                  id="lipsync-toggle"
-                  type="checkbox"
-                  checked={options.enable_lipsync !== false}
-                  onChange={(e) => handleChange('enable_lipsync', e.target.checked)}
-                  className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-purple-300 shrink-0 cursor-pointer"
-                />
-              </div>
-              )}
-              <div>
-                <label className="block text-[11px] font-bold text-purple-900 mb-1.5">Ngôn ngữ đích</label>
-                <select
-                  value={options.target_lang || 'vi'}
-                  onChange={(e) => {
-                    const lang = e.target.value;
-                    const voices = {
-                      vi: 'en-US-AvaMultilingualNeural',
-                      en: 'en-US-AvaMultilingualNeural',
-                      th: 'th-TH-PremwadeeNeural',
-                      id: 'id-ID-GadisNeural',
-                      ja: 'ja-JP-NanamiNeural',
-                      ko: 'ko-KR-SunHiNeural',
-                      pt: 'pt-BR-FranciscaNeural',
-                    };
-                    handleChange('target_lang', lang);
-                    onChange({ ...options, target_lang: lang, tts_voice: voices[lang] || options.tts_voice });
-                  }}
-                  className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2.5 text-xs text-slate-900 font-bold outline-none focus:ring-2 focus:ring-purple-400 cursor-pointer shadow-2xs mb-2"
-                >
-                  <option value="vi">Tiếng Việt</option>
-                  <option value="en">English</option>
-                  <option value="th">ไทย Thai</option>
-                  <option value="id">Bahasa Indonesia</option>
-                  <option value="ja">日本語 Japanese</option>
-                  <option value="ko">한국어 Korean</option>
-                  <option value="pt">Português</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-[11px] font-bold text-purple-900 mb-1.5 flex items-center justify-between">
-                  <span>Chọn Giọng Đọc Thuyết Minh Tiếng Việt:</span>
-                  <span className="text-[10px] bg-purple-100 text-purple-800 px-2 py-0.5 rounded-full font-bold">
-                    100% Tiếng Việt
-                  </span>
-                </label>
-                <select
-                  value={options.tts_voice || 'en-US-AvaMultilingualNeural'}
-                  onChange={(e) => {
-                    handleChange('tts_voice', e.target.value);
-                  }}
-                  className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2.5 text-xs text-slate-900 font-bold outline-none focus:ring-2 focus:ring-purple-400 cursor-pointer shadow-2xs"
-                >
-                  <optgroup label="Nữ — hay, tự nhiên (khuyên dùng)">
-                    <option value="en-US-AvaMultilingualNeural">Ava — rõ, không ngọng, hợp reup</option>
-                    <option value="en-US-EmmaMultilingualNeural">Emma — trẻ, nhẹ, vlog</option>
-                  </optgroup>
-                  <optgroup label="Nam — dẫn chuyện">
-                    <option value="en-US-AndrewMultilingualNeural">Andrew — trầm, tài liệu / kể lại</option>
-                    <option value="en-US-BrianMultilingualNeural">Brian — ấm, review</option>
-                  </optgroup>
-                </select>
-              </div>
-
-
-              <div className="bg-purple-100/60 p-2.5 rounded-xl border border-purple-200/60 flex items-start gap-2">
-                <Sparkles className="w-3.5 h-3.5 text-purple-600 shrink-0 mt-0.5" />
-                <p className="text-[10px] text-purple-900 leading-relaxed font-medium">
-                  Hệ thống nhận lời thoại → viết Việt theo chế độ đã chọn (Gốc / Kể chuyện / Vui nhộn) → đốt chữ đáy khung, lồng tiếng khớp timestamp, tắt thoại gốc để không đè giọng.
-                </p>
-              </div>
-            </div>
-          )}
-        </div>
-
-
-        {/* Channel Assignment & Distribution Section */}
-        <div className="p-4 bg-gradient-to-br from-blue-50/70 via-indigo-50/40 to-slate-50 rounded-2xl border border-blue-100/90 space-y-3.5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-2">
-              <Share2 className="w-4 h-4 text-blue-600" />
-              <span className="text-xs font-extrabold text-slate-900">
-                Xuất đa nền tảng
-              </span>
-            </div>
-            <span className="text-[10px] bg-blue-100/80 text-blue-700 px-2 py-0.5 rounded-full font-bold">
-              1 reup → nhiều bản
-            </span>
-          </div>
-          <p className="text-[10px] text-slate-500 font-medium">
-            Mỗi nền tảng nhận file đúng tỷ lệ (9:16 Shorts/Reels, 16:9 YouTube). Bản cùng tỷ lệ được copy, không encode lại.
-          </p>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+          <div className="grid grid-cols-3 gap-2">
             {[
-              { id: 'tiktok', label: 'TikTok', ratio: '9:16' },
-              { id: 'youtube_shorts', label: 'YT Shorts', ratio: '9:16' },
-              { id: 'facebook', label: 'FB Reels', ratio: '9:16' },
-              { id: 'instagram', label: 'IG Reels', ratio: '9:16' },
-              { id: 'youtube', label: 'YouTube', ratio: '16:9' },
-              { id: 'douyin', label: 'Douyin', ratio: '9:16' },
+              { id: 'tiktok_clean', label: 'Sạch Chữ & Giữ Nhạc', desc: 'Cắt sub cũ, giữ 100% âm gốc' },
+              { id: 'tiktok_dub', label: 'Vietsub + Lồng Tiếng', desc: 'Vietsub đè sub, lồng tiếng AI' },
+              { id: 'tiktok_original', label: 'Nguyên Bản', desc: 'Giữ 100% âm hình gốc' },
             ].map((p) => {
-              const selected = (options.target_platforms || []).includes(p.id);
+              const on =
+                options.preset_id === p.id ||
+                (!options.preset_id && p.id === 'tiktok_clean' && !options.burn_subtitles && !options.enable_tts);
               return (
                 <button
                   key={p.id}
                   type="button"
-                  onClick={() => {
-                    const cur = Array.isArray(options.target_platforms) ? [...options.target_platforms] : [];
-                    const next = selected ? cur.filter((x) => x !== p.id) : [...cur, p.id];
-                    handleChange('target_platforms', next);
-                  }}
-                  className={`text-left rounded-xl border px-2.5 py-2 transition-all ${
-                    selected
-                      ? 'bg-blue-600 border-blue-700 text-white shadow-sm'
-                      : 'bg-white border-slate-200 text-slate-700 hover:border-blue-300'
+                  onClick={() => handlePresetSelect(p.id)}
+                  className={`text-left rounded-2xl border px-3 py-2.5 transition-all ${
+                    on ? 'bg-blue-600 border-blue-700 text-white shadow-sm' : 'bg-white border-slate-200 hover:border-blue-300'
                   }`}
                 >
-                  <div className="text-[11px] font-extrabold leading-tight">{p.label}</div>
-                  <div className={`text-[9px] font-bold mt-0.5 ${selected ? 'text-blue-100' : 'text-slate-400'}`}>
-                    {p.ratio}
-                  </div>
+                  <span className="text-xs font-extrabold block">{p.label}</span>
+                  <span className={`text-[10px] ${on ? 'text-blue-100' : 'text-slate-500'}`}>{p.desc}</span>
                 </button>
               );
             })}
           </div>
-          <div className="flex items-center justify-between pt-1">
-            <div className="flex items-center space-x-2">
-              <Tv className="w-4 h-4 text-blue-600" />
-              <span className="text-xs font-extrabold text-slate-900">
-                Phân Bổ Kênh Xuất Bản
+
+          <div className="p-4 bg-emerald-50/70 rounded-2xl border border-emerald-200 space-y-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="text-xs font-extrabold text-slate-800 block">Tự xoá chữ & logo</label>
+                <span className="text-[11px] text-slate-500">
+                  Tự động phát hiện và xóa watermark.
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                checked={options.wm_method !== 'none' && options.wm_method !== 'off' && options.wm_method !== 'disabled'}
+                onChange={(e) => handleChange('wm_method', e.target.checked ? 'auto' : 'none')}
+                className="w-4 h-4 rounded text-emerald-600 accent-emerald-600 border-slate-300 cursor-pointer"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowWmAdvanced((v) => !v)}
+              className="text-[10px] font-bold text-slate-500 hover:text-slate-800 inline-flex items-center gap-1"
+            >
+              <ChevronDown className={`w-3 h-3 transition ${showWmAdvanced ? 'rotate-180' : ''}`} />
+              Nâng cao (chọn tay thuật toán)
+            </button>
+            {showWmAdvanced && (
+              <div className="space-y-2.5 pt-1">
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  {[
+                    { id: 'auto', label: 'Tự động (LaMa + Telea)', desc: 'Chữ mỏng Telea, khối lớn LaMa neural' },
+                    { id: 'all', label: 'All + delogo', desc: 'Inpaint rồi phủ nốt vệt sót' },
+                    { id: 'crop', label: 'Chỉ cắt đáy', desc: 'Khi phụ đề dính cứng dưới chân' },
+                    { id: 'none', label: 'Không xoá', desc: 'Giữ nguyên hình gốc' },
+                  ].map((item) => {
+                    const isSelected =
+                      options.wm_method === item.id ||
+                      (options.wm_method === 'opencv_telea' && item.id === 'auto');
+                    return (
+                      <label
+                        key={item.id}
+                        className={`flex flex-col p-3 rounded-2xl border cursor-pointer transition-all duration-150 ${
+                          isSelected
+                            ? 'bg-white border-emerald-400 text-slate-900 font-bold shadow-xs'
+                            : 'bg-white/70 border-slate-200 text-slate-600 hover:border-slate-300'
+                        }`}
+                      >
+                        <div className="flex items-center space-x-2">
+                          <input
+                            type="radio"
+                            name="wm_method"
+                            value={item.id}
+                            checked={isSelected}
+                            onChange={() => handleChange('wm_method', item.id)}
+                            className="text-emerald-600 focus:ring-emerald-500"
+                          />
+                          <span className="text-xs font-bold text-slate-800">{item.label}</span>
+                        </div>
+                        <span className="text-[10px] text-slate-500 font-normal pl-5 mt-0.5">{item.desc}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-3">
+            {/* Horizontal Flip */}
+            <div className="flex items-center justify-between p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80">
+              <div className="flex items-center space-x-2.5">
+                <FlipHorizontal className="w-4 h-4 text-blue-600" />
+                <label className="text-xs font-bold text-slate-700 cursor-pointer" htmlFor="hflip-toggle">
+                  Lật Ngang Video (HFlip)
+                </label>
+              </div>
+              <input
+                id="hflip-toggle"
+                type="checkbox"
+                checked={options.hflip}
+                onChange={(e) => handleChange('hflip', e.target.checked)}
+                className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer"
+              />
+            </div>
+
+            {/* Speed Ratio Slider */}
+            <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-2">
+              <div className="flex justify-between text-xs">
+                <span className="font-bold text-slate-700">Tốc Độ Video (Speed Factor)</span>
+                <span className="font-mono text-blue-600 font-bold">{options.speed_ratio}x</span>
+              </div>
+              <input
+                type="range"
+                min="0.80"
+                max="1.50"
+                step="0.01"
+                value={options.speed_ratio}
+                onChange={(e) => handleChange('speed_ratio', parseFloat(e.target.value))}
+                className="w-full accent-blue-600 bg-slate-200 rounded-lg cursor-pointer"
+              />
+            </div>
+
+            {/* Edge Crop Slider */}
+            <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-2">
+              <div className="flex justify-between text-xs">
+                <span className="font-bold text-slate-700">Cắt Mép Khung Hình (Edge Crop %)</span>
+                <span className="font-mono text-blue-600 font-bold">{options.crop_percent}%</span>
+              </div>
+              <input
+                type="range"
+                min="0.0"
+                max="5.0"
+                step="0.1"
+                value={options.crop_percent}
+                onChange={(e) => handleChange('crop_percent', parseFloat(e.target.value))}
+                className="w-full accent-blue-600 bg-slate-200 rounded-lg cursor-pointer"
+              />
+            </div>
+
+            {/* Bottom Subtitle Crop Slider */}
+            <div className="p-3.5 bg-amber-50/70 rounded-2xl border border-amber-200/80 space-y-2">
+              <div className="flex justify-between text-xs">
+                <span className="font-bold text-amber-950">Cắt Mép Đáy Bỏ Phụ Đề Cũ (Bottom Crop)</span>
+                <span className="font-mono text-amber-700 font-bold">{options.subtitle_bottom_crop || 0}%</span>
+              </div>
+              <input
+                type="range"
+                min="0.0"
+                max="12.0"
+                step="0.5"
+                value={options.subtitle_bottom_crop || 0}
+                onChange={(e) => handleChange('subtitle_bottom_crop', parseFloat(e.target.value))}
+                className="w-full accent-amber-600 bg-amber-200/70 rounded-lg cursor-pointer"
+              />
+              <span className="text-[10px] text-amber-800 font-medium block">
+                Cắt mép dưới (6-8%) để loại bỏ hoàn toàn dải chữ tiếng Trung cũ ở đáy.
               </span>
             </div>
-            <span className="text-[10px] bg-blue-100/80 text-blue-700 px-2 py-0.5 rounded-full font-bold">
-              Tự động gán video
-            </span>
-          </div>
 
-          {/* Channel Selector */}
-          <div className="space-y-1.5">
-            <label className="block text-[11px] font-bold text-slate-700 flex items-center justify-between">
-              <span>Chọn Kênh Đích:</span>
-              {loadingChannels && (
-                <span className="text-[10px] text-blue-600 flex items-center gap-1 font-normal">
-                  <Loader2 className="w-3 h-3 animate-spin" /> Đang tải...
-                </span>
-              )}
-            </label>
-            <select
-              value={options.channel_id || 'none'}
-              onChange={(e) => handleChannelSelect(e.target.value)}
-              className="w-full text-xs font-semibold bg-white border border-slate-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 shadow-2xs"
-            >
+            {/* Video Trimming (Cut Start/End Seconds) */}
+            <div className="p-4 bg-indigo-50/70 rounded-2xl border border-indigo-200/80 space-y-3">
+              <div className="flex items-center space-x-2 text-xs font-bold text-indigo-900 uppercase tracking-wider">
+                <Scissors className="w-4 h-4 text-indigo-600" />
+                <span>Cắt Đoạn Video (Trim Start / End)</span>
+              </div>
 
-              <option value="none">📦 Không gán kênh (Chỉ lưu vào kho thành phẩm)</option>
-              {channels.map((chan) => (
-                <option key={chan.channel_id || chan.id} value={chan.channel_id || chan.id}>
-                  📺 [{chan.platform?.toUpperCase() || 'KHÁC'}] {chan.name} {chan.tags?.length ? `(${chan.tags.join(', ')})` : ''}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {activeChannel && (activeChannel.overlays || []).length > 0 && (
-            <div className="flex items-start gap-2.5 p-2.5 rounded-xl bg-white border border-indigo-200/80">
-              <Layers className="w-3.5 h-3.5 text-indigo-600 shrink-0 mt-0.5" />
-              <div className="min-w-0">
-                <p className="text-[11px] font-extrabold text-slate-800">
-                  Gắn {activeChannel.overlays.length} logo/khung xuyên suốt video
-                </p>
-                <p className="text-[10px] text-slate-500 font-medium">
-                  Vị trí đã chỉnh trong tab Kênh — logo hiện từ đầu đến cuối video thành phẩm.
-                </p>
-                <div className="flex items-center gap-1.5 mt-1.5">
-                  {activeChannel.overlays.slice(0, 5).map((ov) => (
-                    <img
-                      key={ov.id}
-                      src={getMediaUrl(ov.url)}
-                      alt=""
-                      className="w-7 h-7 rounded-md object-contain bg-slate-900 border border-slate-200"
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <div>
+                  <span className="text-[11px] font-semibold text-slate-600 block mb-1">
+                    Cắt đầu video (giây)
+                  </span>
+                  <div className="flex items-center space-x-1.5">
+                    <input
+                      type="number"
+                      min="0"
+                      max="120"
+                      step="0.5"
+                      value={options.trim_start_sec ?? 0}
+                      onChange={(e) => handleChange('trim_start_sec', Math.max(0, parseFloat(e.target.value) || 0))}
+                      className="w-full px-2.5 py-1.5 text-xs font-bold text-indigo-700 bg-white rounded-xl border border-indigo-200 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                      placeholder="0.0"
                     />
-                  ))}
+                    <span className="text-xs font-bold text-slate-400">s</span>
+                  </div>
+                </div>
+
+                <div>
+                  <span className="text-[11px] font-semibold text-slate-600 block mb-1">
+                    Cắt đuôi video (giây)
+                  </span>
+                  <div className="flex items-center space-x-1.5">
+                    <input
+                      type="number"
+                      min="0"
+                      max="120"
+                      step="0.5"
+                      value={options.trim_end_sec ?? 0}
+                      onChange={(e) => handleChange('trim_end_sec', Math.max(0, parseFloat(e.target.value) || 0))}
+                      className="w-full px-2.5 py-1.5 text-xs font-bold text-indigo-700 bg-white rounded-xl border border-indigo-200 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                      placeholder="0.0"
+                    />
+                    <span className="text-xs font-bold text-slate-400">s</span>
+                  </div>
+                </div>
+              </div>
+              <span className="text-[10px] text-indigo-700 block">
+                💡 Nhập số giây muốn cắt bỏ (ví dụ: cắt 3s đầu video intro hoặc 2s outro).
+              </span>
+            </div>
+
+            {/* Color Sliders */}
+            <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-3">
+              <div className="flex items-center space-x-2 text-xs font-bold text-slate-700 uppercase tracking-wider">
+                <Palette className="w-4 h-4 text-purple-600" />
+                <span>Tinh Chỉnh Màu Sắc (Color Filters)</span>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3 text-xs">
+                <div>
+                  <span className="text-[10px] font-semibold text-slate-500 block mb-1">Độ Sáng</span>
+                  <input
+                    type="range"
+                    min="-0.1"
+                    max="0.1"
+                    step="0.01"
+                    value={options.brightness}
+                    onChange={(e) => handleChange('brightness', parseFloat(e.target.value))}
+                    className="w-full accent-blue-600 bg-slate-200 rounded-lg cursor-pointer"
+                  />
+                  <span className="text-[10px] font-mono text-blue-600 font-bold block text-right mt-0.5">
+                    {options.brightness}
+                  </span>
+                </div>
+
+                <div>
+                  <span className="text-[10px] font-semibold text-slate-500 block mb-1">Độ Tương Phản</span>
+                  <input
+                    type="range"
+                    min="0.8"
+                    max="1.3"
+                    step="0.01"
+                    value={options.contrast}
+                    onChange={(e) => handleChange('contrast', parseFloat(e.target.value))}
+                    className="w-full accent-blue-600 bg-slate-200 rounded-lg cursor-pointer"
+                  />
+                  <span className="text-[10px] font-mono text-blue-600 font-bold block text-right mt-0.5">
+                    {options.contrast}
+                  </span>
+                </div>
+
+                <div>
+                  <span className="text-[10px] font-semibold text-slate-500 block mb-1">Độ Bão Hòa</span>
+                  <input
+                    type="range"
+                    min="0.8"
+                    max="1.4"
+                    step="0.01"
+                    value={options.saturation}
+                    onChange={(e) => handleChange('saturation', parseFloat(e.target.value))}
+                    className="w-full accent-blue-600 bg-slate-200 rounded-lg cursor-pointer"
+                  />
+                  <span className="text-[10px] font-mono text-blue-600 font-bold block text-right mt-0.5">
+                    {options.saturation}
+                  </span>
                 </div>
               </div>
             </div>
-          )}
 
-          {/* If Channel is Selected: Metadata & Caption Form */}
-          {options.channel_id && options.channel_id !== 'none' && (
-            <div className="space-y-3 pt-2 border-t border-blue-100/80 animate-fadeIn">
-              {/* Post Title */}
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1 flex items-center gap-1">
-                  <FileText className="w-3.5 h-3.5 text-blue-600" />
-                  Tiêu Đề Đăng Bài:
-                </label>
+            {/* Khung viền + logo — in thẳng vào video */}
+            <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2.5">
+                  <Frame className="w-4 h-4 text-slate-700 shrink-0" />
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 block">Khung viền (in vào video)</label>
+                    <span className="text-[10px] text-slate-500">Thêm viền điện ảnh.</span>
+                  </div>
+                </div>
                 <input
-                  type="text"
-                  value={options.post_title || ''}
-                  onChange={(e) => handleChange('post_title', e.target.value)}
-                  placeholder="Ví dụ: Review chi tiết cảnh đẹp Hồ Nhĩ Hải..."
-                  className="w-full text-xs bg-white border border-slate-200 rounded-xl px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 shadow-2xs"
+                  type="checkbox"
+                  checked={!!options.frame_enabled}
+                  onChange={(e) => handleChange('frame_enabled', e.target.checked)}
+                  className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer"
                 />
               </div>
-
-              {/* Post Caption & Hashtags */}
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1 flex items-center justify-between">
-                  <span className="flex items-center gap-1">
-                    <Tag className="w-3.5 h-3.5 text-indigo-600" />
-                    Mô Tả & Hashtags:
+              {!!options.frame_enabled && (
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="text-[10px] font-bold text-slate-600">
+                    Màu
+                    <select
+                      value={options.frame_color || 'black'}
+                      onChange={(e) => handleChange('frame_color', e.target.value)}
+                      className="mt-1 w-full bg-white border border-slate-200 rounded-xl px-2 py-1.5 text-xs font-bold"
+                    >
+                      <option value="black">Đen</option>
+                      <option value="white">Trắng</option>
+                      <option value="0xC9A227">Vàng gold</option>
+                      <option value="0x7C3AED">Tím</option>
+                    </select>
+                  </label>
+                  <label className="text-[10px] font-bold text-slate-600">
+                    Dày ({options.frame_thickness || 16}px)
+                    <input
+                      type="range" min="6" max="36" step="2"
+                      value={options.frame_thickness || 16}
+                      onChange={(e) => handleChange('frame_thickness', parseInt(e.target.value, 10))}
+                      className="mt-2 w-full accent-blue-600"
+                    />
+                  </label>
+                </div>
+              )}
+              <div className="pt-1 border-t border-slate-200/80">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <ImagePlus className="w-3.5 h-3.5" /> Ảnh custom / logo
                   </span>
-                  {activeChannel?.tags?.length > 0 && (
-                    <span className="text-[10px] text-slate-500 font-normal">
-                      Bấm thẻ bên dưới để chèn nhanh
-                    </span>
-                  )}
-                </label>
-                <textarea
-                  rows={2}
-                  value={options.post_caption || ''}
-                  onChange={(e) => handleChange('post_caption', e.target.value)}
-                  placeholder="Nhập nội dung caption và hashtags..."
-                  className="w-full text-xs bg-white border border-slate-200 rounded-xl px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 shadow-2xs resize-none"
-                />
-                {/* Quick Tag Pills from Channel */}
-                {activeChannel?.tags && activeChannel.tags.length > 0 && (
-                  <div className="flex flex-wrap gap-1.5 mt-1.5">
-                    {activeChannel.tags.map((t, idx) => (
+                  <span className="text-[10px] text-slate-500">In logo đè.</span>
+                </div>
+                <div className="flex gap-2">
+                  <label className="flex-1 text-center text-[11px] font-bold bg-white border border-slate-200 rounded-xl px-2 py-2 cursor-pointer hover:border-blue-300">
+                    + Logo góc
+                    <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
+                      onChange={async (e) => {
+                        const f = e.target.files?.[0];
+                        if (!f) return;
+                        try {
+                          const ov = await uploadStudioOverlay(f, { kind: 'logo', x: 0.78, y: 0.04, w: 0.16 });
+                          handleChange('overlays', [...(options.overlays || []), ov]);
+                        } catch (err) {
+                          console.error(err);
+                        }
+                        e.target.value = '';
+                      }}
+                    />
+                  </label>
+                  <label className="flex-1 text-center text-[11px] font-bold bg-white border border-slate-200 rounded-xl px-2 py-2 cursor-pointer hover:border-blue-300">
+                    + Khung full
+                    <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
+                      onChange={async (e) => {
+                        const f = e.target.files?.[0];
+                        if (!f) return;
+                        try {
+                          const ov = await uploadStudioOverlay(f, { kind: 'frame' });
+                          handleChange('overlays', [...(options.overlays || []), ov]);
+                        } catch (err) {
+                          console.error(err);
+                        }
+                        e.target.value = '';
+                      }}
+                    />
+                  </label>
+                </div>
+                {(options.overlays || []).length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {(options.overlays || []).map((ov, i) => (
                       <button
-                        key={idx}
+                        key={ov.id || i}
                         type="button"
-                        onClick={() => handleAppendTag(t)}
-                        className="text-[10px] font-bold bg-white text-indigo-700 hover:bg-indigo-50 border border-indigo-200/80 px-2 py-0.5 rounded-lg transition shadow-2xs flex items-center gap-1 cursor-pointer"
+                        onClick={() => handleChange('overlays', (options.overlays || []).filter((_, j) => j !== i))}
+                        className="text-[10px] bg-white border border-slate-200 rounded-lg px-2 py-1 font-bold text-slate-600"
+                        title="Bỏ"
                       >
-                        <Sparkles className="w-2.5 h-2.5 text-amber-500" />
-                        {t.startsWith('#') ? t : `#${t}`}
+                        {ov.kind === 'frame' ? 'Khung' : 'Logo'} ×
                       </button>
                     ))}
                   </div>
                 )}
               </div>
+            </div>
 
-              {/* Publish Status Selector */}
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1.5">
-                  Trạng Thái Bài Viết:
+            {/* MD5 Modifier Toggle */}
+            <div className="flex items-center justify-between p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80">
+              <div className="flex items-center space-x-2.5">
+                <Hash className="w-4 h-4 text-emerald-600 shrink-0" />
+                <label className="text-xs font-bold text-slate-700 cursor-pointer" htmlFor="md5-toggle">
+                  Đổi Mã Hash MD5 File Video
                 </label>
-                <div className="grid grid-cols-3 gap-2">
+              </div>
+              <input
+                id="md5-toggle"
+                type="checkbox"
+                checked={options.modify_md5}
+                onChange={(e) => handleChange('modify_md5', e.target.checked)}
+                className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 shrink-0 cursor-pointer"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Cột 2: Âm thanh & Dịch */}
+        <div className="space-y-4 bg-slate-50/30 p-4 rounded-2xl border border-slate-100">
+          <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider flex items-center gap-1.5 pb-2 border-b border-slate-100">
+            <Mic className="w-4 h-4 text-purple-600" />
+            Âm thanh & Dịch
+          </h4>
+
+          <div className="space-y-3">
+            {/* Audio Pitch Shift */}
+            <div className="flex items-center justify-between p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80">
+              <div className="flex items-center space-x-2.5">
+                <Volume2 className="w-4 h-4 text-indigo-600" />
+                <label className="text-xs font-bold text-slate-700 cursor-pointer" htmlFor="pitch-toggle">
+                  Đổi Tone Giọng Âm Thanh (+0.5 semitones)
+                </label>
+              </div>
+              <input
+                id="pitch-toggle"
+                type="checkbox"
+                checked={options.pitch_shift}
+                onChange={(e) => handleChange('pitch_shift', e.target.checked)}
+                className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer"
+              />
+            </div>
+
+            {/* Audio Vocal Mute */}
+            <div className="flex items-center justify-between p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80">
+              <div className="flex items-center space-x-2.5">
+                <VolumeX className="w-4 h-4 text-rose-600 shrink-0" />
+                <div>
+                  <label className="text-xs font-bold text-slate-700 cursor-pointer block" htmlFor="vocal-mute-toggle">
+                    Tắt tiếng gốc (khử thoại, giữ BGM)
+                  </label>
+                  <span className="text-[10px] text-slate-500 block">Khử giọng nói gốc, giữ lại nhạc nền.</span>
+                </div>
+              </div>
+              <input
+                id="vocal-mute-toggle"
+                type="checkbox"
+                checked={options.enable_vocal_mute !== false}
+                onChange={(e) => handleChange('enable_vocal_mute', e.target.checked)}
+                className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 shrink-0 cursor-pointer"
+              />
+            </div>
+
+            {/* BGM Selector */}
+            <div className="p-3.5 bg-indigo-50/70 rounded-2xl border border-indigo-200 space-y-2">
+              <div className="flex items-center gap-2">
+                <Music className="w-4 h-4 text-indigo-600" />
+                <span className="text-xs font-extrabold text-slate-800">Nhạc nền lấy từ video khác</span>
+              </div>
+              <select
+                value={options.bgm_id || ''}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  const hit = bgmList.find((x) => x.id === id);
+                  onChange({
+                    ...options,
+                    bgm_id: hit?.id || '',
+                    bgm_path: hit?.path || hit?.id || '',
+                    bgm_title: hit?.title || '',
+                  });
+                }}
+                className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold"
+              >
+                <option value="">Không — giữ nhạc clip gốc</option>
+                {bgmList.map((t) => (
+                  <option key={t.id} value={t.id}>{t.title}</option>
+                ))}
+              </select>
+              {(options.bgm_path || options.bgm_id) && (
+                <label className="flex items-center gap-2 text-[11px] font-bold text-slate-600">
+                  Âm lượng
+                  <input
+                    type="range"
+                    min="0.2"
+                    max="1.4"
+                    step="0.05"
+                    value={options.bgm_volume ?? 0.85}
+                    onChange={(e) => handleChange('bgm_volume', Number(e.target.value))}
+                    className="flex-1"
+                  />
+                  <span>{Math.round((options.bgm_volume ?? 0.85) * 100)}%</span>
+                </label>
+              )}
+              <p className="text-[10px] text-slate-500">Chọn nhạc nền từ thư viện.</p>
+            </div>
+
+            {/* TTS Dubbing Control - Unified Vietnamese Voice Hub */}
+            <div className="p-4 bg-gradient-to-br from-purple-50/80 via-indigo-50/50 to-slate-50 border border-purple-200/90 rounded-2xl space-y-3.5 shadow-2xs">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2.5">
+                  <Mic className="w-4 h-4 text-purple-600 shrink-0" />
+                  <div>
+                    <label className="text-xs font-extrabold text-purple-950 cursor-pointer block" htmlFor="tts-toggle">
+                      Tự dịch + lồng tiếng khớp video gốc
+                    </label>
+                    <span className="text-[10px] text-purple-700 font-medium block">
+                      Dịch và lồng tiếng khớp timeline.
+                    </span>
+                  </div>
+                </div>
+                <input
+                  id="tts-toggle"
+                  type="checkbox"
+                  checked={!!options.enable_tts}
+                  onChange={(e) => handleChange('enable_tts', e.target.checked)}
+                  className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-purple-300 shrink-0 cursor-pointer"
+                />
+              </div>
+
+              <div className="flex items-center justify-between pt-1 p-2.5 bg-white/70 rounded-xl border border-purple-100">
+                <div>
+                  <label className="text-xs font-extrabold text-purple-950 cursor-pointer block" htmlFor="burnsub-toggle">
+                    Hiển thị chữ Vietsub trên video
+                  </label>
+                  <span className="text-[10px] text-purple-700 font-medium block">
+                    Bật để in chữ phụ đề lên video, tắt nếu chỉ muốn nghe lồng tiếng.
+                  </span>
+                </div>
+                <input
+                  id="burnsub-toggle"
+                  type="checkbox"
+                  checked={options.burn_subtitles !== false}
+                  onChange={(e) => handleChange('burn_subtitles', e.target.checked)}
+                  className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-purple-300 shrink-0 cursor-pointer"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-extrabold text-purple-950 mb-1.5">
+                  Chế độ Vietsub
+                </label>
+                <div className="grid grid-cols-3 gap-1.5">
                   {[
-                    { id: 'READY', label: '🚀 Sẵn Sàng', color: 'border-emerald-300 text-emerald-700 bg-emerald-50/50' },
-                    { id: 'DRAFT', label: '📝 Bản Nháp', color: 'border-amber-300 text-amber-700 bg-amber-50/50' },
-                    { id: 'PUBLISHED', label: '✅ Đã Đăng', color: 'border-blue-300 text-blue-700 bg-blue-50/50' },
-                  ].map((s) => {
-                    const isCur = (options.publish_status || 'READY') === s.id;
+                    {
+                      id: 'dub',
+                      icon: Captions,
+                      title: 'Gốc',
+                      desc: 'Dịch sát nghĩa gốc.',
+                    },
+                    {
+                      id: 'narrator',
+                      icon: BookOpen,
+                      title: 'Kể chuyện',
+                      desc: 'Tóm tắt ngôi thứ ba.',
+                    },
+                    {
+                      id: 'funny',
+                      icon: Smile,
+                      title: 'Vui nhộn',
+                      desc: 'Phong cách hài hước.',
+                    },
+                  ].map((mode) => {
+                    const active = (options.vietsub_style || 'dub') === mode.id;
+                    const Icon = mode.icon;
                     return (
                       <button
-                        key={s.id}
+                        key={mode.id}
                         type="button"
-                        onClick={() => handleChange('publish_status', s.id)}
-                        className={`text-xs py-1.5 px-2 rounded-xl font-bold border transition cursor-pointer flex items-center justify-center gap-1 ${
-                          isCur
-                            ? `${s.color} border-2 shadow-xs font-extrabold`
-                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                        onClick={() => {
+                          const patch = { vietsub_style: mode.id };
+                          if (mode.id !== 'dub') patch.enable_lipsync = false;
+                          else patch.enable_lipsync = options.enable_lipsync !== false;
+                          onChange({ ...options, ...patch });
+                        }}
+                        className={`text-left rounded-xl border px-2 py-2.5 transition-all ${
+                          active
+                            ? 'bg-purple-600 border-purple-700 text-white shadow-sm'
+                            : 'bg-white border-purple-200 text-purple-950 hover:border-purple-400'
                         }`}
                       >
-                        {isCur && <CheckCircle2 className="w-3 h-3 text-current" />}
-                        {s.label}
+                        <Icon className={`w-3.5 h-3.5 mb-1 ${active ? 'text-white' : 'text-purple-600'}`} />
+                        <div className="text-[11px] font-extrabold leading-tight">{mode.title}</div>
+                        <div className={`text-[9px] leading-snug mt-0.5 ${active ? 'text-purple-100' : 'text-purple-700'}`}>
+                          {mode.desc}
+                        </div>
                       </button>
                     );
                   })}
                 </div>
               </div>
+
+              {options.enable_tts && (
+                <div className="space-y-3 pt-2.5 border-t border-purple-200/70 animate-fadeIn">
+                  {(options.vietsub_style || 'dub') === 'dub' && (
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <label className="text-xs font-extrabold text-purple-950 cursor-pointer block" htmlFor="lipsync-toggle">
+                          Khớp khẩu hình (Lip-sync)
+                        </label>
+                        <span className="text-[10px] text-purple-700 font-medium block">
+                          Đồng bộ khẩu hình miệng.
+                        </span>
+                      </div>
+                      <input
+                        id="lipsync-toggle"
+                        type="checkbox"
+                        checked={options.enable_lipsync !== false}
+                        onChange={(e) => handleChange('enable_lipsync', e.target.checked)}
+                        className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-purple-300 shrink-0 cursor-pointer"
+                      />
+                    </div>
+                  )}
+                  <div>
+                    <label className="block text-[11px] font-bold text-purple-900 mb-1.5">Ngôn ngữ đích</label>
+                    <select
+                      value={options.target_lang || 'vi'}
+                      onChange={(e) => {
+                        const lang = e.target.value;
+                        const voices = {
+                          vi: 'en-US-AvaMultilingualNeural',
+                          en: 'en-US-AvaMultilingualNeural',
+                          th: 'th-TH-PremwadeeNeural',
+                          id: 'id-ID-GadisNeural',
+                          ja: 'ja-JP-NanamiNeural',
+                          ko: 'ko-KR-SunHiNeural',
+                          pt: 'pt-BR-FranciscaNeural',
+                        };
+                        handleChange('target_lang', lang);
+                        onChange({ ...options, target_lang: lang, tts_voice: voices[lang] || options.tts_voice });
+                      }}
+                      className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2.5 text-xs text-slate-900 font-bold outline-none focus:ring-2 focus:ring-purple-400 cursor-pointer shadow-2xs mb-2"
+                    >
+                      <option value="vi">Tiếng Việt</option>
+                      <option value="en">English</option>
+                      <option value="th">ไทย Thai</option>
+                      <option value="id">Bahasa Indonesia</option>
+                      <option value="ja">日本語 Japanese</option>
+                      <option value="ko">한국어 Korean</option>
+                      <option value="pt">Português</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-purple-900 mb-1.5 flex items-center justify-between">
+                      <span>Chọn Giọng Đọc Thuyết Minh Tiếng Việt:</span>
+                    </label>
+                    <select
+                      value={options.tts_voice || 'en-US-AvaMultilingualNeural'}
+                      onChange={(e) => {
+                        handleChange('tts_voice', e.target.value);
+                      }}
+                      className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2.5 text-xs text-slate-900 font-bold outline-none focus:ring-2 focus:ring-purple-400 cursor-pointer shadow-2xs"
+                    >
+                      <optgroup label="Nữ — hay, tự nhiên (khuyên dùng)">
+                        <option value="en-US-AvaMultilingualNeural">Ava — rõ, không ngọng, hợp reup</option>
+                        <option value="en-US-EmmaMultilingualNeural">Emma — trẻ, nhẹ, vlog</option>
+                      </optgroup>
+                      <optgroup label="Nam — dẫn chuyện">
+                        <option value="en-US-AndrewMultilingualNeural">Andrew — trầm, tài liệu / kể lại</option>
+                        <option value="en-US-BrianMultilingualNeural">Brian — ấm, review</option>
+                      </optgroup>
+                    </select>
+                  </div>
+                </div>
+              )}
             </div>
-          )}
+          </div>
         </div>
 
-        {/* MD5 Modifier Toggle */}
-        <div className="flex items-center justify-between p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80">
-          <div className="flex items-center space-x-2.5">
-            <Hash className="w-4 h-4 text-emerald-600 shrink-0" />
-            <label className="text-xs font-bold text-slate-700 cursor-pointer" htmlFor="md5-toggle">
-              Đổi Mã Hash MD5 File Video
-            </label>
+        {/* Cột 3: Đăng bài & Kênh */}
+        <div className="space-y-4 bg-slate-50/30 p-4 rounded-2xl border border-slate-100">
+          <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider flex items-center gap-1.5 pb-2 border-b border-slate-100">
+            <Share2 className="w-4 h-4 text-indigo-600" />
+            Đăng bài & Kênh
+          </h4>
+
+          {/* Channel Assignment & Distribution Section */}
+          <div className="p-4 bg-gradient-to-br from-blue-50/70 via-indigo-50/40 to-slate-50 rounded-2xl border border-blue-100/90 space-y-3.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <Share2 className="w-4 h-4 text-blue-600" />
+                <span className="text-xs font-extrabold text-slate-900">
+                  Xuất đa nền tảng
+                </span>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const cur = Array.isArray(options.target_platforms) ? [...options.target_platforms] : [];
+                  const verticalPlats = ['tiktok', 'youtube_shorts', 'facebook'];
+                  let next;
+                  if (hasVertical) {
+                    next = cur.filter((x) => !verticalPlats.includes(x));
+                  } else {
+                    next = [...new Set([...cur, ...verticalPlats])];
+                  }
+                  handleChange('target_platforms', next);
+                }}
+                className={`text-left rounded-xl border px-3 py-2.5 transition-all cursor-pointer ${
+                  hasVertical
+                    ? 'bg-blue-600 border-blue-700 text-white shadow-sm'
+                    : 'bg-white border-slate-200 text-slate-700 hover:border-blue-300'
+                }`}
+              >
+                <div className="text-[11px] font-extrabold leading-tight">Dọc (9:16)</div>
+                <div className={`text-[9px] font-bold mt-0.5 ${hasVertical ? 'text-blue-100' : 'text-slate-400'}`}>
+                  TikTok, Shorts, Reels
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const cur = Array.isArray(options.target_platforms) ? [...options.target_platforms] : [];
+                  const horizontalPlats = ['youtube'];
+                  let next;
+                  if (hasHorizontal) {
+                    next = cur.filter((x) => !horizontalPlats.includes(x));
+                  } else {
+                    next = [...new Set([...cur, ...horizontalPlats])];
+                  }
+                  handleChange('target_platforms', next);
+                }}
+                className={`text-left rounded-xl border px-3 py-2.5 transition-all cursor-pointer ${
+                  hasHorizontal
+                    ? 'bg-blue-600 border-blue-700 text-white shadow-sm'
+                    : 'bg-white border-slate-200 text-slate-700 hover:border-blue-300'
+                }`}
+              >
+                <div className="text-[11px] font-extrabold leading-tight">Ngang (16:9)</div>
+                <div className={`text-[9px] font-bold mt-0.5 ${hasHorizontal ? 'text-blue-100' : 'text-slate-400'}`}>
+                  YouTube
+                </div>
+              </button>
+            </div>
+
+            {/* Channel Selector */}
+            <div className="space-y-1.5">
+              <label className="block text-[11px] font-bold text-slate-700">Chọn Kênh Đích:</label>
+              <select
+                value={options.channel_id || 'none'}
+                onChange={(e) => handleChannelSelect(e.target.value)}
+                className="w-full text-xs font-semibold bg-white border border-slate-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 shadow-2xs"
+              >
+                <option value="none">📦 Không gán kênh (chỉ lưu kho)</option>
+                {channels.map((chan) => (
+                  <option key={chan.channel_id || chan.id} value={chan.channel_id || chan.id}>
+                    📺 [{chan.platform?.toUpperCase() || 'KHÁC'}] {chan.name} {chan.tags?.length ? `(${chan.tags.join(', ')})` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {activeChannel && (activeChannel.overlays || []).length > 0 && (
+              <div className="flex items-start gap-2.5 p-2.5 rounded-xl bg-white border border-indigo-200/80">
+                <Layers className="w-3.5 h-3.5 text-indigo-600 shrink-0 mt-0.5" />
+                <div className="min-w-0">
+                  <p className="text-[11px] font-extrabold text-slate-800">
+                    Gắn {activeChannel.overlays.length} overlay của kênh
+                  </p>
+                  <div className="flex items-center gap-1.5 mt-1.5">
+                    {activeChannel.overlays.slice(0, 5).map((ov) => (
+                      <img
+                        key={ov.id}
+                        src={getMediaUrl(ov.url)}
+                        alt=""
+                        className="w-7 h-7 rounded-md object-contain bg-slate-900 border border-slate-200"
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* If Channel is Selected: Metadata & Caption Form */}
+            {options.channel_id && options.channel_id !== 'none' && (
+              <div className="space-y-3 pt-2 border-t border-blue-100/80 animate-fadeIn">
+                {/* Post Title */}
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1 flex items-center gap-1">
+                    <FileText className="w-3.5 h-3.5 text-blue-600" />
+                    Tiêu đề:
+                  </label>
+                  <input
+                    type="text"
+                    value={options.post_title || ''}
+                    onChange={(e) => handleChange('post_title', e.target.value)}
+                    placeholder="Nhập tiêu đề..."
+                    className="w-full text-xs bg-white border border-slate-200 rounded-xl px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 shadow-2xs"
+                  />
+                </div>
+
+                {/* Post Caption & Hashtags */}
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1 flex items-center justify-between">
+                    <span className="flex items-center gap-1">
+                      <Tag className="w-3.5 h-3.5 text-indigo-600" />
+                      Mô tả & Hashtags:
+                    </span>
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={options.post_caption || ''}
+                    onChange={(e) => handleChange('post_caption', e.target.value)}
+                    placeholder="Nhập mô tả..."
+                    className="w-full text-xs bg-white border border-slate-200 rounded-xl px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 shadow-2xs resize-none"
+                  />
+                  {/* Quick Tag Pills from Channel */}
+                  {activeChannel?.tags && activeChannel.tags.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-1.5">
+                      {activeChannel.tags.map((t, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => handleAppendTag(t)}
+                          className="text-[10px] font-bold bg-white text-indigo-700 hover:bg-indigo-50 border border-indigo-200/80 px-2 py-0.5 rounded-lg transition shadow-2xs flex items-center gap-1 cursor-pointer"
+                        >
+                          <Sparkles className="w-2.5 h-2.5 text-amber-500" />
+                          {t.startsWith('#') ? t : `#${t}`}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Publish Status Selector */}
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1.5">
+                    Trạng thái:
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { id: 'READY', label: 'Sẵn sàng', color: 'border-emerald-300 text-emerald-700 bg-emerald-50/50' },
+                      { id: 'DRAFT', label: 'Bản nháp', color: 'border-amber-300 text-amber-700 bg-amber-50/50' },
+                      { id: 'PUBLISHED', label: 'Đã đăng', color: 'border-blue-300 text-blue-700 bg-blue-50/50' },
+                    ].map((s) => {
+                      const isCur = (options.publish_status || 'READY') === s.id;
+                      return (
+                        <button
+                          key={s.id}
+                          type="button"
+                          onClick={() => handleChange('publish_status', s.id)}
+                          className={`text-xs py-1.5 px-2 rounded-xl font-bold border transition cursor-pointer flex items-center justify-center gap-1 ${
+                            isCur
+                              ? `${s.color} border-2 shadow-xs font-extrabold`
+                              : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                          }`}
+                        >
+                          {isCur && <CheckCircle2 className="w-3 h-3 text-current" />}
+                          {s.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
-          <input
-            id="md5-toggle"
-            type="checkbox"
-            checked={options.modify_md5}
-            onChange={(e) => handleChange('modify_md5', e.target.checked)}
-            className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 shrink-0 cursor-pointer"
-          />
         </div>
       </div>
 

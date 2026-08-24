@@ -50,6 +50,15 @@ export async function fetchLibrary() {
   return res.json();
 }
 
+export async function deleteLibraryVideo(videoId) {
+  const res = await fetch(`${API_BASE}/library/${encodeURIComponent(videoId)}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || 'Không thể xóa video nguồn');
+  }
+  return res.json();
+}
+
 export async function extractUrls(urls) {
   const res = await fetch(`${API_BASE}/extract`, {
     method: 'POST',
@@ -461,5 +470,58 @@ export async function deleteBgm(id) {
   return res.json();
 }
 
+export async function fetchBgmProviders() {
+  const res = await fetch(`${API_BASE}/bgm/providers`);
+  if (!res.ok) throw new Error('Không tải được danh sách nguồn nhạc');
+  return res.json();
+}
 
+export async function searchOnlineBgm({
+  q,
+  provider = 'openverse',
+  limit = 20,
+  page = 1,
+  instrumental = false,
+  minDuration = 0,
+  maxDuration = 0,
+}) {
+  const params = new URLSearchParams({
+    q,
+    provider,
+    limit: String(limit),
+    page: String(page),
+    instrumental: String(!!instrumental),
+  });
+  if (minDuration > 0) params.set('min_duration', String(minDuration));
+  if (maxDuration > 0) params.set('max_duration', String(maxDuration));
+  const res = await fetch(`${API_BASE}/bgm/search?${params.toString()}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Không tìm được nhạc trên kho online');
+  }
+  return res.json();
+}
+
+export async function importOnlineBgm(track) {
+  const res = await fetch(`${API_BASE}/bgm/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      audio_url: track.audio_url,
+      provider: track.provider,
+      external_id: track.external_id,
+      title: track.title,
+      artist: track.artist,
+      license: track.license,
+      license_url: track.license_url,
+      attribution: track.attribution,
+      page_url: track.page_url,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Không thêm được bản nhạc vào kho');
+  }
+  return res.json();
+}
 

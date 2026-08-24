@@ -1,7 +1,10 @@
-const KEY = 'reup.studio.session.v2';
-const LEGACY_KEY = 'reup.studio.session.v1';
+import { getApiBase } from './api';
+
+const KEY = 'reup.studio.session.v3';
+const LEGACY_KEYS = ['reup.studio.session.v2', 'reup.studio.session.v1'];
 
 export const EMPTY_SESSION = {
+  sessionVersion: 3,
   activeTab: 'extract',
   collapsed: false,
   selectedMedia: null,
@@ -14,7 +17,7 @@ export const EMPTY_SESSION = {
   selectedChannelId: null,
   targetPlatforms: ['tiktok', 'youtube_shorts', 'facebook'],
   frameStudio: {
-    enabled: true,
+    enabled: false,
     preset: 'cinema',
     color: '#000000',
     thickness: 28,
@@ -70,7 +73,11 @@ export function compactOptions(options) {
 }
 
 function compactSession(raw) {
-  const src = { ...EMPTY_SESSION, ...(raw || {}) };
+  const incoming = raw || {};
+  const isLegacy = Number(incoming.sessionVersion || 0) < 3;
+  const src = { ...EMPTY_SESSION, ...incoming };
+  const workbenchOptions = compactOptions(src.workbenchOptions);
+  if (isLegacy && workbenchOptions) workbenchOptions.frame_enabled = false;
   const list = Array.isArray(src.extractedMediaList)
     ? src.extractedMediaList.map(compactMedia).filter(Boolean).slice(0, 80)
     : [];
@@ -83,7 +90,8 @@ function compactSession(raw) {
     collapsed: !!src.collapsed,
     selectedMedia: compactMedia(src.selectedMedia),
     extractedMediaList: list,
-    workbenchOptions: compactOptions(src.workbenchOptions),
+    sessionVersion: 3,
+    workbenchOptions,
     extractMode: src.extractMode === 'channel' ? 'channel' : 'video',
     extractUrl: typeof src.extractUrl === 'string' ? src.extractUrl.slice(0, 4000) : '',
     maxVideos: Math.max(1, Math.min(50, Number(src.maxVideos) || 8)),
@@ -93,6 +101,7 @@ function compactSession(raw) {
     frameStudio: {
       ...EMPTY_SESSION.frameStudio,
       ...(src.frameStudio || {}),
+      ...(isLegacy ? { enabled: false, overlay: null } : {}),
     },
     savedAt: Number(src.savedAt) || Date.now(),
   };
@@ -100,7 +109,7 @@ function compactSession(raw) {
 
 export function loadSession() {
   try {
-    const raw = localStorage.getItem(KEY) || localStorage.getItem(LEGACY_KEY);
+    const raw = localStorage.getItem(KEY) || LEGACY_KEYS.map((k) => localStorage.getItem(k)).find(Boolean);
     if (!raw) return { ...EMPTY_SESSION };
     return compactSession(JSON.parse(raw));
   } catch {
@@ -138,7 +147,6 @@ function scheduleServerPush(payload) {
 export async function pushServerSession(payload) {
   const body = compactSession(payload || loadSession());
   if (body.savedAt && body.savedAt === lastPushedAt) return;
-  const { getApiBase } = await import('./api');
   const res = await fetch(`${getApiBase()}/studio/session`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -150,7 +158,6 @@ export async function pushServerSession(payload) {
 export async function hydrateSession() {
   const local = loadSession();
   try {
-    const { getApiBase } = await import('./api');
     const res = await fetch(`${getApiBase()}/studio/session`);
     if (!res.ok) return local;
     const remote = compactSession(await res.json());

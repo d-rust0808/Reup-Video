@@ -14,38 +14,40 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
   const [uploading, setUploading] = useState(false);
   const [msg, setMsg] = useState(null);
   const [isDragOver, setIsDragOver] = useState(false);
-
   const [options, setOptions] = useState(() => {
     const saved = loadSession().workbenchOptions;
     return {
-    wm_method: 'auto',
-    hflip: true,
-    speed_ratio: 1.03,
-    pitch_shift: true,
-    crop_percent: 2.0,
-    brightness: 0.01,
-    contrast: 1.02,
-    saturation: 1.03,
-    film_grain: 3,
-    modify_md5: true,
-    enable_vocal_mute: true,
-    enable_tts: true,
-    enable_lipsync: true,
-    vietsub_style: 'dub',
-    burn_subtitles: true,
-    tts_voice: 'en-US-AvaMultilingualNeural',
-    tts_engine: 'edge-tts',
-    target_lang: 'vi',
-    source_lang: 'auto',
+      preset_id: 'tiktok_clean',
+      wm_method: 'none',
+      hflip: false,
+      speed_ratio: 1.03,
+      pitch_shift: true,
+      crop_percent: 2.0,
+      subtitle_bottom_crop: 7.0,
+      trim_start_sec: 0.0,
+      trim_end_sec: 0.0,
+      brightness: 0.01,
+      contrast: 1.02,
+      saturation: 1.03,
+      film_grain: 3,
+      modify_md5: true,
+      enable_vocal_mute: false,
+      vocal_mute_strategy: 'demucs',
+      enable_tts: false,
+      enable_lipsync: true,
+      vietsub_style: 'dub',
+      burn_subtitles: false,
+      tts_voice: 'en-US-AvaMultilingualNeural',
+      tts_engine: 'edge-tts',
+      target_lang: 'vi',
+      source_lang: 'auto',
 
     channel_id: null,
     post_title: '',
     post_caption: '',
     post_tags: [],
     publish_status: 'READY',
-    frame_enabled: true,
-    frame_color: 'black',
-    frame_thickness: 16,
+    frame_enabled: false,
     overlays: [],
     target_platforms: ['tiktok', 'youtube_shorts', 'facebook'],
     bgm_path: '',
@@ -201,12 +203,16 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         speed_ratio: options.speed_ratio,
         pitch_shift: options.pitch_shift,
         crop_percent: normCrop,
+        subtitle_bottom_crop: Number(options.subtitle_bottom_crop || 0) / 100.0,
+        trim_start_sec: Number(options.trim_start_sec || 0),
+        trim_end_sec: Number(options.trim_end_sec || 0),
         brightness: options.brightness,
         contrast: options.contrast,
         saturation: options.saturation,
         film_grain: options.film_grain ?? 3,
         modify_md5: options.modify_md5,
         enable_vocal_mute: options.enable_vocal_mute,
+        vocal_mute_strategy: options.vocal_mute_strategy || 'demucs',
         enable_tts: options.enable_tts,
         enable_lipsync: options.enable_lipsync !== false,
         vietsub_style: options.vietsub_style || 'auto',
@@ -220,9 +226,9 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         post_caption: options.post_caption,
         post_tags: options.post_tags,
         publish_status: options.publish_status,
-        frame_enabled: options.frame_enabled !== false && !frameOvs.some((o) => o.kind === 'frame'),
+        frame_enabled: !!options.frame_enabled,
         frame_color: options.frame_color || 'black',
-        frame_thickness: options.frame_thickness || 16,
+        frame_thickness: options.frame_thickness ?? 16,
         overlays: frameOvs,
         target_platforms: options.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
         bgm_path: options.bgm_path || options.bgm_id || '',
@@ -314,66 +320,62 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-      {/* Left Column: Video Player & Canvas ROI */}
-      <div className="lg:col-span-7 space-y-4">
-        <div className="clean-panel p-6 rounded-3xl shadow-xs space-y-4">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-            <div className="flex items-center space-x-2.5 min-w-0">
-              <div className="p-2 rounded-xl bg-blue-50 text-blue-600 border border-blue-100 shrink-0">
-                <Video className="w-4 h-4" />
-              </div>
-              <h3 className="text-sm font-bold text-slate-900 truncate max-w-md">
-                {currentMedia.title || currentMedia.video_id}
-              </h3>
+    <div className="space-y-6">
+      {/* Top Section: Video Player & Canvas ROI */}
+      <div className="clean-panel p-6 rounded-3xl shadow-xs space-y-4 max-w-4xl mx-auto">
+        <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+          <div className="flex items-center space-x-2.5 min-w-0">
+            <div className="p-2 rounded-xl bg-blue-50 text-blue-600 border border-blue-100 shrink-0">
+              <Video className="w-4 h-4" />
             </div>
-            <div className="flex items-center gap-2">
-              <span className="px-2.5 py-1 text-xs font-bold rounded-lg bg-blue-50 text-blue-700 border border-blue-200 uppercase">
-                {currentMedia.platform}
-              </span>
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
-                title="Đổi video khác từ máy"
-              >
-                <Upload className="w-4 h-4" />
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="video/mp4,video/quicktime,video/x-matroska,video/webm"
-                onChange={handleFileUpload}
-                className="hidden"
-              />
-            </div>
+            <h3 className="text-sm font-bold text-slate-900 truncate max-w-md">
+              {currentMedia.title || currentMedia.video_id}
+            </h3>
           </div>
-
-          <RoiCanvas videoRef={videoRef} onRoiChange={setRoi} overlays={channelOverlays} />
+          <div className="flex items-center gap-2">
+            <span className="px-2.5 py-1 text-xs font-bold rounded-lg bg-blue-50 text-blue-700 border border-blue-200 uppercase">
+              {currentMedia.platform}
+            </span>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+              title="Đổi video khác từ máy"
+            >
+              <Upload className="w-4 h-4" />
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="video/mp4,video/quicktime,video/x-matroska,video/webm"
+              onChange={handleFileUpload}
+              className="hidden"
+            />
+          </div>
         </div>
 
-        {msg && (
-          <div
-            className={`p-4 rounded-2xl border flex items-center gap-2 text-xs font-bold ${
-              msg.type === 'success'
-                ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
-                : 'bg-rose-50 border-rose-200 text-rose-700'
-            }`}
-          >
-            {msg.type === 'success' ? <CheckCircle2 className="w-4 h-4 text-emerald-600" /> : <AlertCircle className="w-4 h-4 text-rose-600" />}
-            <span>{msg.text}</span>
-          </div>
-        )}
+        <RoiCanvas videoRef={videoRef} onRoiChange={setRoi} overlays={channelOverlays} />
       </div>
 
-      {/* Right Column: Processing Reup Controls */}
-      <div className="lg:col-span-5">
-        <ReupFxControls
-          options={options}
-          onChange={setOptions}
-          onSubmit={handleSubmit}
-          submitting={submitting}
-        />
-      </div>
+      {msg && (
+        <div
+          className={`p-4 rounded-2xl border flex items-center gap-2 text-xs font-bold max-w-4xl mx-auto ${
+            msg.type === 'success'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+              : 'bg-rose-50 border-rose-200 text-rose-700'
+          }`}
+        >
+          {msg.type === 'success' ? <CheckCircle2 className="w-4 h-4 text-emerald-600" /> : <AlertCircle className="w-4 h-4 text-rose-600" />}
+          <span>{msg.text}</span>
+        </div>
+      )}
+
+      {/* Bottom Section: Processing Reup Controls */}
+      <ReupFxControls
+        options={options}
+        onChange={setOptions}
+        onSubmit={handleSubmit}
+        submitting={submitting}
+      />
     </div>
   );
 }

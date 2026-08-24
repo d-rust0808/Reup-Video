@@ -7,6 +7,11 @@ Unified, decoupled providers for Edge-TTS, gTTS, Coqui TTS, Melo TTS, and Piper 
 import os
 import sys
 import logging
+import asyncio
+import threading
+import shutil
+import subprocess
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -209,6 +214,75 @@ class MeloTTSProvider(BaseTTSProvider):
         return output_path
 
 
+class VieNeuTTSProvider(BaseTTSProvider):
+    """Local Vietnamese TTS using VieNeu-TTS v3 Turbo (ONNX on CPU/macOS)."""
+
+    _model = None
+    _lock = threading.Lock()
+
+    async def generate(
+        self,
+        text: str,
+        lang: str = "vi",
+        voice: Optional[str] = None,
+        output_path: Optional[str] = None,
+        **kwargs
+    ) -> str:
+        if (lang or "vi").lower() not in ("vi", "en"):
+            raise RuntimeError("VieNeu-TTS currently supports Vietnamese and English text only")
+        try:
+            from vieneu import Vieneu
+        except ImportError as e:
+            raise RuntimeError(
+                "VieNeu-TTS is not installed. Install vieneu==3.3.0 to enable the local Vietnamese engine."
+            ) from e
+
+        if not output_path:
+            output_path = os.path.join("data/outputs/tts", f"vieneu_{hash(text) & 0xffffffff:08x}.wav")
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+        selected_voice = (voice or "Adam").strip()
+        if selected_voice.lower().startswith("vieneu:"):
+            selected_voice = selected_voice.split(":", 1)[1].strip() or "Adam"
+
+        def _synthesize() -> str:
+            # The model is expensive to initialize and its inference state is not
+            # guaranteed to be thread-safe, so share one instance per worker process.
+            model_cls = type(self)
+            needs_convert = not output_path.lower().endswith(".wav")
+            wav_path = output_path
+            if needs_convert:
+                fd, wav_path = tempfile.mkstemp(prefix="vieneu_", suffix=".wav")
+                os.close(fd)
+            try:
+                with model_cls._lock:
+                    if model_cls._model is None:
+                        model_cls._model = Vieneu(mode="v3turbo", backend="onnx")
+                    audio = model_cls._model.infer(text, voice=selected_voice)
+                    model_cls._model.save(audio, wav_path)
+                if needs_convert:
+                    ffmpeg_bin = shutil.which("ffmpeg")
+                    if not ffmpeg_bin:
+                        raise RuntimeError("FFmpeg is required to convert VieNeu-TTS WAV output")
+                    res = subprocess.run(
+                        [ffmpeg_bin, "-y", "-i", wav_path, output_path],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if res.returncode != 0:
+                        raise RuntimeError(f"VieNeu-TTS audio conversion failed: {(res.stderr or '')[-400:]}")
+            finally:
+                if needs_convert and os.path.exists(wav_path):
+                    os.remove(wav_path)
+            return output_path
+
+        result = await asyncio.to_thread(_synthesize)
+        if not os.path.exists(result) or os.path.getsize(result) < 256:
+            raise RuntimeError(f"VieNeu-TTS failed to write audio output: {result}")
+        return result
+
+
 class KokoroTTSProvider(BaseTTSProvider):
     """
     Kokoro-82M Next-Gen Open-Source Neural TTS Provider.
@@ -282,6 +356,8 @@ class TTSProviderManager:
             "coqui-tts": CoquiTTSProvider(),
             "melo-tts": MeloTTSProvider(),
             "melo": MeloTTSProvider(),
+            "vieneu": VieNeuTTSProvider(),
+            "vieneu-tts": VieNeuTTSProvider(),
         }
 
     def get_provider(self, engine_name: str) -> BaseTTSProvider:

@@ -2,6 +2,7 @@
 
 import os
 import sys
+import sqlite3
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -29,6 +30,54 @@ def test_reup_config_default_platforms():
     cfg = ReupConfig()
     assert "tiktok" in cfg.target_platforms
     assert "youtube_shorts" in cfg.target_platforms
+    assert cfg.frame_enabled is False
+
+
+def test_delete_library_video_removes_canonical_files_and_sidecars(tmp_path, monkeypatch):
+    import asyncio
+    from app.api.extract import delete_library_video
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "RAW_INPUT_DIR", str(tmp_path))
+    for name in ("12345678.mp4", "12345678.json", "12345678.vi.srt", "douyin_12345678_title.mp4"):
+        (tmp_path / name).write_bytes(b"video")
+    (tmp_path / "87654321.mp4").write_bytes(b"keep")
+
+    result = asyncio.run(delete_library_video("12345678"))
+
+    assert result["deleted"] is True
+    assert sorted(result["removed"]) == [
+        "12345678.json",
+        "12345678.mp4",
+        "12345678.vi.srt",
+        "douyin_12345678_title.mp4",
+    ]
+    assert (tmp_path / "87654321.mp4").exists()
+
+    repeated = asyncio.run(delete_library_video("12345678"))
+    assert repeated == {"video_id": "12345678", "deleted": True, "removed": []}
+
+
+def test_delete_job_removes_platform_variants(tmp_path):
+    from app.services.queue_manager import BatchQueueManager
+
+    db_path = tmp_path / "jobs.db"
+    output = tmp_path / "job_delete.mp4"
+    variants = [output, tmp_path / "job_delete.tiktok.mp4", tmp_path / "job_delete.facebook.mp4"]
+    for path in variants:
+        path.write_bytes(b"video")
+
+    manager = BatchQueueManager(db_path=str(db_path), max_concurrent_jobs=1)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO jobs (job_id, status, output_file_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("job_delete", "COMPLETED", str(output), "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+        conn.commit()
+
+    assert manager.delete_job("job_delete") is True
+    assert all(not path.exists() for path in variants)
+    assert manager.get_job("job_delete") is None
 
 
 def test_frame_png_has_alpha_ring():
@@ -73,4 +122,3 @@ def test_failed_ws_payload_reads_error_message():
     src = inspect.getsource(ConnectionManager.on_queue_update)
     assert "error_msg" not in src
     assert "error_message" in src
-

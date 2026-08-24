@@ -130,7 +130,11 @@ async def retry_job(job_id: str, request: Request):
 
     success = await qm.retry_job(job_id)
     if not success:
-        raise HTTPException(status_code=400, detail="Failed to retry job")
+        refreshed = qm.get_job(job_id) or {}
+        raise HTTPException(
+            status_code=409,
+            detail=refreshed.get("error_message") or "Failed to retry job",
+        )
 
     # Broadcast WebSocket notification
     ws_mgr = getattr(request.app.state, "ws_manager", None)

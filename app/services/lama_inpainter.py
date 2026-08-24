@@ -58,7 +58,7 @@ def ensure_lama_weights() -> Optional[str]:
     try:
         from huggingface_hub import hf_hub_download
         os.makedirs(os.path.dirname(MODEL_REL), exist_ok=True)
-        path = hf_hub_download(repo_id=HF_REPO, filename=HF_FILE, local_dir=os.path.dirname(MODEL_REL))
+        path = hf_hub_download(repo_id=HF_REPO, filename=HF_FILE, local_dir=os.path.dirname(MODEL_REL), timeout=15)
         if path and os.path.isfile(path) and os.path.getsize(path) > 1_000_000:
             dest = os.path.abspath(MODEL_REL)
             if os.path.abspath(path) != dest:
@@ -90,6 +90,8 @@ def get_lama_session():
         avail = ort.get_available_providers()
         if "CUDAExecutionProvider" in avail:
             providers.insert(0, "CUDAExecutionProvider")
+        if "CoreMLExecutionProvider" in avail:
+            providers.insert(0, "CoreMLExecutionProvider")
         _SESSION = ort.InferenceSession(path, sess_options=opts, providers=providers)
         logger.info("LaMa ONNX ready (%s)", path)
         return _SESSION

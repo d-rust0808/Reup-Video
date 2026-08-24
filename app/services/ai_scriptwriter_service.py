@@ -50,7 +50,164 @@ class AIScriptwriterService:
 
     def is_available(self) -> bool:
         """Returns True if DeepSeek API credentials are configured."""
+        self.api_key = self.api_key or settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY", "")
         return bool(self.api_key and self.api_key.strip())
+
+    def translate_text(self, text: str, target_lang: str = "vi") -> str:
+        """Translates a single text string to target language using DeepSeek."""
+        if not text or not text.strip():
+            return ""
+        if not self.is_available():
+            return text
+
+        lang_name = {
+            "vi": "Tiếng Việt",
+            "en": "English",
+            "zh": "中文",
+            "ja": "日本語",
+            "ko": "한국어",
+        }.get((target_lang or "vi").lower(), target_lang)
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": f"Bạn là chuyên gia dịch thuật đa ngôn ngữ. Hãy dịch đoạn văn bản được cung cấp sang {lang_name} tự nhiên, chuẩn ngữ cảnh, ngắn gọn súc tích. Chỉ trả về duy nhất nội dung dịch bằng {lang_name}, không lặp lại ngôn ngữ gốc nếu khác ngôn ngữ đích, không giải thích thêm, không để trong dấu ngoặc kép."
+                },
+                {"role": "user", "content": f"Văn bản cần dịch:\n{text.strip()}"}
+            ],
+            "temperature": 0.3
+        }
+        try:
+            req = urllib.request.Request(
+                f"{self.base_url}/chat/completions",
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                ans = data["choices"][0]["message"]["content"].strip()
+                if (ans.startswith('"') and ans.endswith('"')) or (ans.startswith("'") and ans.endswith("'")):
+                    ans = ans[1:-1].strip()
+                return ans or text
+        except Exception as e:
+            logger.warning(f"DeepSeek translate_text failed: {e}")
+            return text
+
+    def translate_cues(
+        self,
+        texts: List[str],
+        target_lang: str = "vi",
+        style: str = "dub",
+        title: str = "",
+    ) -> Optional[List[str]]:
+        """
+        Translates a list of subtitle cues into target language using DeepSeek.
+        Preserves exact cue count and numbers. Returns None on failure.
+        """
+        if not texts:
+            return []
+        if not self.is_available():
+            return None
+
+        lang_name = {
+            "vi": "Tiếng Việt",
+            "en": "English",
+            "zh": "中文",
+            "ja": "日本語",
+            "ko": "한국어",
+        }.get((target_lang or "vi").lower(), target_lang)
+
+        style_n = (style or "dub").lower()
+        if style_n == "narrator":
+            vibe = (
+                "- CHẾ ĐỘ KỂ CHUYỆN: viết lời người dẫn chuyện ngôi 3, diễn đạt lại ý câu đó.\n"
+                "- Mỗi câu 1 dòng, ngắn (tối đa ~12 từ) để không đè hình.\n"
+            )
+        elif style_n == "funny":
+            vibe = (
+                "- CHẾ ĐỘ VUI NHỘN: dí dỏm, văn mạng Việt, mặn mà — hài trên đúng cảnh.\n"
+                "- Mỗi câu 1 dòng, ngắn gọn, không tục.\n"
+            )
+        else:
+            vibe = (
+                "- CHẾ ĐỘ TỰ NHIÊN: Dịch sát ý, giữ đại từ xưng hô phù hợp ngữ cảnh.\n"
+                "- Ngắn gọn, súc tích để người xem dễ đọc trên video ngắn.\n"
+            )
+
+        extra = f"Ngữ cảnh video: {title}\n" if title else ""
+        out: List[str] = []
+        chunk_size = 20
+
+        for start in range(0, len(texts), chunk_size):
+            chunk = [t.strip() for t in texts[start : start + chunk_size]]
+            numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(chunk))
+            prompt = (
+                f"Dịch các câu thoại sau sang {lang_name}.\n"
+                f"{extra}"
+                "YÊU CẦU BẮT BUỘC:\n"
+                f"{vibe}"
+                f"- BẮT BUỘC trả về đúng {len(chunk)} dòng được đánh số từ 1 đến {len(chunk)} theo định dạng: 1. <bản dịch>\n"
+                "- Không gộp dòng, không bỏ bớt câu nào, không thêm lời chào hay giải thích.\n\n"
+                f"{numbered}"
+            )
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}"
+            }
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Bạn là biên dịch viên phụ đề phim và video ngắn chuyên nghiệp. Chỉ trả về đúng danh sách câu đã đánh số theo định dạng 1. <câu dịch>, mỗi câu trên 1 dòng."
+                    },
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.3
+            }
+            try:
+                req = urllib.request.Request(
+                    f"{self.base_url}/chat/completions",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers=headers
+                )
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    content = data["choices"][0]["message"]["content"].strip()
+
+                parsed = self._parse_numbered_response(content, len(chunk))
+                if parsed and len(parsed) == len(chunk):
+                    out.extend(parsed)
+                else:
+                    logger.warning(f"DeepSeek chunk format mismatch, falling back per-line for chunk {start}")
+                    for t in chunk:
+                        out.append(self.translate_text(t, target_lang=target_lang))
+            except Exception as e:
+                logger.warning(f"DeepSeek translate_cues chunk failed: {e}")
+                return None
+
+        return out
+
+    def _parse_numbered_response(self, content: str, expected_count: int) -> Optional[List[str]]:
+        lines = [line.strip() for line in content.split("\n") if line.strip()]
+        result = {}
+        for line in lines:
+            m = re.match(r"^(\d+)[\.\:\-\)\s]+(.*)$", line)
+            if m:
+                idx = int(m.group(1))
+                text = m.group(2).strip()
+                text = re.sub(r"^[\*\"']+|[\*\"']+$", "", text).strip()
+                result[idx] = text
+
+        if len(result) == expected_count and all(i in result for i in range(1, expected_count + 1)):
+            return [result[i] for i in range(1, expected_count + 1)]
+        return None
 
     def heuristic_diarize_and_localize(
         self,
@@ -121,12 +278,9 @@ class AIScriptwriterService:
             elif any(w in lower_text for w in ["suy nghĩ", "ngươi nghe đây", "cẩn thận"]):
                 emotion = "dramatic"
 
-            # 4. Pacing Compaction: Trim excessively long translated sentences
-            words = raw_text.split()
-            if len(words) > max_words + 3:
-                compacted_text = " ".join(words[:max_words + 1])
-            else:
-                compacted_text = raw_text
+            # 4. Pacing Compaction: Trim excessively long translated sentences using smart compaction
+            from app.services.lipsync_service import compact_for_duration
+            compacted_text = compact_for_duration(raw_text, dur)
 
             copied = dict(s)
             copied["translated_text"] = compacted_text
@@ -188,7 +342,8 @@ class AIScriptwriterService:
             "   - Gán 'character_name' (ví dụ: 'Nam chính', 'Nữ chính', 'Sư phụ', 'Tiểu muội', 'Người dẫn').\n"
             "   - Gán 'gender' chính xác: 'male' (nam trẻ), 'female' (nữ trẻ), 'elder_male' (nam già/trung niên), 'elder_female' (nữ già/trung niên), 'child' (trẻ em), 'narrator' (dẫn chuyện).\n"
             "2. TỐI ƯU THỜI LƯỢNG & KHỚP KHẨU HÌNH (PACING):\n"
-            "   - Số từ Tiếng Việt của từng câu TUYỆT ĐỐI KHÔNG ĐƯỢC VƯỢT QUÁ 'max_words'. Câu dịch phải cô đọng, súc tích, vừa khít thời lượng để giọng đọc không bị tràn/đè sang câu sau.\n"
+            "   - Số từ Tiếng Việt của từng câu trong 'translated_text' TUYỆT ĐỐI KHÔNG ĐƯỢC VƯỢT QUÁ giá trị 'max_words' được cung cấp cho câu đó.\n"
+            "   - Nếu câu dịch quá dài so với 'max_words', bạn phải chủ động viết lại câu dịch ngắn gọn hơn, lược bỏ các từ đệm không cần thiết, sử dụng các từ ngắn gọn nhưng vẫn giữ nguyên ý nghĩa cốt lõi của câu thoại gốc.\n"
             "3. XƯNG HÔ ĐÚNG NGỮ CẢNH:\n"
             "   - Xưng hô nhất quán xuyên suốt (Huynh - Muội, Ta - Nàng, Sư phụ - Đồ nhi, Anh - Em, Tôi - Cậu).\n"
             "4. GÁN CẢM XÚC (EMOTION):\n"

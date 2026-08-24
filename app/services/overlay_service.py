@@ -40,6 +40,8 @@ def normalize_overlays(raw: Optional[Sequence[Any]]) -> List[Dict[str, Any]]:
         kind = (d.get("kind") or "logo").lower().strip()
         if kind in ("frame", "khung", "border"):
             kind = "frame"
+        elif kind == "overlay":
+            kind = "overlay"
         else:
             kind = "logo"
         try:
@@ -51,6 +53,10 @@ def normalize_overlays(raw: Optional[Sequence[Any]]) -> List[Dict[str, Any]]:
             continue
         if kind == "frame":
             x, y, w = 0.0, 0.0, 1.0
+        elif kind == "overlay":
+            w = max(0.04, min(3.0, w))
+            x = max(-2.0, min(1.0, x))
+            y = max(-2.0, min(1.0, y))
         else:
             w = max(0.04, min(0.80, w))
             x = max(0.0, min(max(0.0, 1.0 - w), x))
@@ -101,14 +107,14 @@ def append_overlay_filter(
         op = ov["opacity"]
         kind = ov["kind"]
         x, y, w = ov["x"], ov["y"], ov["w"]
-        if kind == "frame" or w >= 0.97:
+        if kind == "frame":
             parts.append(
                 f"[{in_idx}:v]format=rgba,colorchannelmixer=aa={op:.3f},"
                 f"scale={mw}:{mh}:force_original_aspect_ratio=disable[{lg}]"
             )
             parts.append(f"[{prev}][{lg}]overlay=0:0:{persist}[{nxt}]")
         else:
-            wf = max(0.04, min(0.80, w))
+            wf = max(0.04, min(3.0 if kind == "overlay" else 0.80, w))
             sw = max(16, int(mw * wf) // 2 * 2)
             parts.append(
                 f"[{in_idx}:v]format=rgba,colorchannelmixer=aa={op:.3f},scale={sw}:-1[{lg}]"

@@ -172,6 +172,32 @@ def extract_vocals_demucs(
     raise RuntimeError(f"Demucs vocal extraction failed or is unavailable for {input_audio_path}")
 
 
+def build_timed_speech_ducking_filter(
+    speech_intervals: List[Tuple[float, float]],
+    duck_volume: float = 0.03
+) -> str:
+    """
+    Constructs an intelligent FFmpeg volume ducking filter that mutes ONLY human speech
+    during detected speech timestamps, while leaving 100% full volume for animal noises
+    (meow, purr, barking), ambient effects, and natural background sounds.
+    """
+    if not speech_intervals:
+        return ""
+
+    conditions = []
+    for start, end in speech_intervals:
+        s = max(0.0, float(start) - 0.10)
+        e = float(end) + 0.15
+        if e > s:
+            conditions.append(f"between(t,{s:.3f},{e:.3f})")
+
+    if not conditions:
+        return ""
+
+    expr = "+".join(conditions)
+    return f"volume='if({expr},{duck_volume:.2f},1.0)':eval=frame"
+
+
 def build_vocal_mute_ffmpeg_filter(
     preserve_bgm: bool = True,
     vocal_mute_strategy: str = "auto",
@@ -185,16 +211,12 @@ def build_vocal_mute_ffmpeg_filter(
     if vocal_mute_strategy == "mute_all" or not preserve_bgm:
         return "volume=0"
 
-    # Keep kick/BGM body (<180 Hz) and air (>6 kHz). Cut speech-band mids
-    # via mid-side so original dialogue does not stack on Vietnamese TTS.
-    # A brick-wall lowpass=180 made silent stretches sound thin / "nhạt".
+    # Stereo mid-side vocal suppression: cancels center vocals (mlev=0.02) while preserving stereo BGM sides
     return (
-        "asplit=2[vm_lo][vm_hi];"
-        "[vm_lo]lowpass=f=180:poles=2,volume=0.92[vm_bass];"
-        "[vm_hi]highpass=f=180,stereotools=mlev=0.10:slev=1.22,"
-        "equalizer=f=1400:t=q:w=1.6:g=-15[vm_cut];"
-        "[vm_bass][vm_cut]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
-        "treble=g=5:f=6500"
+        "asplit=2[vm_bass_in][vm_mid_in];"
+        "[vm_bass_in]lowpass=f=160:poles=2,volume=0.85[vm_bass];"
+        "[vm_mid_in]highpass=f=160,stereotools=mlev=0.02:slev=1.35[vm_sides];"
+        "[vm_bass][vm_sides]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,volume=0.45"
     )
 
 

@@ -15,6 +15,8 @@ from typing import Tuple, Optional, List, Dict, Any, cast
 
 import numpy as np
 
+from app.models.job import JobAborted
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -541,9 +543,19 @@ def inpaint_video_opencv(
                 frames_processed += 1
 
                 if progress_callback and frames_processed % 15 == 0:
-                    cur_prog = min(0.65, 0.35 + 0.30 * (frames_processed / max(1, total_frames_est)))
+                    # Pipeline enters inpaint at 50% and exits at 65%. Mapping the
+                    # frame ratio to 35–65 kept persisted progress pinned at 50%
+                    # for the first half because queue progress is monotonic.
+                    cur_prog = min(0.65, 0.50 + 0.15 * (frames_processed / max(1, total_frames_est)))
                     try:
                         progress_callback(cur_prog)
+                    except JobAborted:
+                        for proc in (decoder, encoder_proc):
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
+                        raise
                     except Exception:
                         pass
 
@@ -596,6 +608,13 @@ def inpaint_video_opencv(
             )
             writer.write(frame)
             frames_processed += 1
+
+            if progress_callback and frames_processed % 15 == 0:
+                cur_prog = min(0.65, 0.50 + 0.15 * (frames_processed / max(1, total_frames_est)))
+                try:
+                    progress_callback(cur_prog)
+                except Exception:
+                    pass
     finally:
         cap.release()
         writer.release()

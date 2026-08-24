@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Download,
   CheckCircle2,
@@ -22,10 +22,16 @@ import {
   uploadVideoFile,
   fetchSampleVideos,
   fetchLibrary,
+  deleteLibraryVideo,
   getStreamUrl,
   submitJob,
 } from '../services/api';
 import { loadSession, saveSession } from '../services/session';
+
+function sameMediaIds(a, b) {
+  if (a.length !== b.length) return false;
+  return a.every((item, index) => item?.video_id === b[index]?.video_id);
+}
 
 export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbench, onJobsQueued }) {
   const boot = loadSession();
@@ -44,10 +50,15 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
   const [channelMessage, setChannelMessage] = useState('');
   const [queuedJobs, setQueuedJobs] = useState([]);
   const [batchBusy, setBatchBusy] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
   const onMediaExtractedRef = useRef(onMediaExtracted);
   onMediaExtractedRef.current = onMediaExtracted;
+
+  useEffect(() => {
+    onMediaExtractedRef.current?.(extractedList);
+  }, [extractedList]);
 
   useEffect(() => {
     saveSession({
@@ -65,15 +76,22 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
         [...initialMedia, ...prev].forEach((item) => {
           if (item?.video_id && !map.has(item.video_id)) map.set(item.video_id, item);
         });
-        return Array.from(map.values());
+        const next = Array.from(map.values());
+        return sameMediaIds(prev, next) ? prev : next;
       });
     }
   }, [initialMedia]);
 
-  useEffect(() => {
+  // The strip shows the most recent sources, so it has to be refetched whenever
+  // the library changes (extract, upload, delete) instead of only on mount.
+  const refreshRecent = useCallback(() => {
     fetchSampleVideos()
       .then((data) => setSamples(data.items || []))
       .catch(() => setSamples([]));
+  }, []);
+
+  useEffect(() => {
+    refreshRecent();
     fetchLibrary()
       .then((data) => {
         const items = data.items || [];
@@ -84,12 +102,11 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             if (item?.video_id && !map.has(item.video_id)) map.set(item.video_id, item);
           });
           const next = Array.from(map.values());
-          onMediaExtractedRef.current?.(next);
-          return next;
+          return sameMediaIds(prev, next) ? prev : next;
         });
       })
       .catch(() => {});
-  }, []);
+  }, [refreshRecent]);
 
   // Focus input and show in-app paste shortcut tip WITHOUT calling restricted navigator.clipboard.readText()
   const handleFocusForPaste = () => {
@@ -99,6 +116,24 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
     }
     setPasteTip(true);
     setTimeout(() => setPasteTip(false), 3000);
+  };
+
+  const handleDeleteLibraryVideo = async (item) => {
+    const videoId = item?.video_id;
+    if (!videoId || deletingId) return;
+    setDeletingId(videoId);
+    setError(null);
+    try {
+      await deleteLibraryVideo(videoId);
+      setExtractedList((prev) => {
+        return prev.filter((v) => v.video_id !== videoId);
+      });
+      refreshRecent();
+    } catch (e) {
+      setError(e.message || 'Không thể xóa video');
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   const handleExtract = async (e) => {
@@ -159,6 +194,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
         if ((result.jobs || []).length) {
           onJobsQueued?.(result.jobs);
         }
+        refreshRecent();
         return;
       }
 
@@ -183,6 +219,8 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
         onMediaExtracted?.(next);
         return next;
       });
+
+      refreshRecent();
 
       // If single video extracted, directly open it in Studio Workbench
       if (items.length === 1) {
@@ -214,6 +252,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
         onMediaExtracted?.(next);
         return next;
       });
+      refreshRecent();
       onSelectForWorkbench?.(newMedia);
     } catch (err) {
       setError(err.message || 'Tải file video lên thất bại');
@@ -267,9 +306,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             channel_id: opts.channel_id,
             post_title: item.title,
             overlays,
-            frame_enabled: opts.frame_enabled !== false,
-            frame_color: opts.frame_color || 'black',
-            frame_thickness: opts.frame_thickness || 16,
+            frame_enabled: false,
             target_platforms: opts.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
             bgm_path: opts.bgm_path || opts.bgm_id,
             bgm_volume: opts.bgm_volume ?? 0.85,
@@ -632,7 +669,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
         <div className="clean-panel rounded-3xl p-6 sm:p-8 space-y-4">
           <div className="flex items-center justify-between pb-2 border-b border-slate-100">
             <h4 className="text-xs font-black text-slate-500 uppercase tracking-wider">
-              Video mẫu — bấm để mở Studio & reup ngay
+              Video gần nhất — bấm để mở Studio & reup ngay
             </h4>
             <span className="text-xs font-semibold text-slate-500">{samples.length} clip sẵn sàng</span>
           </div>
@@ -713,13 +750,24 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
                   <span className="text-xs font-mono text-slate-500 font-medium truncate max-w-[140px]">
                     ID: {item.video_id}
                   </span>
-                  <button
-                    onClick={() => onSelectForWorkbench(item)}
-                    className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-4 py-2 rounded-xl transition shadow-sm flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <span>Mở Trong Studio</span>
-                    <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteLibraryVideo(item)}
+                      disabled={deletingId === item.video_id}
+                      className="p-2 text-rose-600 hover:bg-rose-50 rounded-xl border border-rose-200 disabled:opacity-50"
+                      title="Xóa video khỏi thư viện"
+                    >
+                      {deletingId === item.video_id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                    </button>
+                    <button
+                      onClick={() => onSelectForWorkbench(item)}
+                      className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-4 py-2 rounded-xl transition shadow-sm flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <span>Mở Trong Studio</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}

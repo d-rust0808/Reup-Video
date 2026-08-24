@@ -24,6 +24,58 @@ MODULE_VIDEOTRANS_PATH = str(PROJECT_ROOT / "app" / "modules" / "videotrans")
 _WHISPER_CACHE = {"model": None, "name": None, "device": None}
 
 
+def _is_invalid_translation(text: Optional[str]) -> bool:
+    """Detects HTTP error responses, rate-limits, or HTML blobs leaked into translations."""
+    if not text or not isinstance(text, str):
+        return True
+    low = text.lower().strip()
+    if not low:
+        return True
+    error_patterns = [
+        "error 500",
+        "server error",
+        "that's an error",
+        "that’s an error",
+        "please try again later",
+        "too many requests",
+        "429 too many",
+        "<html",
+        "<!doctype",
+        "result-container",
+        "unsupported translate type",
+    ]
+    return any(p in low for p in error_patterns)
+
+
+def _contains_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", text or ""))
+
+
+def _translation_matches_target(text: Optional[str], target_lang: str) -> bool:
+    """Reject source-language leakage before a translated cue reaches hardsub/TTS."""
+    if _is_invalid_translation(text):
+        return False
+    lang = (target_lang or "").lower().split("-")[0]
+    if lang == "vi" and _contains_cjk(text or ""):
+        return False
+    return True
+
+
+def subtitle_matches_target_language(srt_path: Optional[str], target_lang: str = "vi") -> bool:
+    """Return True only when every non-metadata SRT line matches the requested language."""
+    if not srt_path or not os.path.isfile(srt_path):
+        return False
+    try:
+        with open(srt_path, "r", encoding="utf-8-sig") as f:
+            text_lines = [
+                line.strip() for line in f
+                if line.strip() and not line.strip().isdigit() and "-->" not in line
+            ]
+    except (OSError, UnicodeError):
+        return False
+    return bool(text_lines) and all(_translation_matches_target(line, target_lang) for line in text_lines)
+
+
 class PyVideoTransError(Exception):
     """Raised when PyVideoTrans operation fails."""
     pass
@@ -290,7 +342,6 @@ class PyVideoTransService:
                 except OSError:
                     pass
 
-
     def translate_subtitles(
         self,
         subtitle_file_path: str,
@@ -301,14 +352,48 @@ class PyVideoTransService:
         title: str = "",
         duration: float = 0.0,
     ) -> Dict[str, Any]:
-        """Translates subtitle file (SRT/VTT) into target language using GoogleTranslator or CLI."""
+        """Translates subtitle file (SRT/VTT) into target language using DeepSeek, Grok, or fallbacks."""
         if not os.path.exists(subtitle_file_path):
             raise FileNotFoundError(f"Subtitle file not found: {subtitle_file_path}")
 
         target_dir = os.path.abspath(output_dir) if output_dir else os.path.dirname(os.path.abspath(subtitle_file_path))
         os.makedirs(target_dir, exist_ok=True)
 
-        # 1. Grok localization (natural Vietnamese, pacing-aware)
+        # 1. DeepSeek AI Localization (Top Priority - High Quality & Context-Aware)
+        try:
+            from app.services.ai_scriptwriter_service import ai_scriptwriter_service
+            from app.services.tts_service import parse_srt_segments, format_srt_timestamp
+            if ai_scriptwriter_service.is_available():
+                segs = parse_srt_segments(subtitle_file_path)
+                src_texts = [(s.get("text") or "").strip() for s in segs]
+                if src_texts and any(src_texts):
+                    deepseek_out = ai_scriptwriter_service.translate_cues(
+                        src_texts,
+                        target_lang=target_lang,
+                        style=style or "dub",
+                        title=title or "",
+                    )
+                    if deepseek_out and len(deepseek_out) == len(segs):
+                        base_stem = os.path.splitext(os.path.basename(subtitle_file_path))[0]
+                        out_srt = os.path.join(target_dir, f"{base_stem}_{target_lang}.srt")
+                        lines = []
+                        for i, (seg, vi) in enumerate(zip(segs, deepseek_out), start=1):
+                            text = (vi or "").strip()
+                            if not _translation_matches_target(text, target_lang):
+                                lines = []
+                                break
+                            lines.append(
+                                f"{i}\n{format_srt_timestamp(seg['start_time'])} --> {format_srt_timestamp(seg['end_time'])}\n{text}\n"
+                            )
+                        with open(out_srt, "w", encoding="utf-8") as f:
+                            f.write("\n".join(lines) + ("\n" if lines else ""))
+                        if subtitle_matches_target_language(out_srt, target_lang):
+                            logger.info(f"DeepSeek translated {len(lines)} cues -> {out_srt}")
+                            return {"status": "success", "srt_path": out_srt, "provider": "deepseek"}
+        except Exception as e:
+            logger.warning(f"DeepSeek subtitle translation failed: {e}. Falling back to next provider.")
+
+        # 2. Grok localization (natural Vietnamese, pacing-aware)
         try:
             from app.services.xai_media_service import translate_cues, is_available as grok_ok
             from app.services.tts_service import parse_srt_segments, format_srt_timestamp
@@ -327,21 +412,22 @@ class PyVideoTransService:
                         out_srt = os.path.join(target_dir, f"{base_stem}_{target_lang}.srt")
                         lines = []
                         for i, (seg, vi) in enumerate(zip(segs, grok_out), start=1):
-                            text = (vi or seg.get("text") or "").strip()
-                            if not text:
-                                continue
+                            text = (vi or "").strip()
+                            if not _translation_matches_target(text, target_lang):
+                                lines = []
+                                break
                             lines.append(
                                 f"{i}\n{format_srt_timestamp(seg['start_time'])} --> {format_srt_timestamp(seg['end_time'])}\n{text}\n"
                             )
                         with open(out_srt, "w", encoding="utf-8") as f:
                             f.write("\n".join(lines) + ("\n" if lines else ""))
-                        if os.path.exists(out_srt) and os.path.getsize(out_srt) > 0:
+                        if subtitle_matches_target_language(out_srt, target_lang):
                             logger.info(f"Grok translated {len(lines)} cues -> {out_srt}")
                             return {"status": "success", "srt_path": out_srt, "provider": "grok"}
         except Exception as e:
             logger.warning(f"Grok subtitle translation failed: {e}. Falling back to Google.")
 
-        # 2. Native High-Reliability Deep Translator (batch paragraphs, keep cue structure)
+        # 3. Native Deep Translator (with strict error filtering)
         try:
             from deep_translator import GoogleTranslator
             translator = GoogleTranslator(source="auto", target=target_lang)
@@ -365,34 +451,50 @@ class PyVideoTransService:
                 chunk = text_payload[start:start + CHUNK]
                 blob = "\n".join(chunk)
                 try:
-                    translated_blob = translator.translate(blob) or blob
-                    parts = [p.strip() for p in str(translated_blob).split("\n") if p.strip()]
-                    if len(parts) == len(chunk):
+                    translated_blob = translator.translate(blob)
+                    if _is_invalid_translation(translated_blob):
+                        translated_blob = None
+                    parts = [p.strip() for p in str(translated_blob or "").split("\n") if p.strip()]
+                    if parts and len(parts) == len(chunk) and not any(_is_invalid_translation(p) for p in parts):
                         for j, part in enumerate(parts):
                             translated_map[start + j] = part
                     else:
-                        # Fallback to per-line if Google collapsed the batch
+                        # Fallback to per-line
                         for j, src in enumerate(chunk):
                             try:
-                                translated_map[start + j] = translator.translate(src) or src
+                                single_t = translator.translate(src)
+                                if _translation_matches_target(single_t, target_lang):
+                                    translated_map[start + j] = single_t
+                                else:
+                                    translated_map[start + j] = None
                             except Exception:
-                                translated_map[start + j] = src
+                                translated_map[start + j] = None
                 except Exception:
                     for j, src in enumerate(chunk):
                         try:
-                            translated_map[start + j] = translator.translate(src) or src
+                            single_t = translator.translate(src)
+                            if _translation_matches_target(single_t, target_lang):
+                                translated_map[start + j] = single_t
+                            else:
+                                translated_map[start + j] = None
                         except Exception:
-                            translated_map[start + j] = src
+                            translated_map[start + j] = None
 
             out_lines = list(lines)
             for local_i, line_idx in enumerate(text_indices):
                 vi = translated_map.get(local_i)
-                if vi:
+                if _translation_matches_target(vi, target_lang):
                     out_lines[line_idx] = vi + "\n"
+
+            if len(translated_map) != len(text_payload) or any(
+                not _translation_matches_target(translated_map.get(i), target_lang)
+                for i in range(len(text_payload))
+            ):
+                raise PyVideoTransError("Google left one or more subtitle cues untranslated")
 
             with open(out_srt, "w", encoding="utf-8") as f:
                 f.writelines(out_lines)
-            if os.path.exists(out_srt) and os.path.getsize(out_srt) > 0:
+            if subtitle_matches_target_language(out_srt, target_lang):
                 return {"status": "success", "srt_path": out_srt}
         except Exception as e:
             logger.warning(f"Native deep_translator failed: {e}. Falling back to CLI...")
@@ -408,7 +510,14 @@ class PyVideoTransService:
 
         res = self.run_cli_command(args)
         srt_path = self._find_srt_file(subtitle_file_path, target_dir)
-        res["srt_path"] = srt_path or subtitle_file_path
+        if not subtitle_matches_target_language(srt_path, target_lang):
+            logger.error("All subtitle translators failed target-language validation")
+            return {
+                "status": "failed",
+                "srt_path": None,
+                "warning": f"Subtitle output is not fully translated to {target_lang}",
+            }
+        res["srt_path"] = srt_path
 
         return res
 

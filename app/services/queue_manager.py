@@ -12,12 +12,13 @@ import shutil
 import asyncio
 import sqlite3
 import logging
+import threading
 from datetime import datetime, timezone
 
 from typing import Optional, List, Dict, Any, Callable, Union
 from concurrent.futures import ProcessPoolExecutor
 
-from app.models.job import JobStatus, WatermarkConfig, ReupConfig
+from app.models.job import JobAborted, JobStatus, WatermarkConfig, ReupConfig
 from app.core.database import get_db_connection, init_db, DEFAULT_DB_PATH
 from app.services.reup_service import process_reup_video
 
@@ -61,6 +62,7 @@ class BatchQueueManager:
         self.executor = ProcessPoolExecutor(max_workers=max_concurrent_jobs)
         self._workers: List[asyncio.Task] = []
         self._callbacks: List[Callable] = []
+        self._shutdown = threading.Event()
         
         # Initialize SQLite database schema
         init_db(self.db_path)
@@ -105,12 +107,37 @@ class BatchQueueManager:
         self.ensure_workers()
 
     async def stop(self) -> None:
-        """Cancels workers and shuts down ProcessPoolExecutor."""
+        """Signals in-flight pipeline threads to unwind, then tears down the worker pool."""
+        self._shutdown.set()
         for worker in self._workers:
             worker.cancel()
         if self._workers:
-            await asyncio.gather(*self._workers, return_exceptions=True)
-        self.executor.shutdown(wait=False)
+            gathered = asyncio.gather(*self._workers, return_exceptions=True)
+            try:
+                await asyncio.wait_for(gathered, timeout=20)
+            except asyncio.TimeoutError:
+                logger.warning("Worker tasks did not unwind within 20s; forcing teardown")
+        self.executor.shutdown(wait=False, cancel_futures=True)
+
+    def _abort_requested(self, job_id: str) -> bool:
+        if self._shutdown.is_set():
+            return True
+        job = self.get_job(job_id)
+        return bool(job and (job.get("status") or "").upper() == "CANCELLED")
+
+    def _stage_progress_callback(self, job_id: str, stage: str) -> Callable[[float], None]:
+        """Progress sink that doubles as the cancellation checkpoint for worker threads.
+
+        The inpaint loops call this every 15 frames; raising here is the only way to
+        unwind a CPU-bound stage, since cancelling the awaiting asyncio task does not
+        interrupt the thread running it.
+        """
+        def _cb(p: float) -> None:
+            if self._abort_requested(job_id):
+                raise JobAborted(job_id)
+            self.update_job_progress(job_id, p, stage=stage)
+
+        return _cb
 
     async def recover_jobs(self) -> None:
         """Recovers interrupted jobs from database on startup/restart."""
@@ -340,7 +367,9 @@ class BatchQueueManager:
                     if not (math.isnan(prog_float) or math.isinf(prog_float)):
                         pct = prog_float * 100.0 if prog_float <= 1.0 else prog_float
                         pct = max(0.0, min(100.0, pct))
-                        updates.append("progress_percent = ?")
+                        # Progress shown over WebSocket and progress loaded after a
+                        # page refresh must come from the same monotonic value.
+                        updates.append("progress_percent = MAX(COALESCE(progress_percent, 0), ?)")
                         vals.append(pct)
                 except Exception:
                     pass
@@ -378,7 +407,11 @@ class BatchQueueManager:
                     prog_float = 0.0
                 pct = prog_float * 100.0 if prog_float <= 1.0 else prog_float
                 pct = max(0.0, min(100.0, pct))
-                updates.append("progress_percent = ?")
+                if status_upper == "PENDING":
+                    # An explicit retry starts a new attempt and may reset progress.
+                    updates.append("progress_percent = ?")
+                else:
+                    updates.append("progress_percent = MAX(COALESCE(progress_percent, 0), ?)")
                 vals.append(pct)
             except (ValueError, TypeError):
                 logger.warning(f"Invalid progress value '{progress}' for job {job_id}, skipping progress update")
@@ -540,6 +573,15 @@ class BatchQueueManager:
         if not job or job["status"] not in ("FAILED", "CANCELLED"):
             return False
 
+        input_path = job.get("input_file_path") or job.get("input_path") or job.get("source_url")
+        if not input_path or not os.path.exists(input_path):
+            self.update_job_status(
+                job_id,
+                "FAILED",
+                error_message=f"Không thể chạy lại: video nguồn không còn tồn tại ({input_path or 'không xác định'})",
+            )
+            return False
+
         self.update_job_status(job_id, "PENDING", progress=0.0, error_message=None)
         await self.queue.put(job_id)
         return True
@@ -604,11 +646,17 @@ class BatchQueueManager:
             return False
 
         out_path = job.get("output_path") or job.get("output_file_path")
-        if out_path and os.path.exists(out_path):
-            try:
-                os.remove(out_path)
-            except OSError as e:
-                logger.warning(f"Could not delete output file {out_path}: {e}")
+        if out_path:
+            out_dir = os.path.dirname(os.path.abspath(out_path))
+            master_stem = os.path.splitext(os.path.basename(out_path))[0]
+            # Platform exports use <job_id>.<platform>.mp4 and otherwise reappear
+            # when /outputs scans the directory after a page reload.
+            for name in os.listdir(out_dir) if os.path.isdir(out_dir) else []:
+                if name == f"{master_stem}.mp4" or (name.startswith(f"{master_stem}.") and name.endswith(".mp4")):
+                    try:
+                        os.remove(os.path.join(out_dir, name))
+                    except OSError as e:
+                        logger.warning(f"Could not delete output file {name}: {e}")
 
         with self._get_conn() as conn:
             conn.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
@@ -940,7 +988,7 @@ class BatchQueueManager:
                         video_path=current_video_path,
                         config=wm_config,
                         output_path=stage2_out_path,
-                        progress_callback=lambda p: self.update_job_progress(job_id, p, stage="WATERMARK_REMOVAL")
+                        progress_callback=self._stage_progress_callback(job_id, "WATERMARK_REMOVAL")
                     )
 
                     if stage2_res_path and os.path.exists(stage2_res_path):
@@ -952,19 +1000,20 @@ class BatchQueueManager:
                             stage="WATERMARK_REMOVAL",
                             progress=0.65
                         )
-                    try:
-                        from app.services.subtitle_detector import persistent_text_cover_filters
-                        covers = persistent_text_cover_filters(current_video_path)
-                        if covers:
-                            reup_config.text_cover_vf = ",".join(covers)
-                            self.append_job_log(
-                                job_id,
-                                f"🧽 Phủ nốt {len(covers)} vệt chữ còn sót (delogo)",
-                                level="INFO",
-                                stage="WATERMARK_REMOVAL",
-                            )
-                    except Exception as e:
-                        logger.warning(f"residual text cover failed: {e}")
+                    if fold_algo in ("all", "all_in_one"):
+                        try:
+                            from app.services.subtitle_detector import persistent_text_cover_filters
+                            covers = persistent_text_cover_filters(current_video_path)
+                            if covers:
+                                reup_config.text_cover_vf = ",".join(covers)
+                                self.append_job_log(
+                                    job_id,
+                                    f"🧽 Phủ nốt {len(covers)} vệt chữ còn sót (delogo)",
+                                    level="INFO",
+                                    stage="WATERMARK_REMOVAL",
+                                )
+                        except Exception as e:
+                            logger.warning(f"residual text cover failed: {e}")
 
             # ------------------------------------------------------------------
             # Stage 3: REUP_TRANSFORM
@@ -1172,6 +1221,8 @@ class BatchQueueManager:
         except Exception as e:
             if "CANCEL" in str(e).upper():
                 raise
+            if isinstance(e, FileNotFoundError):
+                raise
             self.append_job_log(
                 job_id,
                 f"🔁 Lỗi lần 1 ({e}). Tự chạy lại 1 lần…",
@@ -1199,10 +1250,17 @@ class BatchQueueManager:
             except Exception:
                 pass
             job_id = await self.queue.get()
+            if self._shutdown.is_set():
+                self.queue.task_done()
+                break
             try:
                 await self._process_job_pipeline(job_id)
             except asyncio.CancelledError:
                 break
+            except JobAborted:
+                logger.info(f"Job {job_id} aborted (cancel or shutdown)")
+                if self._shutdown.is_set():
+                    break
             except Exception as e:
                 logger.error(f"Worker pipeline error for job {job_id}: {e}")
                 self.update_job_status(job_id, "FAILED", error_message=str(e))
@@ -1219,13 +1277,14 @@ class BatchQueueManager:
         try:
             await loop.run_in_executor(None, self._run_pipeline_stages, job_id)
         except asyncio.CancelledError:
-            pass
+            raise
         except Exception as e:
             logger.error(f"Worker pipeline async execution error for job {job_id}: {e}")
+            if isinstance(e, FileNotFoundError):
+                return
             try:
                 self.append_job_log(job_id, f"🔁 Tự chạy lại 1 lần sau lỗi: {e}", level="WARN")
                 self.update_job_status(job_id, "PENDING", progress=0.05, error_message=None)
                 await loop.run_in_executor(None, self._run_pipeline_stages, job_id)
             except Exception as e2:
                 logger.error(f"Retry also failed for {job_id}: {e2}")
-

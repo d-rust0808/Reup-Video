@@ -41,7 +41,7 @@ class Settings(BaseModel):
         description="DeepSeek Base URL"
     )
     DEEPSEEK_MODEL: str = Field(
-        default_factory=lambda: os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        default_factory=lambda: os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         description="DeepSeek Model Name"
     )
     RAW_INPUT_DIR: str = Field(
@@ -79,6 +79,10 @@ class Settings(BaseModel):
     BGM_DIR: str = Field(
         default_factory=lambda: os.getenv("BGM_DIR", "data/bgm"),
         description="Directory for harvested background-music library"
+    )
+    JAMENDO_CLIENT_ID: str = Field(
+        default_factory=lambda: os.getenv("JAMENDO_CLIENT_ID", ""),
+        description="Jamendo API client_id for online BGM search (devportal.jamendo.com)"
     )
     DB_PATH: str = Field(
         default_factory=lambda: os.getenv("DB_PATH", os.getenv("DATABASE_PATH", "data/jobs.sqlite")),

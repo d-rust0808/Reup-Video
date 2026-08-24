@@ -27,6 +27,14 @@ JobStatusType = Literal[
 ]
 
 
+class JobAborted(BaseException):
+    """Raised inside a worker thread to unwind a job on cancel or server shutdown.
+
+    Derives from BaseException so the pipeline's broad `except Exception` handlers
+    cannot swallow it and mark the job FAILED.
+    """
+
+
 class OverlayItem(BaseModel):
     """A channel branding logo or full-frame khung burned onto every output frame."""
     model_config = ConfigDict(populate_by_name=True)
@@ -120,7 +128,7 @@ class ReupConfig(BaseModel):
     dynamic_motion: bool = Field(default=False, description="Enables dynamic micro-zoom/pan to disrupt temporal match kernels (TMK)")
     meta_compliance_mode: bool = Field(default=False, description="Enables Meta Facebook strict anti-fingerprint compliance preset")
     youtube_compliance_mode: bool = Field(default=False, description="Enables YouTube Content ID and YPP strict compliance preset")
-    enable_vocal_mute: bool = Field(default=True, description="Enables original vocal extraction and muting pass")
+    enable_vocal_mute: bool = Field(default=False, description="Enables original vocal extraction and muting pass")
     vocal_mute_strategy: str = Field(default="auto", description="Strategy for vocal muting: 'auto', 'demucs', 'ffmpeg_filter', 'mute_all'")
     preserve_bgm: bool = Field(default=True, description="Preserves background audio/music after vocal muting")
     audio_ducking: bool = Field(default=True, description="Ducks BGM under TTS; silent gaps keep full music")
@@ -147,6 +155,16 @@ class ReupConfig(BaseModel):
         lt=0.5,
         description="Crop this fraction off the bottom to drop burned-in source subtitles (0.13 = 13%)",
     )
+    trim_start_sec: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Number of seconds to trim/cut from the beginning of the video",
+    )
+    trim_end_sec: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Number of seconds to trim/cut from the end of the video",
+    )
 
     # Channel auto-distribution
     channel_id: Optional[str] = Field(default=None, description="Target distribution channel ID")
@@ -162,7 +180,7 @@ class ReupConfig(BaseModel):
         default_factory=list,
         description="Channel branding logos/frames burned onto every frame",
     )
-    frame_enabled: bool = Field(default=True, description="Burn a cinematic border onto the video")
+    frame_enabled: bool = Field(default=False, description="Burn a custom border only when explicitly enabled")
     frame_color: str = Field(default="black", description="Outer border color name or hex")
     frame_thickness: int = Field(default=16, ge=0, le=80, description="Outer border thickness in pixels")
     bgm_path: Optional[str] = Field(default=None, description="Library BGM file to replace source music")

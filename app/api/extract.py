@@ -61,7 +61,7 @@ def _studio_reup_defaults(platform: str, overrides: Optional[dict] = None) -> Re
         "tts_engine": "edge-tts",
         "target_lang": "vi",
         "source_lang": "zh" if platform in ("douyin", "kuaishou", "xiaohongshu") else "auto",
-        "frame_enabled": True,
+        "frame_enabled": False,
         "frame_color": "black",
         "frame_thickness": 16,
         "publish_status": "READY",
@@ -397,37 +397,94 @@ async def list_library():
     return {"items": items, "count": len(items)}
 
 
+@router.delete("/library/{video_id}")
+async def delete_library_video(video_id: str, request: Request = None):
+    """Delete one downloaded source and its metadata/sidecars permanently."""
+    import re
+
+    safe_id = str(video_id or "").strip()
+    if not safe_id or not re.fullmatch(r"[A-Za-z0-9_-]+", safe_id):
+        raise HTTPException(status_code=400, detail="Invalid video ID")
+
+    raw_dir = os.path.abspath(settings.RAW_INPUT_DIR)
+    if request is not None:
+        qm = getattr(request.app.state, "queue_manager", None)
+        if qm is not None:
+            active = qm.find_active_by_input(os.path.join(settings.RAW_INPUT_DIR, f"{safe_id}.mp4"))
+            if active:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Video đang được job {active['job_id']} sử dụng; hãy hủy job trước khi xóa",
+                )
+    removed = []
+    for name in os.listdir(raw_dir) if os.path.isdir(raw_dir) else []:
+        stem, ext = os.path.splitext(name)
+        canonical_match = re.search(r"(?:^|_)(\d{8,})", stem)
+        canonical = canonical_match.group(1) if canonical_match else stem.split(".")[0]
+        if canonical != safe_id and stem != safe_id and not stem.startswith(f"{safe_id}."):
+            continue
+        path = os.path.abspath(os.path.join(raw_dir, name))
+        if os.path.commonpath([raw_dir, path]) != raw_dir or not os.path.isfile(path):
+            continue
+        try:
+            os.remove(path)
+            removed.append(name)
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"Could not delete {name}: {e}") from e
+
+    # Idempotent delete: a stale client/session can request deletion after the
+    # source was already removed. Treat the desired absent state as success so
+    # the client can clear its persisted card instead of looping on a 404.
+    return {"video_id": safe_id, "deleted": True, "removed": removed}
+
+
+RECENT_SOURCES_LIMIT = 3
+
+_SAMPLE_TITLES = {
+    "douyin_123": "Mẫu Douyin — Đêm đầu ở chung (12s, sẵn vietsub)",
+    "kuaishou_456": "Mẫu Kuaishou — cùng clip",
+    "xiaohongshu_789": "Mẫu Xiaohongshu — cùng clip",
+}
+
+
 @router.get("/samples")
-async def list_sample_videos():
-    """Returns seeded studio sample clips the UI can load in one click."""
+async def list_recent_sources(limit: int = RECENT_SOURCES_LIMIT):
+    """
+    Returns the most recently downloaded source clips the UI can open in one click.
+
+    Reuses /library (already sorted by mtime desc) so both views agree. Seeded
+    demo clips are only shown when nothing real has been downloaded yet,
+    otherwise they'd keep reappearing on every app start.
+    """
     from app.services.sample_media import SAMPLE_IDS, is_playable_mp4
 
-    items = []
-    titles = {
-        "douyin_123": "Mẫu Douyin — Đêm đầu ở chung (12s, sẵn vietsub)",
-        "kuaishou_456": "Mẫu Kuaishou — cùng clip",
-        "xiaohongshu_789": "Mẫu Xiaohongshu — cùng clip",
-    }
-    platforms = {
-        "douyin_123": "douyin",
-        "kuaishou_456": "kuaishou",
-        "xiaohongshu_789": "xiaohongshu",
-    }
-    for sid in SAMPLE_IDS:
-        fpath = os.path.join(settings.RAW_INPUT_DIR, f"{sid}.mp4")
+    library = await list_library()
+    items = library.get("items") or []
+
+    real = [it for it in items if it.get("video_id") not in SAMPLE_IDS]
+    picked = real if real else [it for it in items if it.get("video_id") in SAMPLE_IDS]
+
+    try:
+        cap = max(1, int(limit))
+    except (TypeError, ValueError):
+        cap = RECENT_SOURCES_LIMIT
+    picked = picked[:cap]
+
+    out = []
+    for it in picked:
+        fpath = it.get("file_path") or ""
         if not is_playable_mp4(fpath):
             continue
-        items.append({
-            "video_id": sid,
-            "platform": platforms.get(sid, "douyin"),
-            "title": titles.get(sid, sid),
-            "author": "Studio Sample",
-            "file_path": fpath,
-            "file_size": os.path.getsize(fpath),
-            "direct_stream_url": f"/api/v1/videos/stream/{sid}",
-            "has_vietsub": os.path.exists(os.path.splitext(fpath)[0] + ".vi.srt"),
-        })
-    return {"items": items, "count": len(items)}
+        vid = it.get("video_id")
+        is_sample = vid in SAMPLE_IDS
+        entry = {**it, "is_sample": is_sample}
+        if is_sample:
+            # /library derives the title from the stem when no .json sidecar exists,
+            # which would surface a raw id like "douyin_123".
+            entry["title"] = _SAMPLE_TITLES.get(vid, it.get("title") or vid)
+            entry["author"] = "Studio Sample"
+        out.append(entry)
+    return {"items": out, "count": len(out)}
 
 
 @router.post("/studio/overlay")
