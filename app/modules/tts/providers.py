@@ -65,38 +65,13 @@ class EdgeTTSProvider(BaseTTSProvider):
             raise RuntimeError("edge-tts package is not installed.") from e
 
         if not voice:
-            voice = "vi-VN-HoaiMy-Fast" if lang == "vi" else "en-US-AvaNeural"
+            voice = "vi-VN-HoaiMyNeural" if lang == "vi" else "en-US-AvaNeural"
 
-        # Voice style presets mapping for Vietnamese
         actual_voice = voice
         actual_rate = rate
         actual_pitch = pitch
-        caller_forced_rate = bool(rate and rate != "+0%")
-
         vlow = str(actual_voice or "").lower()
-        # UI presets resolve to the two native Vietnamese Edge voices with
-        # pacing tuned for short-form review and narration.
-        if actual_voice == "vi-VN-HoaiMy-Fast":
-            actual_voice = "vi-VN-HoaiMyNeural"
-            if not caller_forced_rate:
-                actual_rate = "+10%"
-        elif actual_voice == "vi-VN-HoaiMy-Warm":
-            actual_voice = "vi-VN-HoaiMyNeural"
-            if not caller_forced_rate:
-                actual_rate = "-4%"
-            if actual_pitch == "+0Hz":
-                actual_pitch = "-2Hz"
-        elif actual_voice == "vi-VN-NamMinh-Fast":
-            actual_voice = "vi-VN-NamMinhNeural"
-            if not caller_forced_rate:
-                actual_rate = "+8%"
-        elif actual_voice == "vi-VN-NamMinh-Deep":
-            actual_voice = "vi-VN-NamMinhNeural"
-            if not caller_forced_rate:
-                actual_rate = "-6%"
-            if actual_pitch == "+0Hz":
-                actual_pitch = "-3Hz"
-        elif actual_voice == "gtts-vi" or vlow.startswith("kokoro"):
+        if actual_voice == "gtts-vi" or vlow.startswith("kokoro"):
             actual_voice = "vi-VN-HoaiMyNeural"
 
         if not output_path:
@@ -243,9 +218,9 @@ class VieNeuTTSProvider(BaseTTSProvider):
             output_path = os.path.join("data/outputs/tts", f"vieneu_{hash(text) & 0xffffffff:08x}.wav")
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
-        selected_voice = (voice or "Adam").strip()
+        selected_voice = (voice or "Trúc Ly").strip()
         if selected_voice.lower().startswith("vieneu:"):
-            selected_voice = selected_voice.split(":", 1)[1].strip() or "Adam"
+            selected_voice = selected_voice.split(":", 1)[1].strip() or "Trúc Ly"
         if "-" in selected_voice or selected_voice.lower() in {"female", "male", "neutral"}:
             selected_voice = "Adam"
 
@@ -309,7 +284,7 @@ class KokoroTTSProvider(BaseTTSProvider):
         except ImportError as e:
             logger.warning(f"Kokoro package not available ({e}). Falling back to Edge-TTS.")
             edge_prov = EdgeTTSProvider()
-            return await edge_prov.generate(text=text, lang="vi", voice="vi-VN-HoaiMy-Fast", output_path=output_path)
+            return await edge_prov.generate(text=text, lang="vi", voice="vi-VN-HoaiMyNeural", output_path=output_path)
 
         if not output_path:
             filename = f"kokoro_{hash(text) & 0xffffffff:08x}.wav"
@@ -342,7 +317,7 @@ class KokoroTTSProvider(BaseTTSProvider):
         except Exception as e:
             logger.warning(f"Kokoro-82M synthesis error ({e}). Falling back to Edge-TTS.")
             edge_prov = EdgeTTSProvider()
-            return await edge_prov.generate(text=text, lang="vi", voice="vi-VN-HoaiMy-Fast", output_path=output_path)
+            return await edge_prov.generate(text=text, lang="vi", voice="vi-VN-HoaiMyNeural", output_path=output_path)
 
         return output_path
 

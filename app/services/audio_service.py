@@ -212,12 +212,13 @@ def build_vocal_mute_ffmpeg_filter(
     if vocal_mute_strategy == "mute_all" or not preserve_bgm:
         return "volume=0"
 
-    # Stereo mid-side vocal suppression: cancels center vocals (mlev=0.02) while preserving stereo BGM sides
+    # Stereo mid-side vocal suppression: cancels center vocals while keeping the
+    # remaining track near its original loudness.
     return (
         "asplit=2[vm_bass_in][vm_mid_in];"
         "[vm_bass_in]lowpass=f=160:poles=2,volume=0.85[vm_bass];"
         "[vm_mid_in]highpass=f=160,stereotools=mlev=0.02:slev=1.35[vm_sides];"
-        "[vm_bass][vm_sides]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,volume=0.45"
+        "[vm_bass][vm_sides]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,volume=1.0"
     )
 
 
@@ -272,6 +273,43 @@ def apply_ffmpeg_vocal_mute(
     except Exception as e:
         logger.error(f"Failed to execute FFmpeg vocal mute filter on {input_audio_path}: {e}")
         return False
+
+
+def mix_separated_stems(
+    background_path: str,
+    vocal_path: str,
+    output_path: str,
+    vocal_volume: float = 0.10,
+) -> bool:
+    """Keeps the separated background intact while retaining quiet source dialogue."""
+    ffmpeg_bin = find_ffmpeg_binary()
+    if not ffmpeg_bin or not os.path.exists(background_path) or not os.path.exists(vocal_path):
+        return False
+
+    gain = max(0.0, min(1.0, float(vocal_volume)))
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    filter_complex = (
+        "[0:a]aresample=44100,aformat=channel_layouts=stereo[bg];"
+        f"[1:a]aresample=44100,aformat=channel_layouts=stereo,volume={gain:.3f}[voc];"
+        "[bg][voc]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[aout]"
+    )
+    cmd = [
+        ffmpeg_bin, "-y",
+        "-i", background_path,
+        "-i", vocal_path,
+        "-filter_complex", filter_complex,
+        "-map", "[aout]",
+        "-c:a", "pcm_s16le" if output_path.endswith(".wav") else "aac",
+        output_path,
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            return True
+        logger.warning(f"Separated stem mix failed ({res.returncode}): {(res.stderr or '')[-400:]}")
+    except Exception as e:
+        logger.warning(f"Separated stem mix failed: {e}")
+    return False
 
 
 def mix_audio_tracks(
@@ -371,18 +409,27 @@ def process_vocal_muting(
     demucs_attempted = False
     demucs_success = False
 
-    if strategy in ("auto", "demucs"):
+    if strategy in ("auto", "demucs", "demucs_duck"):
         demucs_attempted = True
         if check_demucs_available():
             try:
                 with tempfile.TemporaryDirectory(prefix="demucs_out_") as tmp_dir:
                     vocal_path, bgm_path = extract_vocals_demucs(input_audio_path, tmp_dir)
                     if bgm_path and os.path.exists(bgm_path):
-                        shutil.copyfile(bgm_path, output_audio_path)
+                        if strategy == "demucs_duck":
+                            if not vocal_path or not mix_separated_stems(
+                                bgm_path,
+                                vocal_path,
+                                output_audio_path,
+                                vocal_volume=cfg.original_vocal_volume,
+                            ):
+                                raise RuntimeError("Failed to mix the separated vocal and background stems")
+                        else:
+                            shutil.copyfile(bgm_path, output_audio_path)
                         demucs_success = True
                         return {
                             "status": "completed",
-                            "method": "demucs",
+                            "method": strategy if strategy == "demucs_duck" else "demucs",
                             "input_audio_path": input_audio_path,
                             "output_audio_path": output_audio_path,
                             "demucs_vocal_path": vocal_path,

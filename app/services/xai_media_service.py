@@ -279,7 +279,7 @@ def resolve_vietsub_style(style: str, duration: float) -> str:
 
 
 LANG_DEFAULT_VOICE = {
-    "vi": "vi-VN-HoaiMy-Fast",
+    "vi": "vieneu:Trúc Ly",
     "en": "en-US-AriaNeural",
     "th": "th-TH-PremwadeeNeural",
     "id": "id-ID-GadisNeural",

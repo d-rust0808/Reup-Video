@@ -65,8 +65,72 @@ def test_scriptwriter_sends_source_context_and_rewrites_once(monkeypatch):
     assert user_payload["video_title"] == "Cha và con"
     assert user_payload["dialogues"][0]["source_text"] == "那一天我和父亲彻底决裂了"
     assert "ASR có thể cắt một câu" in captured["payload"]["messages"][0]["content"]
+    assert "JSON phải hợp lệ tuyệt đối" in captured["payload"]["messages"][0]["content"]
+    assert "max_tokens" not in captured["payload"]
     assert captured["timeout"] == 120
     assert result[0]["translated_text"] == "Ngày ấy, tôi và cha đã thực sự rạn nứt."
+
+
+def test_scriptwriter_recovers_truncated_json_with_chunked_translation(monkeypatch):
+    from app.services.ai_scriptwriter_service import AIScriptwriterService
+
+    responses = [
+        {
+            "choices": [{
+                "message": {
+                    "content": '{"dialogues":[{"index":1,"translated_text":"Chuỗi bị cắt',
+                },
+                "finish_reason": "length",
+            }],
+        },
+        {
+            "choices": [{
+                "message": {
+                    "content": "1. Xin chào.\n2. Bạn khỏe không?",
+                },
+                "finish_reason": "stop",
+            }],
+        },
+    ]
+
+    class FakeResponse:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(self.body, ensure_ascii=False).encode("utf-8")
+
+    def fake_urlopen(_request, timeout):
+        assert timeout in (60, 120)
+        return FakeResponse(responses.pop(0))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    service = AIScriptwriterService(api_key="test-key")
+    result = service.localize_script([
+        {
+            "index": 1,
+            "start_time": 0.0,
+            "end_time": 1.0,
+            "duration": 1.0,
+            "text": "你好",
+        },
+        {
+            "index": 2,
+            "start_time": 1.0,
+            "end_time": 2.0,
+            "duration": 1.0,
+            "text": "你好吗",
+        },
+    ])
+
+    assert responses == []
+    assert [item["translated_text"] for item in result] == ["Xin chào.", "Bạn khỏe không?"]
 
 
 def test_pyvideotrans_cli_starts_without_qt_gui_dependency():

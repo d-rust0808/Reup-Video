@@ -149,6 +149,52 @@ def test_clean_audio_modes_keep_or_remove_source_background():
     assert mute_af == "volume=0"
 
 
+def test_demucs_duck_keeps_background_and_mixes_quiet_source_voice(monkeypatch, tmp_path):
+    from app.services import audio_service
+
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"RIFF" + b"\x00" * 512)
+    captured = {}
+
+    def fake_extract(_input_path, output_dir):
+        vocal = os.path.join(output_dir, "vocals.wav")
+        background = os.path.join(output_dir, "no_vocals.wav")
+        with open(vocal, "wb") as f:
+            f.write(b"RIFF" + b"\x00" * 512)
+        with open(background, "wb") as f:
+            f.write(b"RIFF" + b"\x00" * 512)
+        return vocal, background
+
+    def fake_mix(background_path, vocal_path, output_path, vocal_volume):
+        captured.update({
+            "background_path": background_path,
+            "vocal_path": vocal_path,
+            "vocal_volume": vocal_volume,
+        })
+        with open(output_path, "wb") as f:
+            f.write(b"RIFF" + b"\x00" * 512)
+        return True
+
+    monkeypatch.setattr(audio_service, "check_demucs_available", lambda: True)
+    monkeypatch.setattr(audio_service, "extract_vocals_demucs", fake_extract)
+    monkeypatch.setattr(audio_service, "mix_separated_stems", fake_mix)
+
+    output = tmp_path / "ducked.wav"
+    cfg = ReupConfig(
+        enable_vocal_mute=True,
+        preserve_bgm=True,
+        vocal_mute_strategy="demucs_duck",
+        original_vocal_volume=0.08,
+    )
+    result = audio_service.process_vocal_muting(str(source), str(output), config=cfg)
+
+    assert result["method"] == "demucs_duck"
+    assert output.exists()
+    assert captured["vocal_volume"] == pytest.approx(0.08)
+    assert captured["background_path"].endswith("no_vocals.wav")
+    assert captured["vocal_path"].endswith("vocals.wav")
+
+
 def test_crop_percent_slider_units():
     cfg = ReupConfig(crop_percent=2.0)
     assert 0.01 <= cfg.crop_percent <= 0.05
@@ -243,6 +289,7 @@ def test_lipsync_default_on():
 
 @pytest.mark.anyio
 async def test_synchronized_tts_uses_exact_srt_text_without_cutting(monkeypatch, tmp_path):
+    from app.services import tts_service as tts_module
     from app.services.tts_service import get_audio_duration, parse_srt_segments, tts_service
 
     srt = tmp_path / "voice.srt"
@@ -262,7 +309,15 @@ async def test_synchronized_tts_uses_exact_srt_text_without_cutting(monkeypatch,
             wav.writeframes(b"\x00\x00" * int(16000 * 0.8))
         return output_path
 
+    real_scale_audio_speed = tts_module.scale_audio_speed_ffmpeg
+    applied_speeds = []
+
+    def track_scale_audio_speed(input_audio_path, output_audio_path, speed_factor, sample_rate=44100):
+        applied_speeds.append(speed_factor)
+        return real_scale_audio_speed(input_audio_path, output_audio_path, speed_factor, sample_rate)
+
     monkeypatch.setattr(tts_service, "generate_speech", fake_generate_speech)
+    monkeypatch.setattr(tts_module, "scale_audio_speed_ffmpeg", track_scale_audio_speed)
     output = tmp_path / "voice.wav"
     result = await tts_service.synthesize_synchronized_tts(
         srt_path=str(srt),
@@ -278,7 +333,9 @@ async def test_synchronized_tts_uses_exact_srt_text_without_cutting(monkeypatch,
     assert [seg["text"] for seg in aligned] == [first, second]
     assert aligned[0]["duration"] > 0.4
     assert aligned[1]["start_time"] >= aligned[0]["end_time"]
-    assert get_audio_duration(str(output)) > 0.9
+    assert applied_speeds == [2.0, 2.0]
+    assert [clip["speed_factor"] for clip in result["clips"]] == [2.0, 2.0]
+    assert 0.75 <= get_audio_duration(str(output)) <= 0.9
 
 
 @pytest.mark.anyio
@@ -318,7 +375,7 @@ async def test_synchronized_tts_skips_punctuation_only_cues(monkeypatch, tmp_pat
     assert aligned_texts == ["Xin chào"]
 
 
-def test_tts_mix_ducks_only_during_speech():
+def test_tts_mix_preserves_source_gain():
     from app.services.reup_service import (
         build_tts_bgm_mix_filter,
         build_reup_filtergraph,
@@ -326,7 +383,8 @@ def test_tts_mix_ducks_only_during_speech():
     )
     from app.services.audio_service import build_timed_speech_ducking_filter, build_vocal_mute_ffmpeg_filter
     fc = build_tts_bgm_mix_filter()
-    assert "sidechaincompress" in fc
+    assert "sidechaincompress" not in fc
+    assert "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.0[bg]" in fc
     assert "stereotools" not in fc
     assert "volume=0.22" not in fc
     assert "[0:a]lowpass=f=180" not in fc
@@ -335,6 +393,7 @@ def test_tts_mix_ducks_only_during_speech():
     assert "stereotools=" in mute
     assert "asplit=" in mute
     assert "lowpass=" in mute
+    assert mute.endswith("volume=1.0")
     cfg = ReupConfig(enable_vocal_mute=True, film_grain=0, pitch_shift=False, speed_factor=1.0)
     graph, has_a, vf, af = build_reup_filtergraph(cfg, has_audio=True)
     assert has_a is True
@@ -346,6 +405,8 @@ def test_tts_mix_ducks_only_during_speech():
     dub_cfg = ReupConfig(enable_tts=True, enable_vocal_mute=True, vocal_mute_strategy="demucs")
     assert should_use_demucs_for_dubbing(dub_cfg, [(1.0, 2.0)]) is True
     assert should_use_demucs_for_dubbing(dub_cfg, []) is True
+    duck_cfg = ReupConfig(enable_tts=True, enable_vocal_mute=True, vocal_mute_strategy="demucs_duck")
+    assert should_use_demucs_for_dubbing(duck_cfg, [(1.0, 2.0)]) is True
     auto_cfg = ReupConfig(enable_tts=True, enable_vocal_mute=True, vocal_mute_strategy="auto")
     assert should_use_demucs_for_dubbing(auto_cfg, [(1.0, 2.0)]) is False
     mute_all_cfg = ReupConfig(enable_vocal_mute=True, preserve_bgm=False, vocal_mute_strategy="mute_all")
@@ -373,16 +434,29 @@ def test_mid_text_cover_appended_to_filtergraph():
     assert "delogo=" in vf
 
 
-def test_default_vietnamese_engine_is_native_edge_tts():
+def test_default_vietnamese_engine_uses_local_vieneu_presets():
     from app.services.tts_service import DEFAULT_VOICES
-    assert ReupConfig().tts_voice == "vi-VN-HoaiMy-Fast"
-    assert ReupConfig().tts_engine == "edge-tts"
-    assert DEFAULT_VOICES["vi"]["female"] == "vi-VN-HoaiMy-Fast"
-    assert DEFAULT_VOICES["vi"]["male"] == "vi-VN-NamMinh-Fast"
+    assert ReupConfig().tts_voice == "vieneu:Trúc Ly"
+    assert ReupConfig().tts_engine == "vieneu"
+    assert DEFAULT_VOICES["vi"]["female"] == "vieneu:Trúc Ly"
+    assert DEFAULT_VOICES["vi"]["male"] == "vieneu:Phạm Tuyên"
 
-    migrated = ReupConfig(tts_voice="vieneu:Trúc Ly", tts_engine="vieneu", target_lang="vi")
-    assert migrated.tts_voice == "vi-VN-HoaiMy-Fast"
-    assert migrated.tts_engine == "edge-tts"
+    migrated = ReupConfig(tts_voice="vi-VN-HoaiMy-Fast", tts_engine="edge-tts", target_lang="vi")
+    assert migrated.tts_voice == "vieneu:Trúc Ly"
+    assert migrated.tts_engine == "vieneu"
+
+
+@pytest.mark.anyio
+async def test_supported_vietnamese_voices_are_real_vieneu_presets():
+    from app.api.process import get_supported_voices
+
+    result = await get_supported_voices()
+    vi_voices = [voice for voice in result["voices"] if voice["lang"] == "vi"]
+
+    assert len(vi_voices) == 20
+    assert result["default_voice"] == "vieneu:Trúc Ly"
+    assert all(voice["id"].startswith("vieneu:") for voice in vi_voices)
+    assert not any("HoaiMy" in voice["id"] or "NamMinh" in voice["id"] for voice in vi_voices)
 
 
 @pytest.mark.anyio
@@ -419,7 +493,7 @@ async def test_vieneu_provider_uses_local_preset_voice(tmp_path, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_native_vietnamese_review_presets_map_to_edge_voices(tmp_path, monkeypatch):
+async def test_edge_vietnamese_voice_is_not_pitch_shifted_by_a_fake_preset(tmp_path, monkeypatch):
     from app.modules.tts.providers import EdgeTTSProvider
 
     calls = []
@@ -436,49 +510,52 @@ async def test_native_vietnamese_review_presets_map_to_edge_voices(tmp_path, mon
     provider = EdgeTTSProvider()
 
     await provider.generate(
-        "Đây là giọng review nhanh.",
+        "Đây là giọng nữ tiêu chuẩn.",
         lang="vi",
-        voice="vi-VN-HoaiMy-Fast",
+        voice="vi-VN-HoaiMyNeural",
         output_path=str(tmp_path / "female.mp3"),
     )
     await provider.generate(
-        "Đây là giọng recap trầm.",
+        "Đây là giọng nam tiêu chuẩn.",
         lang="vi",
-        voice="vi-VN-NamMinh-Deep",
+        voice="vi-VN-NamMinhNeural",
         output_path=str(tmp_path / "male.mp3"),
     )
 
     assert calls[0]["voice"] == "vi-VN-HoaiMyNeural"
-    assert calls[0]["rate"] == "+10%"
+    assert calls[0]["rate"] == "+0%"
+    assert calls[0]["pitch"] == "+0Hz"
     assert calls[1]["voice"] == "vi-VN-NamMinhNeural"
-    assert calls[1]["rate"] == "-6%"
-    assert calls[1]["pitch"] == "-3Hz"
+    assert calls[1]["rate"] == "+0%"
+    assert calls[1]["pitch"] == "+0Hz"
 
 
 @pytest.mark.anyio
-async def test_native_vietnamese_voice_overrides_stale_engine(tmp_path, monkeypatch):
+async def test_vieneu_voice_overrides_stale_engine(tmp_path, monkeypatch):
     from app.services.tts_service import tts_service
 
     calls = {}
 
-    async def fake_edge(text, voice, output_path, **kwargs):
-        calls.update({"text": text, "voice": voice, "output_path": output_path, **kwargs})
-        with open(output_path, "wb") as f:
-            f.write(b"ID3" + b"\x00" * 300)
-        return output_path
+    class FakeProvider:
+        async def generate(self, **kwargs):
+            calls.update(kwargs)
+            output_path = kwargs["output_path"]
+            with open(output_path, "wb") as f:
+                f.write(b"RIFF" + b"\x00" * 300)
+            return output_path
 
-    monkeypatch.setattr(tts_service, "generate_speech_edge_tts", fake_edge)
-    output = str(tmp_path / "review.mp3")
+    monkeypatch.setattr("app.services.tts_service.get_tts_provider", lambda _engine: FakeProvider())
+    output = str(tmp_path / "review.wav")
     result = await tts_service.generate_speech(
         text="Giọng review tiếng Việt.",
         lang="vi",
-        voice="vi-VN-HoaiMy-Fast",
-        engine="vieneu",
+        voice="vieneu:Trúc Ly",
+        engine="edge-tts",
         output_path=output,
     )
 
     assert result == output
-    assert calls["voice"] == "vi-VN-HoaiMy-Fast"
+    assert calls["voice"] == "vieneu:Trúc Ly"
 
 
 @pytest.mark.anyio
@@ -502,8 +579,8 @@ async def test_voice_preview_uses_selected_language_and_engine(tmp_path, monkeyp
     )
 
     assert calls["lang"] == "vi"
-    assert calls["voice"] == "vi-VN-HoaiMy-Fast"
-    assert calls["engine"] == "edge-tts"
+    assert calls["voice"] == "vieneu:Trúc Ly"
+    assert calls["engine"] == "vieneu"
     assert os.path.exists(response.path)
 
 
@@ -685,7 +762,7 @@ def test_watermark_removal_fallback_for_long_videos(monkeypatch, tmp_path):
 
 def test_smart_voice_mapping():
     from app.services.tts_service import DEFAULT_VOICES
-    assert DEFAULT_VOICES["vi"]["child"] == "vi-VN-HoaiMyNeural"
-    assert DEFAULT_VOICES["vi"]["narrator"] == "vi-VN-NamMinh-Deep"
+    assert DEFAULT_VOICES["vi"]["child"] == "vieneu:Đoan Trang"
+    assert DEFAULT_VOICES["vi"]["narrator"] == "vieneu:Thái Sơn"
     assert DEFAULT_VOICES["en"]["male"] == "en-US-GuyNeural"
     assert DEFAULT_VOICES["en"]["elder_male"] == "en-US-RyanNeural"

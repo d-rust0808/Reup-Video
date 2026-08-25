@@ -419,6 +419,65 @@ def scale_srt_timestamps(srt_path: str, factor: float, output_path: Optional[str
     return dest
 
 
+def subtitle_output_mode(cfg: ReupConfig) -> str:
+    """Return the normalized subtitle mode while honoring the legacy enable flag."""
+    if not getattr(cfg, "burn_subtitles", True):
+        return "off"
+    return "hard" if getattr(cfg, "subtitle_mode", "soft") == "hard" else "soft"
+
+
+def prepare_output_subtitle(srt_path: str, output_path: str, speed_factor: float = 1.0) -> Optional[str]:
+    """Write a sidecar SRT whose timestamps match the transformed output timeline."""
+    if not srt_path or not os.path.exists(srt_path):
+        return None
+    sidecar = os.path.splitext(output_path)[0] + ".vi.srt"
+    try:
+        if abs(float(speed_factor or 1.0) - 1.0) > 1e-3:
+            return scale_srt_timestamps(srt_path, speed_factor, sidecar)
+        shutil.copy2(srt_path, sidecar)
+        return sidecar
+    except Exception as e:
+        logger.warning(f"Could not prepare output Vietsub sidecar: {e}")
+        return None
+
+
+def mux_toggleable_subtitle(video_path: str, srt_path: str, output_path: Optional[str] = None) -> bool:
+    """Embed a Vietnamese mov_text track that is disabled until the viewer enables CC."""
+    ffmpeg_bin = find_ffmpeg_binary()
+    if not ffmpeg_bin or not os.path.exists(video_path) or not os.path.exists(srt_path):
+        return False
+
+    target = output_path or video_path
+    tmp_out = target + ".softsub.tmp.mp4"
+    cmd = [
+        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+        "-i", video_path,
+        "-i", srt_path,
+        "-map", "0:v:0", "-map", "0:a?", "-map", "1:0",
+        "-c:v", "copy", "-c:a", "copy", "-c:s", "mov_text",
+        "-metadata:s:s:0", "language=vie",
+        "-metadata:s:s:0", "title=Vietsub",
+        "-disposition:s:0", "0",
+        "-movflags", "+faststart",
+        tmp_out,
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 0:
+            os.replace(tmp_out, target)
+            return True
+        logger.warning(f"Soft subtitle mux failed ({res.returncode}): {(res.stderr or '')[-500:]}")
+    except Exception as e:
+        logger.warning(f"Soft subtitle mux failed: {e}")
+    finally:
+        if os.path.exists(tmp_out):
+            try:
+                os.remove(tmp_out)
+            except OSError:
+                pass
+    return False
+
+
 def _probe_video_size(path: str) -> Tuple[int, int]:
     """Return (w, h) via ffprobe, defaulting to 1080x1920 on failure."""
     from app.services.audio_service import find_ffprobe_binary
@@ -559,14 +618,12 @@ def burn_vietnamese_hardsub(video_path: str, srt_path: str, output_path: str, sp
 
 
 def build_tts_bgm_mix_filter() -> str:
-    """Strip center-channel speech (Chinese voice) from background track, then duck under Vietnamese TTS voiceover."""
+    """Mix Vietnamese TTS over the processed source track without lowering its gain."""
     return (
-        "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.12,highpass=f=80,lowpass=f=12000,"
+        "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.20,highpass=f=80,lowpass=f=12000,"
         "acompressor=threshold=-22dB:ratio=2.5:attack=8:release=90:makeup=2.0[voice];"
-        "[voice]asplit=2[sc][vox];"
-        "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=0.85[bgraw];"
-        "[bgraw][sc]sidechaincompress=threshold=0.03:ratio=6:attack=15:release=250:makeup=1:knee=3[bg];"
-        "[bg][vox]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amixed];"
+        "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.0[bg];"
+        "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amixed];"
         "[amixed]alimiter=limit=0.95[aout]"
     )
 
@@ -576,7 +633,7 @@ def should_use_demucs_for_dubbing(cfg: ReupConfig, _speech_intervals: Optional[L
     return bool(
         cfg.enable_vocal_mute
         and cfg.preserve_bgm
-        and cfg.vocal_mute_strategy == "demucs"
+        and cfg.vocal_mute_strategy in ("demucs", "demucs_duck")
     )
 
 
@@ -638,8 +695,8 @@ def mix_tts_with_background(video_path: str, tts_audio_path: str, output_path: s
         if has_audio:
             # Fallback: keep BGM loud instead of crushing it
             fc2 = (
-                "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=0.85[bg];"
-                "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.10[voice];"
+                "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.0[bg];"
+                "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.20[voice];"
                 "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amixed];"
                 "[amixed]dynaudnorm=f=120:g=10:p=0.95,alimiter=limit=0.94[aout]"
             )
@@ -675,7 +732,7 @@ def process_reup_video(
     modify_md5: bool = True,
     vietnamese_dubbing: bool = False,
     text_for_dubbing: Optional[str] = None,
-    enable_vocal_mute: bool = True,
+    enable_vocal_mute: bool = False,
     vocal_mute_strategy: str = "auto",
     preserve_bgm: bool = True,
     audio_ducking: bool = False,
@@ -736,11 +793,12 @@ def process_reup_video(
         except Exception:
             lib_bgm_path = raw_bgm if os.path.isfile(str(raw_bgm)) else None
     srt_override = kwargs.get("srt_override")
+    subtitle_mode = subtitle_output_mode(cfg)
     # Bake subtitles into the master graph via libass or one timed APNG track.
     wants_hardsub = bool(
         srt_override
         and os.path.exists(srt_override)
-        and getattr(cfg, "burn_subtitles", True)
+        and subtitle_mode == "hard"
     )
     libass_hardsub = bool(wants_hardsub and ffmpeg_supports_libass())
     burn_in_graph = libass_hardsub
@@ -749,7 +807,7 @@ def process_reup_video(
     speech_intervals = kwargs.get("speech_intervals")
     # Prefer a separated music stem for the "remove speech, keep BGM" mode.
     use_demucs = should_use_demucs_for_dubbing(cfg, speech_intervals)
-    if (not lib_bgm_path) and has_audio and cfg.enable_vocal_mute and cfg.vocal_mute_strategy in ("auto", "demucs") and use_demucs:
+    if (not lib_bgm_path) and has_audio and cfg.enable_vocal_mute and cfg.vocal_mute_strategy in ("auto", "demucs", "demucs_duck") and use_demucs:
         from app.services.audio_service import check_demucs_available, extract_audio_stream, process_vocal_muting
         if not check_demucs_available():
             if cfg.vocal_mute_strategy == "demucs":
@@ -764,7 +822,7 @@ def process_reup_video(
                     bgm_out = tmp_bgm.name
                 if extract_audio_stream(input_path, extracted_a):
                     res_vm = process_vocal_muting(extracted_a, bgm_out, config=cfg)
-                    if res_vm.get("method") == "demucs" and os.path.exists(bgm_out):
+                    if res_vm.get("method") in ("demucs", "demucs_duck") and os.path.exists(bgm_out):
                         demucs_bgm_path = bgm_out
                 elif cfg.vocal_mute_strategy == "demucs":
                     raise RuntimeError("Failed to extract audio stream for Demucs vocal separation")
@@ -931,18 +989,18 @@ def process_reup_video(
     elif vietnamese_dubbing and text_for_dubbing:
         dubbed_vi = apply_vietnamese_dubbing(output_path, text_for_dubbing, output_path=output_path)
 
-    # 4b. Burn Vietnamese hardsub only if it was NOT already in the master filtergraph
+    # 4b. Add the selected subtitle output after TTS mixing.
     burned_sub = bool(burn_in_graph)
-    if (not burned_sub) and srt_override and os.path.exists(srt_override) and getattr(cfg, "burn_subtitles", True):
+    if (not burned_sub) and srt_override and os.path.exists(srt_override) and subtitle_mode == "hard":
         burned_sub = burn_vietnamese_hardsub(
             output_path, srt_override, output_path, speed_factor=cfg.speed_factor
         )
-    if srt_override and os.path.exists(srt_override) and getattr(cfg, "burn_subtitles", True):
-        sidecar = os.path.splitext(output_path)[0] + ".vi.srt"
-        try:
-            shutil.copy2(srt_override, sidecar)
-        except Exception:
-            pass
+    subtitle_sidecar = None
+    softsub_embedded = False
+    if srt_override and os.path.exists(srt_override) and subtitle_mode != "off":
+        subtitle_sidecar = prepare_output_subtitle(srt_override, output_path, cfg.speed_factor)
+        if subtitle_mode == "soft" and subtitle_sidecar:
+            softsub_embedded = mux_toggleable_subtitle(output_path, subtitle_sidecar, output_path)
 
     # 5. Browser-safe remux then MD5 trailer (trailer MUST come last)
     remux_faststart(output_path)
@@ -960,6 +1018,9 @@ def process_reup_video(
         "md5_modified": cfg.modify_md5 and (input_md5 != output_md5),
         "vietnamese_dubbed": dubbed_vi,
         "hardsub_burned": burned_sub,
+        "softsub_embedded": softsub_embedded,
+        "subtitle_mode": subtitle_mode,
+        "subtitle_sidecar": subtitle_sidecar,
         "video_filters": vf_str,
         "audio_filters": af_str,
         "filter_complex": filter_complex,
@@ -1163,7 +1224,8 @@ class ReupService:
             synced_tts_audio = preset_tts
             logger.info(f"Using pre-built TTS audio: {synced_tts_audio}")
 
-        want_subs = bool(getattr(cfg, "burn_subtitles", True) or cfg.enable_tts)
+        subtitle_mode = subtitle_output_mode(cfg)
+        want_subs = bool(subtitle_mode != "off" or cfg.enable_tts)
         if want_subs and not translated_srt:
             try:
                 from app.services.pyvideotrans_service import (
@@ -1182,8 +1244,11 @@ class ReupService:
                 cfg.vietsub_style = style
                 lang = (cfg.target_lang or "vi").lower()
                 voice = cfg.tts_voice or ""
-                if lang != "vi" and (not voice or voice.startswith("vi-")):
+                if lang != "vi" and (
+                    not voice or voice.startswith("vi-") or voice.startswith("vieneu:")
+                ):
                     cfg.tts_voice = LANG_DEFAULT_VOICE.get(lang, voice)
+                    cfg.tts_engine = "edge-tts"
 
                 clip_title = source_clip_title(video_path, cfg)
                 import re as _re
@@ -1379,7 +1444,7 @@ class ReupService:
                 output_path=output_path,
                 cfg=cfg,
                 tts_audio_override=synced_tts_audio,
-                srt_override=translated_srt if getattr(cfg, "burn_subtitles", True) else None,
+                srt_override=translated_srt if subtitle_mode != "off" else None,
                 speech_intervals=speech_intervals,
                 **kwargs
             )

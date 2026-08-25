@@ -1032,7 +1032,7 @@ class BatchQueueManager:
             if getattr(reup_config, "enable_tts", False):
                 self.append_job_log(
                     job_id,
-                    f"🎙️ Đang tổng hợp thuyết minh Tiếng Việt (Giọng: {getattr(reup_config, 'tts_voice', 'vi-VN-HoaiMy-Fast')})...",
+                    f"🎙️ Đang tổng hợp thuyết minh Tiếng Việt (Giọng: {getattr(reup_config, 'tts_voice', 'vieneu:Trúc Ly')})...",
                     level="INFO",
                     stage="REUP_TRANSFORM",
                     progress=0.85

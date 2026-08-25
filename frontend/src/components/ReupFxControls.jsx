@@ -31,10 +31,26 @@ import { fetchChannels, uploadStudioOverlay, fetchBgmLibrary, previewVoice } fro
 
 const VOICE_OPTIONS = {
   vi: [
-    { value: 'vi-VN-HoaiMy-Fast', label: 'Hoài My — review nhanh, nữ Việt' },
-    { value: 'vi-VN-HoaiMy-Warm', label: 'Hoài My — kể chuyện ấm, nữ Việt' },
-    { value: 'vi-VN-NamMinh-Fast', label: 'Nam Minh — review chắc, nam Việt' },
-    { value: 'vi-VN-NamMinh-Deep', label: 'Nam Minh — recap trầm, nam Việt' },
+    { value: 'vieneu:Trúc Ly', label: 'Trúc Ly — nữ Bắc, tự nhiên' },
+    { value: 'vieneu:Phạm Tuyên', label: 'Phạm Tuyên — nam Bắc, tự nhiên' },
+    { value: 'vieneu:Xuân Vĩnh', label: 'Xuân Vĩnh — nam Nam, tự nhiên' },
+    { value: 'vieneu:Đoan Trang', label: 'Đoan Trang — nữ Bắc, tự nhiên' },
+    { value: 'vieneu:Ngọc Huyền', label: 'Ngọc Huyền — nữ Bắc, tự nhiên' },
+    { value: 'vieneu:Adam', label: 'Adam — nam Nam, tự nhiên' },
+    { value: 'vieneu:Quang Sơn', label: 'Quang Sơn — nam Trung, tự nhiên' },
+    { value: 'vieneu:Ngọc Trân', label: 'Ngọc Trân — nữ Trung, tự nhiên' },
+    { value: 'vieneu:Thái Sơn', label: 'Thái Sơn — nam Nam, kể chuyện' },
+    { value: 'vieneu:Thanh Bình', label: 'Thanh Bình — nam Bắc, kể chuyện' },
+    { value: 'vieneu:Ngọc Linh', label: 'Ngọc Linh — nữ Bắc, kể chuyện' },
+    { value: 'vieneu:Thục Đoan', label: 'Thục Đoan — nữ Nam, kể chuyện' },
+    { value: 'vieneu:Mỹ Duyên', label: 'Mỹ Duyên — nữ Nam, đọc truyện' },
+    { value: 'vieneu:Quỳnh Anh', label: 'Quỳnh Anh — nữ Bắc, đọc truyện' },
+    { value: 'vieneu:Đức Trí', label: 'Đức Trí — nam Nam, đọc truyện' },
+    { value: 'vieneu:Kim Thanh', label: 'Kim Thanh — nữ Nam, đọc truyện' },
+    { value: 'vieneu:Minh Đức', label: 'Minh Đức — nam Bắc, tin tức' },
+    { value: 'vieneu:Mai Anh', label: 'Mai Anh — nữ Bắc, tin tức' },
+    { value: 'vieneu:Minh Triết', label: 'Minh Triết — nam Nam, tin tức' },
+    { value: 'vieneu:Thùy Dung', label: 'Thùy Dung — nữ Nam, tin tức' },
   ],
   en: [
     { value: 'en-US-AvaMultilingualNeural', label: 'Ava — nữ, tự nhiên' },
@@ -61,6 +77,10 @@ const VOICE_OPTIONS = {
     { value: 'pt-BR-AntonioNeural', label: 'Antonio — nam Brazil' },
   ],
 };
+
+const resolveVoiceEngine = (voice) => String(voice || '').toLowerCase().startsWith('vieneu:')
+  ? 'vieneu'
+  : 'edge-tts';
 
 export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
   const [channels, setChannels] = useState([]);
@@ -114,9 +134,9 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
     setVoicePreviewError('');
     try {
       const blob = await previewVoice({
-        voice: options.tts_voice || 'vi-VN-HoaiMy-Fast',
+        voice: options.tts_voice || 'vieneu:Trúc Ly',
         lang: options.target_lang || 'vi',
-        engine: options.tts_engine || 'edge-tts',
+        engine: options.tts_engine || 'vieneu',
       });
       if (voicePreviewAudio) {
         voicePreviewAudio.pause();
@@ -142,9 +162,23 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
         ...options,
         preset_id: 'clean_keep_bgm',
         subtitle_bottom_crop: 7.0,
-        enable_vocal_mute: true,
+        enable_vocal_mute: false,
         preserve_bgm: true,
         vocal_mute_strategy: 'auto',
+        wm_method: 'auto',
+        hflip: false,
+        speed_ratio: 1.03,
+        crop_percent: 2.0,
+      });
+    } else if (presetId === 'clean_duck_vocals') {
+      onChange({
+        ...options,
+        preset_id: 'clean_duck_vocals',
+        subtitle_bottom_crop: 7.0,
+        enable_vocal_mute: true,
+        preserve_bgm: true,
+        vocal_mute_strategy: 'demucs_duck',
+        original_vocal_volume: options.original_vocal_volume ?? 0.10,
         wm_method: 'auto',
         hflip: false,
         speed_ratio: 1.03,
@@ -216,22 +250,28 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
         <div>
           <h4 className="text-sm font-black text-slate-900">Chọn âm thanh sau khi làm sạch</h4>
           <p className="text-[11px] text-slate-600 mt-0.5">
-            Cả hai chế độ đều xóa chữ/logo trước. Vietsub và lồng tiếng được chọn độc lập ở mục Âm thanh & Dịch.
+            Cả ba chế độ đều xóa chữ/logo trước. Vietsub và lồng tiếng được chọn độc lập ở mục Âm thanh & Dịch.
           </p>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
           {[
             {
               id: 'clean_keep_bgm',
               icon: Music,
-              label: 'Làm sạch + Giữ nhạc nền',
-              desc: 'Xóa thoại gốc, giữ nhạc và hiệu ứng âm thanh.',
+              label: 'Làm sạch + Giữ âm thanh gốc',
+              desc: 'Giữ nguyên thoại, nhạc, hiệu ứng và âm lượng gốc.',
+            },
+            {
+              id: 'clean_duck_vocals',
+              icon: Volume2,
+              label: 'Giảm lời Trung + Giữ âm nền',
+              desc: 'Tách giọng nói, giữ nhạc và hiệu ứng; lời Trung chỉ còn nghe nhỏ.',
             },
             {
               id: 'clean_mute_all',
               icon: VolumeX,
-              label: 'Làm sạch + Xóa nhạc nền',
-              desc: 'Tắt toàn bộ âm thanh gốc; phù hợp khi chỉ dùng lồng tiếng AI.',
+              label: 'Tắt toàn bộ âm thanh gốc',
+              desc: 'Tắt cả lời, nhạc và hiệu ứng; chỉ còn lồng tiếng AI.',
             },
           ].map((mode) => {
             const active = options.preset_id === mode.id;
@@ -258,6 +298,28 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
             );
           })}
         </div>
+        {options.preset_id === 'clean_duck_vocals' && (
+          <label className="block rounded-xl border border-blue-100 bg-white/80 px-3 py-2 text-[11px] font-bold text-slate-700">
+            <span className="flex items-center justify-between gap-3">
+              <span>Âm lượng lời Trung còn lại</span>
+              <span className="font-mono text-blue-700">
+                {Math.round((options.original_vocal_volume ?? 0.10) * 100)}%
+              </span>
+            </span>
+            <input
+              type="range"
+              min="0"
+              max="0.30"
+              step="0.01"
+              value={options.original_vocal_volume ?? 0.10}
+              onChange={(e) => handleChange('original_vocal_volume', Number(e.target.value))}
+              className="mt-2 w-full accent-blue-600"
+            />
+            <span className="mt-1 block text-[10px] font-medium text-slate-500">
+              Khuyên dùng 8-12%. Mức 0% sẽ bỏ hẳn lời gốc.
+            </span>
+          </label>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -719,7 +781,22 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                   id="tts-toggle"
                   type="checkbox"
                   checked={!!options.enable_tts}
-                  onChange={(e) => handleChange('enable_tts', e.target.checked)}
+                  onChange={(e) => {
+                    const enabled = e.target.checked;
+                    if (enabled && options.preset_id === 'clean_keep_bgm') {
+                      onChange({
+                        ...options,
+                        enable_tts: true,
+                        preset_id: 'clean_duck_vocals',
+                        enable_vocal_mute: true,
+                        preserve_bgm: true,
+                        vocal_mute_strategy: 'demucs_duck',
+                        original_vocal_volume: options.original_vocal_volume ?? 0.10,
+                      });
+                    } else {
+                      handleChange('enable_tts', enabled);
+                    }
+                  }}
                   className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-purple-300 shrink-0 cursor-pointer"
                 />
               </div>
@@ -727,20 +804,60 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
               <div className="flex items-center justify-between pt-1 p-2.5 bg-white/70 rounded-xl border border-purple-100">
                 <div>
                   <label className="text-xs font-extrabold text-purple-950 cursor-pointer block" htmlFor="burnsub-toggle">
-                    Vietsub trên bản đã làm sạch
+                    Tạo Vietsub cho video
                   </label>
                   <span className="text-[10px] text-purple-700 font-medium block">
-                    In phụ đề dịch lên video sau khi chữ tiếng Trung đã được xóa.
+                    Có thể dùng nút CC hoặc in cố định lên hình.
                   </span>
                 </div>
                 <input
                   id="burnsub-toggle"
                   type="checkbox"
                   checked={options.burn_subtitles !== false}
-                  onChange={(e) => handleChange('burn_subtitles', e.target.checked)}
+                  onChange={(e) => onChange({
+                    ...options,
+                    burn_subtitles: e.target.checked,
+                    subtitle_mode: e.target.checked ? (options.subtitle_mode === 'hard' ? 'hard' : 'soft') : 'off',
+                  })}
                   className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-purple-300 shrink-0 cursor-pointer"
                 />
               </div>
+
+              {options.burn_subtitles !== false && (
+                <div className="grid grid-cols-2 gap-1.5 rounded-xl border border-purple-100 bg-white/70 p-1.5">
+                  {[
+                    {
+                      id: 'soft',
+                      title: 'CC bật / tắt',
+                      desc: 'Mặc định tắt; người xem tự bật phụ đề.',
+                    },
+                    {
+                      id: 'hard',
+                      title: 'In cố định',
+                      desc: 'Luôn hiện trên hình, không thể tắt.',
+                    },
+                  ].map((mode) => {
+                    const active = (options.subtitle_mode || 'soft') === mode.id;
+                    return (
+                      <button
+                        key={mode.id}
+                        type="button"
+                        onClick={() => handleChange('subtitle_mode', mode.id)}
+                        className={`rounded-lg border px-2.5 py-2 text-left transition ${
+                          active
+                            ? 'border-purple-500 bg-purple-600 text-white'
+                            : 'border-purple-100 bg-white text-purple-950 hover:border-purple-300'
+                        }`}
+                      >
+                        <span className="block text-[11px] font-extrabold">{mode.title}</span>
+                        <span className={`mt-0.5 block text-[9px] leading-snug ${active ? 'text-purple-100' : 'text-purple-700'}`}>
+                          {mode.desc}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
 
               <div>
                 <label className="block text-[11px] font-extrabold text-purple-950 mb-1.5">
@@ -824,7 +941,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                       onChange={(e) => {
                         const lang = e.target.value;
                         const voices = {
-                          vi: 'vi-VN-HoaiMy-Fast',
+                          vi: 'vieneu:Trúc Ly',
                           en: 'en-US-AvaMultilingualNeural',
                           th: 'th-TH-PremwadeeNeural',
                           id: 'id-ID-GadisNeural',
@@ -836,7 +953,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                           ...options,
                           target_lang: lang,
                           tts_voice: voices[lang] || options.tts_voice,
-                          tts_engine: 'edge-tts',
+                          tts_engine: resolveVoiceEngine(voices[lang]),
                         });
                       }}
                       className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2.5 text-xs text-slate-900 font-bold outline-none focus:ring-2 focus:ring-purple-400 cursor-pointer shadow-2xs mb-2"
@@ -855,13 +972,13 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                       <span>Chọn giọng đọc cho ngôn ngữ đích:</span>
                     </label>
                     <select
-                      value={options.tts_voice || 'vi-VN-HoaiMy-Fast'}
+                      value={options.tts_voice || 'vieneu:Trúc Ly'}
                       onChange={(e) => {
                         const voice = e.target.value;
                         onChange({
                           ...options,
                           tts_voice: voice,
-                          tts_engine: 'edge-tts',
+                          tts_engine: resolveVoiceEngine(voice),
                         });
                       }}
                       className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2.5 text-xs text-slate-900 font-bold outline-none focus:ring-2 focus:ring-purple-400 cursor-pointer shadow-2xs"
@@ -891,9 +1008,9 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                     {voicePreviewError && (
                       <p className="mt-1.5 text-[10px] font-semibold text-rose-600">{voicePreviewError}</p>
                     )}
-                    {(options.tts_engine || 'edge-tts') === 'edge-tts' && (
+                    {(options.tts_engine || 'vieneu') === 'vieneu' && (
                       <p className="mt-1.5 text-[10px] text-purple-600">
-                        Dùng giọng Edge-TTS tiếng Việt gốc; bấm nghe thử trước khi chạy video.
+                        VieNeu-TTS v3 Turbo chạy local; có giọng Bắc, Nam, Trung và nhiều phong cách thật.
                       </p>
                     )}
                   </div>

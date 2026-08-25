@@ -26,13 +26,13 @@ SUPPORTED_ENGINES = [
 
 DEFAULT_VOICES = {
     "vi": {
-        "female": "vi-VN-HoaiMy-Fast",
-        "male": "vi-VN-NamMinh-Fast",
-        "elder_male": "vi-VN-NamMinh-Deep",
-        "elder_female": "vi-VN-HoaiMy-Warm",
-        "child": "vi-VN-HoaiMyNeural",
-        "narrator": "vi-VN-NamMinh-Deep",
-        "neutral": "vi-VN-HoaiMy-Fast"
+        "female": "vieneu:Trúc Ly",
+        "male": "vieneu:Phạm Tuyên",
+        "elder_male": "vieneu:Thanh Bình",
+        "elder_female": "vieneu:Ngọc Linh",
+        "child": "vieneu:Đoan Trang",
+        "narrator": "vieneu:Thái Sơn",
+        "neutral": "vieneu:Trúc Ly"
     },
     "en": {
         "female": "en-US-JennyNeural",
@@ -297,7 +297,7 @@ class TTSService:
     async def generate_speech_edge_tts(
         self,
         text: str,
-        voice: str = "vi-VN-HoaiMy-Fast",
+        voice: str = "vi-VN-HoaiMyNeural",
         output_path: Optional[str] = None,
         rate: str = "+0%",
         pitch: str = "+0Hz",
@@ -362,7 +362,7 @@ class TTSService:
     ) -> str:
         """Main method to synthesize speech based on engine selection with fallback strategy."""
         target_engine = (engine or self.default_engine or "edge-tts").lower()
-        selected_voice = voice or DEFAULT_VOICES.get(lang, {}).get("female", "vi-VN-HoaiMy-Fast")
+        selected_voice = voice or DEFAULT_VOICES.get(lang, {}).get("female", "vieneu:Trúc Ly")
 
         # Voice id implies engine
         vlow = (selected_voice or "").lower()
@@ -379,11 +379,16 @@ class TTSService:
         elif vlow.startswith("melo"):
             target_engine = "melo-tts"
 
-        # Unknown Edge voice ids (kokoro-af_heart, HoaiMy-Fast already mapped in provider)
+        # Unknown Edge voice ids must stay on a real Edge voice, not a local
+        # VieNeu preset that the Edge provider cannot resolve.
         EDGE_PREFIXES = ("vi-vn-", "en-us-", "en-gb-", "zh-cn-", "ja-jp-", "ko-kr-", "th-th-", "fr-fr-", "es-es-", "de-de-", "ru-ru-", "id-id-")
         if target_engine == "edge-tts" and selected_voice and not any(vlow.startswith(p) for p in EDGE_PREFIXES) and vlow not in ("gtts-vi",):
             logger.warning(f"Unknown Edge-TTS voice '{selected_voice}', remapping to the language default")
-            selected_voice = DEFAULT_VOICES.get(lang, {}).get("female", "vi-VN-HoaiMy-Fast")
+            selected_voice = (
+                "vi-VN-HoaiMyNeural"
+                if lang == "vi"
+                else DEFAULT_VOICES.get(lang, {}).get("female", "en-US-AvaNeural")
+            )
 
         if target_engine in ("vieneu", "vieneu-tts"):
             provider = get_tts_provider("vieneu")
@@ -399,9 +404,9 @@ class TTSService:
                 provider = get_tts_provider("kokoro")
                 return await provider.generate(text=text, lang=lang, voice=selected_voice, output_path=output_path)
             except Exception as e:
-                logger.warning(f"Kokoro TTS failed ({e}), falling back to Edge-TTS Hoài My")
+                logger.warning(f"Kokoro TTS failed ({e}), falling back to the language default")
                 target_engine = "edge-tts"
-                selected_voice = DEFAULT_VOICES.get(lang, {}).get("female", "vi-VN-HoaiMy-Fast")
+                selected_voice = "vi-VN-HoaiMyNeural" if lang == "vi" else DEFAULT_VOICES.get(lang, {}).get("female")
 
         if target_engine in ("melo", "melo-tts"):
             try:
@@ -410,7 +415,7 @@ class TTSService:
             except Exception as e:
                 logger.warning(f"Melo TTS failed ({e}), falling back to Edge-TTS")
                 target_engine = "edge-tts"
-                selected_voice = DEFAULT_VOICES.get(lang, {}).get("female", "vi-VN-HoaiMy-Fast")
+                selected_voice = "vi-VN-HoaiMyNeural" if lang == "vi" else DEFAULT_VOICES.get(lang, {}).get("female")
 
         if target_engine == "edge-tts":
             try:
@@ -494,7 +499,7 @@ class TTSService:
         self,
         srt_path: str,
         output_audio_path: str,
-        voice: str = "vi-VN-HoaiMy-Fast",
+        voice: str = "vieneu:Trúc Ly",
         lang: str = "vi",
         engine: Optional[str] = None,
         total_duration: Optional[float] = None,
@@ -512,6 +517,10 @@ class TTSService:
         # Translation already produced this SRT. Rewriting it here made the visible
         # subtitle and spoken script disagree, so TTS must use this exact text.
         speed = max(0.1, float(timeline_speed or 1.0))
+        engine_name = (engine or self.default_engine or "edge-tts").lower()
+        if (voice or "").lower().startswith("vieneu:"):
+            engine_name = "vieneu"
+        preserve_natural_voice = engine_name in ("vieneu", "vieneu-tts")
         segments = [
             {
                 **seg,
@@ -521,7 +530,7 @@ class TTSService:
             }
             for seg in raw_segments
         ]
-        if (engine or self.default_engine or "edge-tts").lower() == "edge-tts":
+        if engine_name == "edge-tts":
             segments = group_long_form_tts_segments(segments)
 
         temp_dir = tempfile.mkdtemp(prefix="tts_sync_")
@@ -535,7 +544,8 @@ class TTSService:
                 effective_total_duration = srt_max_end
 
             async def _synth_one(seg, next_start: Optional[float] = None):
-                raw_clip_path = os.path.join(temp_dir, f"seg_{seg['index']}_raw.mp3")
+                raw_ext = ".wav" if preserve_natural_voice else ".mp3"
+                raw_clip_path = os.path.join(temp_dir, f"seg_{seg['index']}_raw{raw_ext}")
                 scaled_clip_path = os.path.join(temp_dir, f"seg_{seg['index']}_scaled.wav")
                 text_to_speak = (seg.get("text") or "").strip()
                 if (
@@ -560,7 +570,7 @@ class TTSService:
                 elif emotion in ("surprised", "excited"):
                     pitch_val = "+6Hz"
 
-                lipsync_on = bool(enable_lipsync)
+                lipsync_on = bool(enable_lipsync) and not preserve_natural_voice
                 if lipsync_on:
                     from app.services.lipsync_service import lipsync_prepare_segment
                     prep = lipsync_prepare_segment(text_to_speak, srt_dur)
@@ -606,12 +616,20 @@ class TTSService:
                     clamped_speed = get_audio_duration(raw_clip_path) / max(0.18, srt_dur)
                 else:
                     audio_dur = get_audio_duration(raw_clip_path)
-                    if srt_dur > 0.1 and audio_dur > 0.1:
+                    if preserve_natural_voice:
+                        # VieNeu keeps natural per-cue pacing, but the whole dub must
+                        # still follow the same global speed as the transformed video.
+                        speed_factor = speed
+                    elif srt_dur > 0.1 and audio_dur > 0.1:
                         speed_factor = audio_dur / srt_dur
                     else:
                         speed_factor = 1.0
-                    clamped_speed = max(0.85, min(1.30, speed_factor))
-                    if abs(clamped_speed - 1.0) > 0.05:
+                    clamped_speed = (
+                        speed_factor
+                        if preserve_natural_voice
+                        else max(0.85, min(1.30, speed_factor))
+                    )
+                    if abs(clamped_speed - 1.0) > (0.01 if preserve_natural_voice else 0.05):
                         success = scale_audio_speed_ffmpeg(raw_clip_path, scaled_clip_path, clamped_speed)
                         clip_to_use = scaled_clip_path if success else raw_clip_path
                     else:

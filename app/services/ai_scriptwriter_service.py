@@ -191,7 +191,10 @@ class AIScriptwriterService:
                         out.append(self.translate_text(t, target_lang=target_lang))
             except Exception as e:
                 logger.warning(f"DeepSeek translate_cues chunk failed: {e}")
-                return None
+                # A long/busy request can fail while smaller requests still work.
+                # Retry each cue separately before giving up on the whole subtitle.
+                for t in chunk:
+                    out.append(self.translate_text(t, target_lang=target_lang))
 
         return out
 
@@ -209,6 +212,15 @@ class AIScriptwriterService:
         if len(result) == expected_count and all(i in result for i in range(1, expected_count + 1)):
             return [result[i] for i in range(1, expected_count + 1)]
         return None
+
+    def _localized_text_is_usable(self, text: Any, target_lang: str) -> bool:
+        if not isinstance(text, str) or not any(char.isalnum() for char in text):
+            return False
+        if (target_lang or "").lower().split("-")[0] == "vi":
+            has_cjk = bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", text))
+            if has_cjk:
+                return False
+        return True
 
     def heuristic_diarize_and_localize(
         self,
@@ -359,7 +371,9 @@ class AIScriptwriterService:
             "   - Trả về đúng một dialogue cho mỗi index đầu vào, giữ nguyên index và thứ tự.\n"
             "   - Mỗi 'translated_text' phải là lời thoại có thể đọc thành tiếng, tuyệt đối không chỉ chứa dấu câu.\n"
             "   - Trả về duy nhất 1 JSON object có key 'dialogues' chứa danh sách object:\n"
-            "     { 'index': 1, 'speaker_id': 'spk_1', 'character_name': 'Nam chính', 'gender': 'male', 'emotion': 'dramatic', 'translated_text': '...' }"
+            '     {"index": 1, "speaker_id": "spk_1", "character_name": "Nam chính", '
+            '"gender": "male", "emotion": "dramatic", "translated_text": "..."}\n'
+            "   - JSON phải hợp lệ tuyệt đối: dùng dấu ngoặc kép, không markdown, không chú thích, không cắt bớt dialogue."
         )
 
         user_content = json.dumps({
@@ -381,7 +395,6 @@ class AIScriptwriterService:
                 {"role": "user", "content": user_content}
             ],
             "temperature": 0.25,
-            "max_tokens": 8000,
             "response_format": {"type": "json_object"}
         }
 
@@ -393,11 +406,25 @@ class AIScriptwriterService:
             )
             with urllib.request.urlopen(req, timeout=120) as resp:
                 result_json = json.loads(resp.read().decode("utf-8"))
-                content_str = result_json["choices"][0]["message"]["content"]
+                choice = result_json["choices"][0]
+                if choice.get("finish_reason") == "length":
+                    raise ValueError("DeepSeek response was truncated")
+                content_str = choice["message"]["content"]
                 parsed = json.loads(content_str)
                 localized_list = parsed.get("dialogues", [])
+                if not isinstance(localized_list, list):
+                    raise ValueError("DeepSeek response dialogues is not a list")
 
-                lookup = {item["index"]: item for item in localized_list if "index" in item}
+                lookup = {
+                    item["index"]: item
+                    for item in localized_list
+                    if isinstance(item, dict) and "index" in item
+                }
+                expected_indexes = {s["index"] for s in segments}
+                if set(lookup) != expected_indexes:
+                    raise ValueError(
+                        f"DeepSeek returned {len(lookup)}/{len(expected_indexes)} dialogue segments"
+                    )
 
                 # Merge back into segments
                 enhanced_segments = []
@@ -406,7 +433,13 @@ class AIScriptwriterService:
                     copied = dict(s)
                     if idx in lookup:
                         matched = lookup[idx]
-                        copied["translated_text"] = matched.get("translated_text", s.get("translated_text", s.get("text", "")))
+                        translated_text = matched.get("translated_text", "")
+                        if not self._localized_text_is_usable(
+                            translated_text,
+                            target_lang,
+                        ):
+                            raise ValueError(f"DeepSeek returned invalid translated_text for index {idx}")
+                        copied["translated_text"] = translated_text
                         copied["speaker_id"] = matched.get("speaker_id", "speaker_1")
                         copied["character_name"] = matched.get("character_name", "Nhân vật")
                         copied["gender"] = matched.get("gender", "male")
@@ -423,7 +456,39 @@ class AIScriptwriterService:
                 return enhanced_segments
 
         except Exception as e:
-            logger.error(f"DeepSeek script localization failed: {e}. Falling back to heuristic diarization.")
+            logger.error(
+                f"DeepSeek script localization failed: {e}. "
+                "Retrying translation in smaller cue batches."
+            )
+            translated = self.translate_cues(
+                [(s.get("text") or "").strip() for s in segments],
+                target_lang=target_lang,
+                style=genre,
+                title=title,
+            )
+            if (
+                translated
+                and len(translated) == len(segments)
+                and all(
+                    self._localized_text_is_usable(text, target_lang)
+                    for text in translated
+                )
+            ):
+                translated_segments = []
+                for segment, translated_text in zip(segments, translated):
+                    copied = dict(segment)
+                    copied["translated_text"] = translated_text
+                    translated_segments.append(copied)
+                logger.info(
+                    f"Recovered {len(translated_segments)} dialogue segments "
+                    "with chunked DeepSeek translation"
+                )
+                return self.heuristic_diarize_and_localize(
+                    translated_segments,
+                    target_lang=target_lang,
+                )
+
+            logger.error("Chunked DeepSeek translation also failed. Falling back to heuristic diarization.")
             return self.heuristic_diarize_and_localize(segments, target_lang=target_lang)
 
 

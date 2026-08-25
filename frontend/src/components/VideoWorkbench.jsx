@@ -31,15 +31,17 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       saturation: 1.03,
       film_grain: 3,
       modify_md5: true,
-      enable_vocal_mute: true,
+      enable_vocal_mute: false,
       vocal_mute_strategy: 'auto',
+      original_vocal_volume: 0.10,
       preserve_bgm: true,
       enable_tts: false,
       enable_lipsync: true,
       vietsub_style: 'dub',
       burn_subtitles: true,
-      tts_voice: 'vi-VN-HoaiMy-Fast',
-      tts_engine: 'edge-tts',
+      subtitle_mode: 'soft',
+      tts_voice: 'vieneu:Trúc Ly',
+      tts_engine: 'vieneu',
       target_lang: 'vi',
       source_lang: 'auto',
 
@@ -57,27 +59,33 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       ...(saved || {}),
     };
     const cleaningDisabled = ['none', 'off', 'disabled'].includes(merged.wm_method);
+    const migrateLegacyTtsAudio = saved?.enable_tts
+      && saved?.preset_id === 'clean_keep_bgm'
+      && saved?.original_vocal_volume == null;
     if (merged.preset_id === 'clean_mute_all') {
       if (cleaningDisabled) merged.wm_method = 'auto';
       merged.enable_vocal_mute = true;
       merged.preserve_bgm = false;
       merged.vocal_mute_strategy = 'mute_all';
+    } else if (merged.preset_id === 'clean_duck_vocals' || migrateLegacyTtsAudio) {
+      if (cleaningDisabled) merged.wm_method = 'auto';
+      merged.preset_id = 'clean_duck_vocals';
+      merged.enable_vocal_mute = true;
+      merged.preserve_bgm = true;
+      merged.vocal_mute_strategy = 'demucs_duck';
+      merged.original_vocal_volume = merged.original_vocal_volume ?? 0.10;
     } else {
       const isCurrentPreset = merged.preset_id === 'clean_keep_bgm';
       merged.preset_id = 'clean_keep_bgm';
       if (!isCurrentPreset || cleaningDisabled) merged.wm_method = 'auto';
-      merged.enable_vocal_mute = true;
+      merged.enable_vocal_mute = false;
       merged.preserve_bgm = true;
       merged.vocal_mute_strategy = 'auto';
     }
     const isRetiredVietnameseVoice = merged.target_lang === 'vi'
-      && (
-        merged.tts_engine === 'vieneu'
-        || /^vieneu:/i.test(merged.tts_voice || '')
-        || /^en-US-.*MultilingualNeural$/i.test(merged.tts_voice || '')
-      );
+      && !/^vieneu:/i.test(merged.tts_voice || '');
     return isRetiredVietnameseVoice
-      ? { ...merged, tts_voice: 'vi-VN-HoaiMy-Fast', tts_engine: 'edge-tts' }
+      ? { ...merged, tts_voice: 'vieneu:Trúc Ly', tts_engine: 'vieneu' }
       : merged;
   });
   useEffect(() => {
@@ -175,8 +183,8 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     // Slider is always percent (0–5). Never send 0.4 as 40% crop.
     const normCrop = Number(options.crop_percent || 0) / 100.0;
     const cleanMethod = options.wm_method === 'opencv_telea' ? 'telea' : (options.wm_method === 'opencv_ns' ? 'ns' : options.wm_method);
-    const voice = options.tts_voice || 'vi-VN-HoaiMy-Fast';
-    let ttsEngine = options.tts_engine || 'edge-tts';
+    const voice = options.tts_voice || 'vieneu:Trúc Ly';
+    let ttsEngine = options.tts_engine || 'vieneu';
     if (String(voice).toLowerCase().startsWith('kokoro')) ttsEngine = 'kokoro';
     if (String(voice).toLowerCase().startsWith('vieneu:')) ttsEngine = 'vieneu';
     if (String(voice).toLowerCase().startsWith('vi-vn-')) ttsEngine = 'edge-tts';
@@ -216,11 +224,13 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         modify_md5: options.modify_md5,
         enable_vocal_mute: options.enable_vocal_mute,
         vocal_mute_strategy: options.vocal_mute_strategy || 'auto',
+        original_vocal_volume: options.original_vocal_volume ?? 0.10,
         preserve_bgm: options.preserve_bgm !== false,
         enable_tts: options.enable_tts,
         enable_lipsync: options.enable_lipsync !== false,
         vietsub_style: options.vietsub_style || 'auto',
         burn_subtitles: options.burn_subtitles !== false,
+        subtitle_mode: options.burn_subtitles === false ? 'off' : (options.subtitle_mode || 'soft'),
         tts_voice: voice,
         tts_engine: ttsEngine,
         target_lang: options.target_lang || 'vi',

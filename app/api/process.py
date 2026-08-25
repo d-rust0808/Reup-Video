@@ -62,8 +62,9 @@ class ReupPayload(BaseModel):
     enable_lipsync: Optional[bool] = True
     vietsub_style: Optional[str] = "dub"
     burn_subtitles: Optional[bool] = True
-    tts_voice: Optional[str] = "vi-VN-HoaiMy-Fast"
-    tts_engine: Optional[str] = "edge-tts"
+    subtitle_mode: Optional[str] = "soft"
+    tts_voice: Optional[str] = "vieneu:Trúc Ly"
+    tts_engine: Optional[str] = "vieneu"
     target_lang: Optional[str] = "vi"
     source_lang: Optional[str] = "auto"
     film_grain: Optional[float] = 3.0
@@ -85,6 +86,7 @@ class ReupPayload(BaseModel):
     target_platforms: Optional[List[str]] = None
     subtitle_bottom_crop: Optional[float] = 0.0
     vocal_mute_strategy: Optional[str] = "demucs"
+    original_vocal_volume: Optional[float] = 0.10
     trim_start_sec: Optional[float] = 0.0
     trim_end_sec: Optional[float] = 0.0
 
@@ -114,8 +116,9 @@ class ProcessJobRequest(BaseModel):
     enable_lipsync: Optional[bool] = True
     vietsub_style: Optional[str] = "dub"
     burn_subtitles: Optional[bool] = True
-    tts_voice: Optional[str] = "vi-VN-HoaiMy-Fast"
-    tts_engine: Optional[str] = "edge-tts"
+    subtitle_mode: Optional[str] = "soft"
+    tts_voice: Optional[str] = "vieneu:Trúc Ly"
+    tts_engine: Optional[str] = "vieneu"
     target_lang: Optional[str] = "vi"
     source_lang: Optional[str] = "auto"
     film_grain: Optional[float] = 3.0
@@ -137,6 +140,7 @@ class ProcessJobRequest(BaseModel):
     target_platforms: Optional[List[str]] = None
     subtitle_bottom_crop: Optional[float] = 0.0
     vocal_mute_strategy: Optional[str] = "demucs"
+    original_vocal_volume: Optional[float] = 0.10
     trim_start_sec: Optional[float] = 0.0
     trim_end_sec: Optional[float] = 0.0
 
@@ -272,9 +276,14 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         reup_burn = req.reup.burn_subtitles
     elif getattr(req, "burn_subtitles", None) is not None:
         reup_burn = req.burn_subtitles
+    reup_subtitle_mode = "soft"
+    if req.reup and getattr(req.reup, "subtitle_mode", None):
+        reup_subtitle_mode = req.reup.subtitle_mode
+    elif getattr(req, "subtitle_mode", None):
+        reup_subtitle_mode = req.subtitle_mode
     reup_target_lang = (req.reup.target_lang if req.reup and req.reup.target_lang else req.target_lang) or "vi"
-    reup_tts_voice = (req.reup.tts_voice if req.reup and req.reup.tts_voice else req.tts_voice) or "vi-VN-HoaiMy-Fast"
-    reup_tts_engine = "edge-tts"
+    reup_tts_voice = (req.reup.tts_voice if req.reup and req.reup.tts_voice else req.tts_voice) or "vieneu:Trúc Ly"
+    reup_tts_engine = "vieneu" if reup_target_lang.lower() == "vi" else "edge-tts"
     if req.reup and getattr(req.reup, "tts_engine", None):
         reup_tts_engine = req.reup.tts_engine
     elif getattr(req, "tts_engine", None):
@@ -282,12 +291,17 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
     reup_voice_lower = (reup_tts_voice or "").lower()
     if reup_voice_lower.startswith("kokoro"):
         reup_tts_engine = "kokoro"
+    elif reup_target_lang.lower() == "vi" and reup_voice_lower.startswith("vieneu:"):
+        reup_tts_engine = "vieneu"
     elif reup_target_lang.lower() == "vi" and (
-        reup_voice_lower.startswith("vieneu:")
+        reup_voice_lower in {
+            "vi-vn-hoaimy-fast", "vi-vn-hoaimy-warm",
+            "vi-vn-namminh-fast", "vi-vn-namminh-deep",
+        }
         or (reup_voice_lower.startswith("en-us-") and "multilingual" in reup_voice_lower)
     ):
-        reup_tts_voice = "vi-VN-HoaiMy-Fast"
-        reup_tts_engine = "edge-tts"
+        reup_tts_voice = "vieneu:Trúc Ly"
+        reup_tts_engine = "vieneu"
     elif reup_voice_lower.startswith("vi-vn-"):
         reup_tts_engine = "edge-tts"
     elif (reup_tts_voice or "").lower().startswith("gtts"):
@@ -324,6 +338,11 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         reup_vocal_strategy = req.reup.vocal_mute_strategy
     elif getattr(req, "vocal_mute_strategy", None):
         reup_vocal_strategy = req.vocal_mute_strategy
+    reup_original_vocal_volume = 0.10
+    if req.reup and getattr(req.reup, "original_vocal_volume", None) is not None:
+        reup_original_vocal_volume = req.reup.original_vocal_volume
+    elif getattr(req, "original_vocal_volume", None) is not None:
+        reup_original_vocal_volume = req.original_vocal_volume
 
     reup_bottom_crop = 0.0
     val_bottom = req.reup.subtitle_bottom_crop if req.reup else req.subtitle_bottom_crop
@@ -351,11 +370,12 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         trim_start_sec=reup_trim_start,
         trim_end_sec=reup_trim_end,
         vocal_mute_strategy=reup_vocal_strategy,
+        original_vocal_volume=reup_original_vocal_volume,
         brightness=reup_bright if reup_bright is not None else 0.01,
         contrast=reup_contrast if reup_contrast is not None else 1.02,
         saturation=reup_sat if reup_sat is not None else 1.03,
         modify_md5=reup_md5 if reup_md5 is not None else True,
-        enable_vocal_mute=reup_vocal_mute if reup_vocal_mute is not None else True,
+        enable_vocal_mute=reup_vocal_mute if reup_vocal_mute is not None else False,
         preserve_bgm=reup_preserve_bgm if reup_preserve_bgm is not None else True,
         enable_tts=reup_tts if reup_tts is not None else False,
         enable_lipsync=reup_lipsync if reup_lipsync is not None else True,
@@ -364,6 +384,7 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
             or "auto"
         ),
         burn_subtitles=reup_burn if reup_burn is not None else True,
+        subtitle_mode=reup_subtitle_mode,
         tts_voice=reup_tts_voice,
         tts_engine=reup_tts_engine or "edge-tts",
         target_lang=reup_target_lang,
@@ -456,12 +477,17 @@ async def preview_voice(req: VoicePreviewRequest):
     voice = req.voice.strip()
     engine = (req.engine or "").strip().lower()
     voice_lower = voice.lower()
-    if lang == "vi" and (
-        voice_lower.startswith("vieneu:")
+    if lang == "vi" and voice_lower.startswith("vieneu:"):
+        engine = "vieneu"
+    elif lang == "vi" and (
+        voice_lower in {
+            "vi-vn-hoaimy-fast", "vi-vn-hoaimy-warm",
+            "vi-vn-namminh-fast", "vi-vn-namminh-deep",
+        }
         or (voice_lower.startswith("en-us-") and "multilingual" in voice_lower)
     ):
-        voice = "vi-VN-HoaiMy-Fast"
-        engine = "edge-tts"
+        voice = "vieneu:Trúc Ly"
+        engine = "vieneu"
     elif voice_lower.startswith("vi-vn-"):
         engine = "edge-tts"
     elif not engine or (engine == "vieneu" and lang not in ("vi", "en")):
@@ -516,11 +542,27 @@ async def get_supported_voices():
     ]
 
     voices = [
-        # Tiếng Việt — native Edge-TTS voices commonly used for short-form reviews
-        {"id": "vi-VN-HoaiMy-Fast", "lang": "vi", "name": "Hoài My — review nhanh", "gender": "Female", "desc": "Nữ Việt, sáng và rõ, hợp TikTok/Reels", "tag": "BEST"},
-        {"id": "vi-VN-HoaiMy-Warm", "lang": "vi", "name": "Hoài My — kể chuyện ấm", "gender": "Female", "desc": "Nữ Việt, chậm và ấm, hợp kể chuyện", "tag": "HOT"},
-        {"id": "vi-VN-NamMinh-Fast", "lang": "vi", "name": "Nam Minh — review nam", "gender": "Male", "desc": "Nam Việt, chắc và nhanh, hợp review", "tag": "PRO"},
-        {"id": "vi-VN-NamMinh-Deep", "lang": "vi", "name": "Nam Minh — giọng trầm", "gender": "Male", "desc": "Nam Việt, trầm và rõ, hợp recap", "tag": "PRO"},
+        # Tiếng Việt — VieNeu-TTS v3 Turbo, giọng thật theo vùng và phong cách
+        {"id": "vieneu:Trúc Ly", "lang": "vi", "name": "Trúc Ly", "gender": "Female", "desc": "Nữ miền Bắc · tự nhiên", "tag": "DEFAULT"},
+        {"id": "vieneu:Phạm Tuyên", "lang": "vi", "name": "Phạm Tuyên", "gender": "Male", "desc": "Nam miền Bắc · tự nhiên", "tag": "NATURAL"},
+        {"id": "vieneu:Xuân Vĩnh", "lang": "vi", "name": "Xuân Vĩnh", "gender": "Male", "desc": "Nam miền Nam · tự nhiên", "tag": "NATURAL"},
+        {"id": "vieneu:Đoan Trang", "lang": "vi", "name": "Đoan Trang", "gender": "Female", "desc": "Nữ miền Bắc · tự nhiên", "tag": "NATURAL"},
+        {"id": "vieneu:Ngọc Huyền", "lang": "vi", "name": "Ngọc Huyền", "gender": "Female", "desc": "Nữ miền Bắc · tự nhiên", "tag": "NATURAL"},
+        {"id": "vieneu:Adam", "lang": "vi", "name": "Adam", "gender": "Male", "desc": "Nam miền Nam · tự nhiên", "tag": "NATURAL"},
+        {"id": "vieneu:Quang Sơn", "lang": "vi", "name": "Quang Sơn", "gender": "Male", "desc": "Nam miền Trung · tự nhiên", "tag": "CENTRAL"},
+        {"id": "vieneu:Ngọc Trân", "lang": "vi", "name": "Ngọc Trân", "gender": "Female", "desc": "Nữ miền Trung · tự nhiên", "tag": "CENTRAL"},
+        {"id": "vieneu:Thái Sơn", "lang": "vi", "name": "Thái Sơn", "gender": "Male", "desc": "Nam miền Nam · kể chuyện", "tag": "STORY"},
+        {"id": "vieneu:Thanh Bình", "lang": "vi", "name": "Thanh Bình", "gender": "Male", "desc": "Nam miền Bắc · kể chuyện", "tag": "STORY"},
+        {"id": "vieneu:Ngọc Linh", "lang": "vi", "name": "Ngọc Linh", "gender": "Female", "desc": "Nữ miền Bắc · kể chuyện", "tag": "STORY"},
+        {"id": "vieneu:Thục Đoan", "lang": "vi", "name": "Thục Đoan", "gender": "Female", "desc": "Nữ miền Nam · kể chuyện", "tag": "STORY"},
+        {"id": "vieneu:Mỹ Duyên", "lang": "vi", "name": "Mỹ Duyên", "gender": "Female", "desc": "Nữ miền Nam · đọc truyện", "tag": "STORY"},
+        {"id": "vieneu:Quỳnh Anh", "lang": "vi", "name": "Quỳnh Anh", "gender": "Female", "desc": "Nữ miền Bắc · đọc truyện", "tag": "STORY"},
+        {"id": "vieneu:Đức Trí", "lang": "vi", "name": "Đức Trí", "gender": "Male", "desc": "Nam miền Nam · đọc truyện", "tag": "STORY"},
+        {"id": "vieneu:Kim Thanh", "lang": "vi", "name": "Kim Thanh", "gender": "Female", "desc": "Nữ miền Nam · đọc truyện", "tag": "STORY"},
+        {"id": "vieneu:Minh Đức", "lang": "vi", "name": "Minh Đức", "gender": "Male", "desc": "Nam miền Bắc · tin tức", "tag": "NEWS"},
+        {"id": "vieneu:Mai Anh", "lang": "vi", "name": "Mai Anh", "gender": "Female", "desc": "Nữ miền Bắc · tin tức", "tag": "NEWS"},
+        {"id": "vieneu:Minh Triết", "lang": "vi", "name": "Minh Triết", "gender": "Male", "desc": "Nam miền Nam · tin tức", "tag": "NEWS"},
+        {"id": "vieneu:Thùy Dung", "lang": "vi", "name": "Thùy Dung", "gender": "Female", "desc": "Nữ miền Nam · tin tức", "tag": "NEWS"},
 
         # Tiếng Anh Global
         {"id": "en-US-GuyNeural", "lang": "en", "name": "Guy (Nam US)", "gender": "Male", "desc": "Giọng nam trầm cuốn hút, cực kỳ viral trên TikTok & Shorts", "tag": "HOT"},
@@ -556,6 +598,6 @@ async def get_supported_voices():
     return {
         "languages": languages,
         "voices": voices,
-        "default_voice": "vi-VN-HoaiMy-Fast",
+        "default_voice": "vieneu:Trúc Ly",
         "default_lang": "vi"
     }

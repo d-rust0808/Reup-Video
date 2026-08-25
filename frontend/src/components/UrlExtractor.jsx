@@ -154,6 +154,12 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
     try {
       if (mode === 'channel') {
         const opts = loadSession().workbenchOptions || {};
+        const wantsTts = opts.enable_tts !== false;
+        const hasSavedAudioMode = typeof opts.enable_vocal_mute === 'boolean';
+        const enableVocalMute = hasSavedAudioMode ? opts.enable_vocal_mute : wantsTts;
+        const vocalMuteStrategy = hasSavedAudioMode
+          ? (opts.vocal_mute_strategy || 'auto')
+          : (wantsTts ? 'demucs_duck' : 'auto');
         const result = await extractChannel({
           url: inputUrl.trim(),
           max_videos: Number(maxVideos) || 8,
@@ -162,12 +168,14 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             vietsub_style: opts.vietsub_style || 'dub',
             tts_voice: opts.tts_voice,
             tts_engine: opts.tts_engine,
-            enable_tts: opts.enable_tts !== false,
-            enable_vocal_mute: opts.enable_vocal_mute !== false,
+            enable_tts: wantsTts,
+            enable_vocal_mute: enableVocalMute,
             preserve_bgm: opts.preserve_bgm !== false,
-            vocal_mute_strategy: opts.vocal_mute_strategy || 'auto',
+            vocal_mute_strategy: vocalMuteStrategy,
+            original_vocal_volume: opts.original_vocal_volume ?? 0.10,
             enable_lipsync: opts.enable_lipsync !== false,
             burn_subtitles: opts.burn_subtitles !== false,
+            subtitle_mode: opts.burn_subtitles === false ? 'off' : (opts.subtitle_mode || 'soft'),
             overlays: opts.overlays || [],
             target_platforms: opts.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
             bgm_path: opts.bgm_path || opts.bgm_id,
@@ -281,6 +289,12 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
     setError(null);
     const opts = loadSession().workbenchOptions || {};
     const overlays = opts.overlays || [];
+    const wantsTts = opts.enable_tts !== false;
+    const hasSavedAudioMode = typeof opts.enable_vocal_mute === 'boolean';
+    const enableVocalMute = hasSavedAudioMode ? opts.enable_vocal_mute : wantsTts;
+    const vocalMuteStrategy = hasSavedAudioMode
+      ? (opts.vocal_mute_strategy || 'auto')
+      : (wantsTts ? 'demucs_duck' : 'auto');
     let ok = 0;
     let skipped = 0;
     try {
@@ -298,15 +312,17 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             crop_percent: (Number(opts.crop_percent) || 2) / 100,
             film_grain: opts.film_grain ?? 3,
             modify_md5: opts.modify_md5 !== false,
-            enable_vocal_mute: opts.enable_vocal_mute !== false,
+            enable_vocal_mute: enableVocalMute,
             preserve_bgm: opts.preserve_bgm !== false,
-            vocal_mute_strategy: opts.vocal_mute_strategy || 'auto',
-            enable_tts: opts.enable_tts !== false,
+            vocal_mute_strategy: vocalMuteStrategy,
+            original_vocal_volume: opts.original_vocal_volume ?? 0.10,
+            enable_tts: wantsTts,
             enable_lipsync: opts.enable_lipsync !== false,
             vietsub_style: opts.vietsub_style || 'dub',
             burn_subtitles: opts.burn_subtitles !== false,
-            tts_voice: opts.tts_voice || 'vi-VN-HoaiMy-Fast',
-            tts_engine: opts.tts_engine || 'edge-tts',
+            subtitle_mode: opts.burn_subtitles === false ? 'off' : (opts.subtitle_mode || 'soft'),
+            tts_voice: opts.tts_voice || 'vieneu:Trúc Ly',
+            tts_engine: opts.tts_engine || 'vieneu',
             target_lang: 'vi',
             channel_id: opts.channel_id,
             post_title: item.title,
