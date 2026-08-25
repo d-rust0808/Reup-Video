@@ -14,6 +14,7 @@ from app.api.outputs import router as outputs_router
 from app.api.channels import router as channels_router
 from app.api.studio import router as studio_router
 from app.api.bgm import router as bgm_router
+from app.api.facebook import router as facebook_router
 
 api_router = APIRouter()
 
@@ -25,4 +26,4 @@ api_router.include_router(outputs_router, tags=["Outputs"])
 api_router.include_router(channels_router, tags=["Channels"])
 api_router.include_router(studio_router, tags=["Studio"])
 api_router.include_router(bgm_router, tags=["BGM"])
-
+api_router.include_router(facebook_router, tags=["Facebook"])

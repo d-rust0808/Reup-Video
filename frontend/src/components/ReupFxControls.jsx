@@ -14,12 +14,10 @@ import {
   FileText,
   Sparkles,
   Loader2,
-  ImagePlus,
   BookOpen,
   Smile,
   Captions,
   Share2,
-  Frame,
   ChevronDown,
   Music,
   Scissors,
@@ -27,7 +25,7 @@ import {
   Square,
 } from 'lucide-react';
 
-import { fetchChannels, uploadStudioOverlay, fetchBgmLibrary, previewVoice } from '../services/api';
+import { fetchChannels, fetchBgmLibrary, previewVoice } from '../services/api';
 
 const VOICE_OPTIONS = {
   vi: [
@@ -354,8 +352,8 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
               <div className="space-y-2.5 pt-1">
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   {[
-                    { id: 'auto', label: 'Tự động (LaMa + Telea)', desc: 'Chữ mỏng Telea, khối lớn LaMa neural' },
-                    { id: 'all', label: 'All + delogo', desc: 'Inpaint rồi phủ nốt vệt sót' },
+                    { id: 'auto', label: 'Tự động nhanh (Telea)', desc: 'Mặc định; OCR thưa, xử lý nhanh hơn nhiều' },
+                    { id: 'all', label: 'AI kỹ (LaMa + Telea)', desc: 'Chậm hơn; chỉ dùng cho vùng chữ rất khó' },
                     { id: 'crop', label: 'Chỉ cắt đáy', desc: 'Khi phụ đề dính cứng dưới chân' },
                   ].map((item) => {
                     const isSelected =
@@ -574,108 +572,6 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
               </div>
             </div>
 
-            {/* Khung viền + logo — in thẳng vào video */}
-            <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2.5">
-                  <Frame className="w-4 h-4 text-slate-700 shrink-0" />
-                  <div>
-                    <label className="text-xs font-bold text-slate-700 block">Khung viền (in vào video)</label>
-                    <span className="text-[10px] text-slate-500">Thêm viền điện ảnh.</span>
-                  </div>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={!!options.frame_enabled}
-                  onChange={(e) => handleChange('frame_enabled', e.target.checked)}
-                  className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer"
-                />
-              </div>
-              {!!options.frame_enabled && (
-                <div className="grid grid-cols-2 gap-2">
-                  <label className="text-[10px] font-bold text-slate-600">
-                    Màu
-                    <select
-                      value={options.frame_color || 'black'}
-                      onChange={(e) => handleChange('frame_color', e.target.value)}
-                      className="mt-1 w-full bg-white border border-slate-200 rounded-xl px-2 py-1.5 text-xs font-bold"
-                    >
-                      <option value="black">Đen</option>
-                      <option value="white">Trắng</option>
-                      <option value="0xC9A227">Vàng gold</option>
-                      <option value="0x7C3AED">Tím</option>
-                    </select>
-                  </label>
-                  <label className="text-[10px] font-bold text-slate-600">
-                    Dày ({options.frame_thickness || 16}px)
-                    <input
-                      type="range" min="6" max="36" step="2"
-                      value={options.frame_thickness || 16}
-                      onChange={(e) => handleChange('frame_thickness', parseInt(e.target.value, 10))}
-                      className="mt-2 w-full accent-blue-600"
-                    />
-                  </label>
-                </div>
-              )}
-              <div className="pt-1 border-t border-slate-200/80">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                    <ImagePlus className="w-3.5 h-3.5" /> Ảnh custom / logo
-                  </span>
-                  <span className="text-[10px] text-slate-500">In logo đè.</span>
-                </div>
-                <div className="flex gap-2">
-                  <label className="flex-1 text-center text-[11px] font-bold bg-white border border-slate-200 rounded-xl px-2 py-2 cursor-pointer hover:border-blue-300">
-                    + Logo góc
-                    <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
-                      onChange={async (e) => {
-                        const f = e.target.files?.[0];
-                        if (!f) return;
-                        try {
-                          const ov = await uploadStudioOverlay(f, { kind: 'logo', x: 0.78, y: 0.04, w: 0.16 });
-                          handleChange('overlays', [...(options.overlays || []), ov]);
-                        } catch (err) {
-                          console.error(err);
-                        }
-                        e.target.value = '';
-                      }}
-                    />
-                  </label>
-                  <label className="flex-1 text-center text-[11px] font-bold bg-white border border-slate-200 rounded-xl px-2 py-2 cursor-pointer hover:border-blue-300">
-                    + Khung full
-                    <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
-                      onChange={async (e) => {
-                        const f = e.target.files?.[0];
-                        if (!f) return;
-                        try {
-                          const ov = await uploadStudioOverlay(f, { kind: 'frame' });
-                          handleChange('overlays', [...(options.overlays || []), ov]);
-                        } catch (err) {
-                          console.error(err);
-                        }
-                        e.target.value = '';
-                      }}
-                    />
-                  </label>
-                </div>
-                {(options.overlays || []).length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {(options.overlays || []).map((ov, i) => (
-                      <button
-                        key={ov.id || i}
-                        type="button"
-                        onClick={() => handleChange('overlays', (options.overlays || []).filter((_, j) => j !== i))}
-                        className="text-[10px] bg-white border border-slate-200 rounded-lg px-2 py-1 font-bold text-slate-600"
-                        title="Bỏ"
-                      >
-                        {ov.kind === 'frame' ? 'Khung' : 'Logo'} ×
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-
             {/* MD5 Modifier Toggle */}
             <div className="flex items-center justify-between p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80">
               <div className="flex items-center space-x-2.5">
@@ -801,35 +697,26 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                 />
               </div>
 
-              <div className="flex items-center justify-between pt-1 p-2.5 bg-white/70 rounded-xl border border-purple-100">
-                <div>
-                  <label className="text-xs font-extrabold text-purple-950 cursor-pointer block" htmlFor="burnsub-toggle">
-                    Tạo Vietsub cho video
+              <div>
+                <div className="mb-1.5">
+                  <label className="text-xs font-extrabold text-purple-950 block">
+                    Hiển thị Vietsub
                   </label>
                   <span className="text-[10px] text-purple-700 font-medium block">
-                    Có thể dùng nút CC hoặc in cố định lên hình.
+                    Chọn tắt hoàn toàn, phụ đề CC, hoặc in cố định lên hình.
                   </span>
                 </div>
-                <input
-                  id="burnsub-toggle"
-                  type="checkbox"
-                  checked={options.burn_subtitles !== false}
-                  onChange={(e) => onChange({
-                    ...options,
-                    burn_subtitles: e.target.checked,
-                    subtitle_mode: e.target.checked ? (options.subtitle_mode === 'hard' ? 'hard' : 'soft') : 'off',
-                  })}
-                  className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-purple-300 shrink-0 cursor-pointer"
-                />
-              </div>
-
-              {options.burn_subtitles !== false && (
-                <div className="grid grid-cols-2 gap-1.5 rounded-xl border border-purple-100 bg-white/70 p-1.5">
+                <div className="grid grid-cols-3 gap-1.5 rounded-xl border border-purple-100 bg-white/70 p-1.5">
                   {[
+                    {
+                      id: 'off',
+                      title: 'Tắt Vietsub',
+                      desc: 'Không tạo hoặc chèn phụ đề.',
+                    },
                     {
                       id: 'soft',
                       title: 'CC bật / tắt',
-                      desc: 'Mặc định tắt; người xem tự bật phụ đề.',
+                      desc: 'Job mới: bật CC khi xem trong Kho Video.',
                     },
                     {
                       id: 'hard',
@@ -837,12 +724,19 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                       desc: 'Luôn hiện trên hình, không thể tắt.',
                     },
                   ].map((mode) => {
-                    const active = (options.subtitle_mode || 'soft') === mode.id;
+                    const selectedMode = options.burn_subtitles === false
+                      ? 'off'
+                      : (options.subtitle_mode || 'soft');
+                    const active = selectedMode === mode.id;
                     return (
                       <button
                         key={mode.id}
                         type="button"
-                        onClick={() => handleChange('subtitle_mode', mode.id)}
+                        onClick={() => onChange({
+                          ...options,
+                          burn_subtitles: mode.id !== 'off',
+                          subtitle_mode: mode.id,
+                        })}
                         className={`rounded-lg border px-2.5 py-2 text-left transition ${
                           active
                             ? 'border-purple-500 bg-purple-600 text-white'
@@ -857,7 +751,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                     );
                   })}
                 </div>
-              )}
+              </div>
 
               <div>
                 <label className="block text-[11px] font-extrabold text-purple-950 mb-1.5">

@@ -50,8 +50,6 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     post_caption: '',
     post_tags: [],
     publish_status: 'READY',
-    frame_enabled: false,
-    overlays: [],
     target_platforms: ['tiktok', 'youtube_shorts', 'facebook'],
     bgm_path: '',
     bgm_id: '',
@@ -89,15 +87,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       : merged;
   });
   useEffect(() => {
-    const sess = loadSession();
-    const sessionOvs = sess.workbenchOptions?.overlays || [];
-    const localOvs = options.overlays || [];
-    saveSession({
-      workbenchOptions: {
-        ...options,
-        overlays: localOvs.length ? localOvs : sessionOvs,
-      },
-    });
+    saveSession({ workbenchOptions: options });
   }, [options]);
 
   useEffect(() => {
@@ -190,10 +180,6 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     if (String(voice).toLowerCase().startsWith('vi-vn-')) ttsEngine = 'edge-tts';
     if (String(voice).toLowerCase().startsWith('gtts')) ttsEngine = 'gtts';
 
-    const sess = loadSession();
-    const frameOvs = (sess.workbenchOptions?.overlays || options.overlays || []).filter(
-      (o) => o && (o.kind === 'frame' ? o.image_path || o.url : true)
-    );
     const payload = {
       video_path: currentMedia.file_path || `data/input/raw/${currentMedia.video_id}.mp4`,
       platform: currentMedia.platform || 'douyin',
@@ -240,10 +226,6 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         post_caption: options.post_caption,
         post_tags: options.post_tags,
         publish_status: options.publish_status,
-        frame_enabled: !!options.frame_enabled,
-        frame_color: options.frame_color || 'black',
-        frame_thickness: options.frame_thickness ?? 16,
-        overlays: frameOvs,
         target_platforms: options.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
         bgm_path: options.bgm_path || options.bgm_id || '',
         bgm_volume: options.bgm_volume ?? 0.85,

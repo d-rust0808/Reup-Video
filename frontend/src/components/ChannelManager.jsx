@@ -9,7 +9,9 @@ import {
   updateChannelVideo,
   removeVideoFromChannel,
   fetchOutputs,
+  publishFacebookReel,
 } from '../services/api';
+import { FacebookPublishingPanel } from './FacebookPublishingPanel';
 import { ConfirmModal } from './ConfirmModal';
 import { Toast } from './Toast';
 import { VideoModal } from './VideoModal';
@@ -30,6 +32,8 @@ import {
   FolderPlus,
   RefreshCw,
   Loader2,
+  ExternalLink,
+  Send,
 } from 'lucide-react';
 
 const PLATFORMS = [
@@ -156,6 +160,12 @@ export function ChannelManager() {
   }, [selectedChannelId, loadChannelVideos]);
 
   const activeChannel = channels.find((c) => c.channel_id === selectedChannelId);
+
+  useEffect(() => {
+    if (!selectedChannelId || activeChannel?.platform !== 'facebook') return undefined;
+    const timer = window.setInterval(() => loadChannelVideos(selectedChannelId), 5000);
+    return () => window.clearInterval(timer);
+  }, [selectedChannelId, activeChannel?.platform, loadChannelVideos]);
 
   // ---------------------------------------------------------------------------
   // Channel CRUD Handlers
@@ -341,6 +351,16 @@ export function ChannelManager() {
     }
   };
 
+  const handlePublishFacebook = async (vid) => {
+    try {
+      const result = await publishFacebookReel(vid.id);
+      setToast({ type: 'success', title: 'Đã xếp hàng', message: result.message });
+      await loadChannelVideos(selectedChannelId);
+    } catch (err) {
+      setToast({ type: 'error', title: 'Đăng Reel thất bại', message: err.message });
+    }
+  };
+
 
   const handleDeleteVideoConfirm = async () => {
     if (!deleteVideoTarget) return;
@@ -403,6 +423,15 @@ export function ChannelManager() {
           <Plus className="w-4 h-4 stroke-[3]" /> Thêm Kênh Mới
         </button>
       </div>
+
+      <FacebookPublishingPanel
+        activeChannel={activeChannel}
+        onChanged={async () => {
+          await loadChannels();
+          await loadChannelVideos(selectedChannelId);
+          window.dispatchEvent(new Event('reup:channels-changed'));
+        }}
+      />
 
       {/* Main Grid: Channels Sidebar (Left) + Content Manager (Right) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -695,6 +724,19 @@ export function ChannelManager() {
 
                           {/* Quick Publish Status Switcher */}
                           <div className="flex items-center gap-2 shrink-0">
+                            {activeChannel.platform === 'facebook' && (
+                              <button
+                                onClick={() => handlePublishFacebook(vid)}
+                                disabled={['STARTING', 'UPLOADING', 'FINISHING', 'PROCESSING', 'PENDING', 'PUBLISHED'].includes(vid.distribution_status)}
+                                className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition flex items-center gap-1"
+                                title={vid.distribution_error || 'Đăng video này lên Facebook Reel'}
+                              >
+                                {['STARTING', 'UPLOADING', 'FINISHING', 'PROCESSING', 'PENDING'].includes(vid.distribution_status)
+                                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  : <Send className="w-3.5 h-3.5" />}
+                                {vid.distribution_status === 'PUBLISHED' ? 'Đã đăng' : 'Đăng Reel'}
+                              </button>
+                            )}
                             <select
                               value={vid.publish_status}
                               onChange={(e) => handleQuickStatusChange(vid, e.target.value)}
@@ -745,6 +787,31 @@ export function ChannelManager() {
                         {vid.caption && (
                           <div className="p-2.5 bg-slate-50/80 rounded-xl border border-slate-100 text-xs text-slate-700 font-medium whitespace-pre-wrap">
                             {vid.caption}
+                          </div>
+                        )}
+
+                        {vid.distribution_status && (
+                          <div className="flex items-center justify-between gap-3 text-[11px]">
+                            <span className={`font-bold ${
+                              vid.distribution_status === 'PUBLISHED'
+                                ? 'text-emerald-700'
+                                : vid.distribution_status === 'FAILED'
+                                ? 'text-rose-700'
+                                : 'text-blue-700'
+                            }`}>
+                              Facebook: {vid.distribution_status}
+                              {vid.distribution_error ? ` · ${vid.distribution_error}` : ''}
+                            </span>
+                            {vid.facebook_permalink && (
+                              <a
+                                href={vid.facebook_permalink}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-blue-700 font-bold flex items-center gap-1 hover:underline"
+                              >
+                                Mở Reel <ExternalLink className="w-3 h-3" />
+                              </a>
+                            )}
                           </div>
                         )}
 

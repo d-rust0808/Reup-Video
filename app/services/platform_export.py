@@ -107,9 +107,11 @@ def export_for_platforms(
             cmd = [
                 ff, "-y", "-i", src_path,
                 "-vf", vf,
+                "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                 "-pix_fmt", "yuv420p", "-movflags", "+faststart",
                 "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+                "-c:s", "mov_text",
                 dest,
             ]
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)

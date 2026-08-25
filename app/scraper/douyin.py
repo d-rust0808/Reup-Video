@@ -4,8 +4,10 @@ Handles share link resolution, aweme detail extraction, and watermark removal.
 """
 import re
 import json
+import html
 import logging
-from typing import Optional, Tuple
+from urllib.parse import unquote
+from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from app.scraper.base import BaseScraper, VideoMetadata
@@ -70,6 +72,125 @@ class DouyinScraper(BaseScraper):
         clean_url = re.sub(r"watermark=\d", "watermark=0", clean_url)
         return clean_url
 
+    @staticmethod
+    def _find_aweme(payload: Any, item_id: str) -> Optional[Dict[str, Any]]:
+        """Find an aweme object across the different Douyin response layouts."""
+        if isinstance(payload, dict):
+            direct = payload.get("aweme_detail")
+            if isinstance(direct, dict):
+                return direct
+            for key in ("item_list", "aweme_list"):
+                items = payload.get(key)
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, dict) and (
+                            str(item.get("aweme_id") or "") == item_id or item.get("video")
+                        ):
+                            return item
+            video_node = payload.get("video")
+            is_aweme_video = isinstance(video_node, dict) and any(
+                key in video_node
+                for key in ("play_addr", "play_addr_h264", "download_addr", "bit_rate")
+            )
+            if is_aweme_video and (
+                not payload.get("aweme_id") or str(payload.get("aweme_id")) == item_id
+            ):
+                return payload
+            for value in payload.values():
+                found = DouyinScraper._find_aweme(value, item_id)
+                if found:
+                    return found
+        elif isinstance(payload, list):
+            for value in payload:
+                found = DouyinScraper._find_aweme(value, item_id)
+                if found:
+                    return found
+        return None
+
+    def _metadata_from_aweme(
+        self,
+        aweme: Dict[str, Any],
+        item_id: str,
+        original_url: str,
+    ) -> Optional[VideoMetadata]:
+        video_info = aweme.get("video") or {}
+        addresses: List[Dict[str, Any]] = []
+        for key in ("play_addr_h264", "play_addr", "download_addr"):
+            value = video_info.get(key)
+            if isinstance(value, dict):
+                addresses.append(value)
+        for bitrate in video_info.get("bit_rate") or []:
+            if not isinstance(bitrate, dict):
+                continue
+            value = bitrate.get("play_addr") or bitrate.get("play_addr_265")
+            if isinstance(value, dict):
+                addresses.append(value)
+
+        urls: List[str] = []
+        for address in addresses:
+            for candidate in address.get("url_list") or []:
+                if not isinstance(candidate, str) or not candidate.startswith("http"):
+                    continue
+                clean = self.convert_to_no_watermark_url(candidate)
+                if clean not in urls:
+                    urls.append(clean)
+        if not urls:
+            return None
+
+        raw_duration = aweme.get("duration") or video_info.get("duration") or 0
+        try:
+            duration = float(raw_duration) / 1000.0
+        except (TypeError, ValueError):
+            duration = 0.0
+        author = aweme.get("author") or {}
+        return VideoMetadata(
+            video_id=str(aweme.get("aweme_id") or item_id),
+            platform="douyin",
+            original_url=original_url,
+            direct_stream_url=urls[0],
+            stream_url_candidates=urls,
+            title=aweme.get("desc") or "Douyin Video",
+            author=author.get("nickname") or "DouyinCreator",
+            duration=max(0.0, duration),
+            stream_headers={
+                "User-Agent": self.MOBILE_HEADERS["User-Agent"],
+                "Referer": f"https://www.douyin.com/video/{item_id}",
+            },
+        )
+
+    def _metadata_from_payload(
+        self,
+        payload: Any,
+        item_id: str,
+        original_url: str,
+    ) -> Optional[VideoMetadata]:
+        aweme = self._find_aweme(payload, item_id)
+        return self._metadata_from_aweme(aweme, item_id, original_url) if aweme else None
+
+    def _metadata_from_html(
+        self,
+        page_text: str,
+        item_id: str,
+        original_url: str,
+    ) -> Optional[VideoMetadata]:
+        """Read the JSON hydration blocks used by jingxuan and canonical video pages."""
+        for match in re.finditer(
+            r'<script[^>]+id=["\'](?:RENDER_DATA|__UNIVERSAL_DATA_FOR_REHYDRATION__)["\'][^>]*>(.*?)</script>',
+            page_text or "",
+            flags=re.I | re.S,
+        ):
+            raw = html.unescape(match.group(1)).strip()
+            for candidate in (raw, unquote(raw)):
+                try:
+                    metadata = self._metadata_from_payload(
+                        json.loads(candidate), item_id, original_url
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if metadata:
+                    return metadata
+        return None
+
     async def _resolve_direct_stream(self, no_wm_url: str, client: httpx.AsyncClient) -> str:
         """Follow redirects with Mobile UA to get direct CDN MP4 link."""
         try:
@@ -104,7 +225,8 @@ class DouyinScraper(BaseScraper):
                     except Exception:
                         pass
 
-                # Tier 0: Official ttwid bootstrap & Aweme Detail API (High Reliability)
+                # Tier 0: official detail APIs. Douyin rotates which web endpoint
+                # accepts a request, so keep both layouts instead of fabricating a CDN URL.
                 try:
                     reg_payload = {
                         "region": "cn",
@@ -124,50 +246,47 @@ class DouyinScraper(BaseScraper):
                         "Cookie": f"ttwid={ttwid_val};",
                         "Accept": "application/json",
                     }
-                    detail_url = f"https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id={item_id}&aid=1128&version_name=23.5.0&device_platform=android&os_version=2333"
-                    res_detail = await client.get(detail_url, headers=detail_headers)
-                    if res_detail.status_code == 200 and res_detail.text:
-                        data = res_detail.json()
-                        aweme_detail = data.get("aweme_detail")
-                        if aweme_detail:
-                            title = aweme_detail.get("desc") or "Douyin Video"
-                            author = aweme_detail.get("author", {}).get("nickname", "DouyinCreator")
-                            duration = float(aweme_detail.get("duration", 0)) / 1000.0 if "duration" in aweme_detail else 18.5
-                            if duration <= 0:
-                                duration = 18.5
+                    detail_urls = [
+                        f"https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id={item_id}&aid=1128&version_name=23.5.0&device_platform=android&os_version=2333",
+                        f"https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/?item_ids={item_id}",
+                    ]
+                    for detail_url in detail_urls:
+                        try:
+                            res_detail = await client.get(detail_url, headers=detail_headers)
+                            if res_detail.status_code != 200 or not res_detail.content:
+                                continue
+                            metadata = self._metadata_from_payload(
+                                res_detail.json(), item_id, url_clean
+                            )
+                            if metadata:
+                                return metadata
+                        except Exception as e:
+                            logger.debug(f"Douyin detail endpoint skipped: {e}")
 
-                            video_info = aweme_detail.get("video", {})
-                            play_addr = video_info.get("play_addr_h264") or video_info.get("play_addr") or {}
-                            url_list = play_addr.get("url_list", [])
-                            if url_list:
-                                return VideoMetadata(
-                                    video_id=item_id,
-                                    platform="douyin",
-                                    original_url=url_clean,
-                                    direct_stream_url=url_list[0],
-                                    title=title,
-                                    author=author,
-                                    stream_headers={"Referer": "https://www.douyin.com/"},
-                                )
+                    # Tier 1: page hydration JSON survives when both detail APIs
+                    # are rate-limited, including /jingxuan?modal_id= links.
+                    page_urls = [resolved_url, f"https://www.douyin.com/video/{item_id}"]
+                    seen_pages = set()
+                    for page_url in page_urls:
+                        if not page_url or page_url in seen_pages:
+                            continue
+                        seen_pages.add(page_url)
+                        try:
+                            page_res = await client.get(page_url, headers=self.MOBILE_HEADERS)
+                            if page_res.status_code != 200 or not page_res.text:
+                                continue
+                            metadata = self._metadata_from_html(
+                                page_res.text, item_id, url_clean
+                            )
+                            if metadata:
+                                return metadata
+                        except Exception as e:
+                            logger.debug(f"Douyin page fallback skipped: {e}")
                 except Exception as e:
                     logger.debug(f"Douyin ttwid detail fetch exception: {e}")
         except Exception as e:
-            logger.debug(f"Douyin HTTP scraping attempted for {url_clean}, fallback to parsed metadata: {e}")
+            logger.debug(f"Douyin HTTP scraping failed for {url_clean}: {e}")
 
-        # Fallback / Synthetic Test URL resolution
-        is_unicode = "unicode" in url_clean.lower() or "🎵" in url_clean or "创作者" in url_clean
-        title = "抖音爆款短视频 🎵" if is_unicode else "Douyin Sample Video Title"
-        author = "创作者123" if is_unicode else "DouyinCreator"
-
-        return VideoMetadata(
-            video_id=item_id,
-            platform="douyin",
-            original_url=url_clean,
-            direct_stream_url=f"https://v26-web.douyinvod.com/stream_{item_id}.mp4",
-            title=title,
-            author=author,
-            duration=18.5,
-            watermark_free=True,
-            file_path="",
-            file_size_bytes=0,
+        raise RuntimeError(
+            f"Douyin tạm chặn truy xuất video {item_id}; vui lòng thử lại sau ít giây."
         )

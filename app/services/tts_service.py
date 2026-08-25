@@ -12,7 +12,7 @@ import subprocess
 import asyncio
 import shutil
 import tempfile
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 
 from app.modules.tts.providers import get_tts_provider
 
@@ -505,6 +505,7 @@ class TTSService:
         total_duration: Optional[float] = None,
         enable_lipsync: bool = True,
         timeline_speed: float = 1.0,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Dict[str, Any]:
         """Synthesizes exact subtitle text and keeps its spoken timeline synchronized."""
         if not os.path.exists(srt_path):
@@ -532,6 +533,9 @@ class TTSService:
         ]
         if engine_name == "edge-tts":
             segments = group_long_form_tts_segments(segments)
+
+        if progress_callback:
+            progress_callback(0, len(segments))
 
         temp_dir = tempfile.mkdtemp(prefix="tts_sync_")
         processed_clips = []
@@ -661,6 +665,8 @@ class TTSService:
                         processed_clips.append(item)
                     elif isinstance(item, Exception):
                         logger.warning(f"TTS batch item failed: {item}")
+                if progress_callback:
+                    progress_callback(min(i + len(batch), len(segments)), len(segments))
 
             # Preserve every spoken word. When a translated sentence needs more
             # room, move the following cue forward and use the same adjusted

@@ -218,6 +218,31 @@ def _or_band_mask(text_mask: np.ndarray, sub_zone: np.ndarray, y1: int, y2: int)
     return text_mask
 
 
+def _plausible_overlay_boxes(
+    boxes: List[Tuple[int, int, int, int]],
+    width: int,
+    height: int,
+) -> List[Tuple[int, int, int, int]]:
+    """Reject OCR boxes shaped like buildings, horizons, or most of the frame."""
+    accepted = []
+    frame_area = float(max(1, width * height))
+    for x, y, box_w, box_h in boxes:
+        if box_w <= 0 or box_h <= 0:
+            continue
+        area_ratio = (box_w * box_h) / frame_area
+        height_ratio = box_h / float(max(1, height))
+        center_y = (y + box_h / 2.0) / float(max(1, height))
+        touches_side = x < width * 0.42 or (x + box_w) > width * 0.58
+
+        # Corner logos are compact; subtitles may be wider but belong in the
+        # lower half. Scene OCR in the middle is too risky to inpaint blindly.
+        is_corner_logo = center_y <= 0.18 and touches_side and height_ratio <= 0.10 and area_ratio <= 0.025
+        is_lower_caption = center_y >= 0.50 and height_ratio <= 0.18 and area_ratio <= 0.12
+        if is_corner_logo or is_lower_caption:
+            accepted.append((x, y, box_w, box_h))
+    return accepted
+
+
 def extract_dynamic_subtitle_mask(
     sub_zone: np.ndarray,
     tracker: Optional[TemporalTextTracker] = None,
@@ -247,9 +272,11 @@ def extract_dynamic_subtitle_mask(
 
         if run_ocr:
             raw_boxes = detect_text_boxes(sub_zone, min_confidence=0.25, padding=8)
+            raw_boxes = _plausible_overlay_boxes(raw_boxes, zw, zh)
             active_boxes = tracker.update(raw_boxes) if tracker is not None else raw_boxes
         else:
             active_boxes = tracker.get_active_boxes() if tracker is not None else []
+        active_boxes = _plausible_overlay_boxes(active_boxes, zw, zh)
 
         for bx, by, bw, bh in active_boxes:
             cbx = max(0, min(bx, zw - 1))
@@ -268,7 +295,6 @@ def extract_dynamic_subtitle_mask(
                 )
 
         # Douyin captions sit mid-lower as well as the classic bottom band
-        text_mask = _or_band_mask(text_mask, sub_zone, 0, max(12, int(zh * 0.14)))
         text_mask = _or_band_mask(text_mask, sub_zone, int(zh * 0.48), int(zh * 0.84))
         text_mask = _or_band_mask(text_mask, sub_zone, int(zh * 0.78), zh)
 
@@ -370,7 +396,9 @@ def _inpaint_frame_region(
         return 0
 
     height, width = frame.shape[:2]
-    run_ocr = (frames_processed % 3 == 0)
+    # OCR is the dominant cost. Two or three scans per second are enough because
+    # the temporal tracker carries stable text boxes across intervening frames.
+    run_ocr = (frames_processed % 12 == 0)
 
     if is_manual_roi:
         pad = max(radius * 2, 10)
@@ -397,13 +425,21 @@ def _inpaint_frame_region(
     text_mask = extract_dynamic_subtitle_mask(
         sub_zone, tracker=tracker, run_ocr=run_ocr, roi_fallback=False
     )
-    if cv2.countNonZero(text_mask) == 0:
+    masked_pixels = cv2.countNonZero(text_mask)
+    if masked_pixels == 0:
+        return 0
+    if masked_pixels / float(max(1, text_mask.size)) > 0.18:
+        # A real caption/logo never occupies most of an auto-scanned frame.
+        # Clear persisted false tracks so one bad OCR frame cannot smear the
+        # following seconds of video.
+        tracker.active_tracks = []
+        logger.warning("Skipped unsafe auto-inpaint mask covering %.1f%% of frame", masked_pixels * 100.0 / text_mask.size)
         return 0
     inpainted_zone = hybrid_inpaint_frame(
         sub_zone, text_mask, radius, use_lama=use_lama, frame_index=frames_processed
     )
     frame[y1:y2, x1:x2] = inpainted_zone
-    return int(cv2.countNonZero(text_mask))
+    return int(masked_pixels)
 
 
 def remux_audio_if_available(input_path: str, temp_video_path: str, output_path: str) -> bool:

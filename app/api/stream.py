@@ -7,6 +7,7 @@ Target Path: app/api/stream.py
 import os
 import io
 import logging
+import re
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Header, Query, Request, Response, UploadFile, File
 import uuid
@@ -147,6 +148,39 @@ def _validate_safe_path(target_path: str) -> str:
     return abs_target
 
 
+def _resolve_subtitle_sidecar(media_id: str) -> Optional[str]:
+    """Find the output-timed Vietnamese SRT belonging to a master or platform variant."""
+    video_path = _resolve_media_file_path(media_id)
+    candidates = []
+    if video_path:
+        stem = os.path.splitext(video_path)[0]
+        candidates.append(stem + ".vi.srt")
+        for suffix in (".tiktok", ".youtube_shorts", ".youtube", ".facebook", ".instagram", ".douyin"):
+            if stem.endswith(suffix):
+                candidates.append(stem[:-len(suffix)] + ".vi.srt")
+
+    clean_id = os.path.basename((media_id or "").strip())
+    candidates.extend([
+        os.path.join(settings.OUTPUT_DIR, f"{clean_id}.vi.srt"),
+        os.path.join(settings.RAW_INPUT_DIR, f"{clean_id}.vi.srt"),
+    ])
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
+            return candidate
+    return None
+
+
+def _srt_to_webvtt(srt_text: str) -> str:
+    """Convert ordinary SRT timing syntax into browser-native WebVTT."""
+    normalized = (srt_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    normalized = re.sub(
+        r"(?m)^(\d{2}:\d{2}:\d{2}),(\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2}),(\d{3})$",
+        r"\1.\2 --> \3.\4",
+        normalized,
+    )
+    return "WEBVTT\n\n" + normalized + ("\n" if normalized else "")
+
+
 @router.api_route("/videos/stream/{media_id}", methods=["GET", "HEAD"])
 async def stream_video(
     media_id: str,
@@ -212,6 +246,22 @@ async def stream_video(
             "Content-Length": str(chunk_length),
             "Accept-Ranges": "bytes",
         },
+    )
+
+
+@router.get("/videos/subtitles/{media_id}")
+async def stream_vietnamese_subtitles(media_id: str):
+    """Serve the matching Vietnamese sidecar as WebVTT for the HTML5 CC control."""
+    sidecar = _resolve_subtitle_sidecar(media_id)
+    if not sidecar:
+        raise HTTPException(status_code=404, detail="Vietsub track not found")
+    safe_path = _validate_safe_path(sidecar)
+    with open(safe_path, "r", encoding="utf-8-sig") as subtitle_file:
+        payload = _srt_to_webvtt(subtitle_file.read())
+    return Response(
+        content=payload,
+        media_type="text/vtt; charset=utf-8",
+        headers={"Cache-Control": "no-cache"},
     )
 
 

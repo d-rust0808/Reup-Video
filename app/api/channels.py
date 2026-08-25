@@ -11,7 +11,7 @@ import os
 import shutil
 from datetime import datetime, timezone
 from typing import Optional, List, Any, Dict
-from fastapi import APIRouter, HTTPException, Query, status, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Query, Request, status, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -83,11 +83,17 @@ async def list_channels():
     """
     with get_db_connection(settings.DB_PATH) as conn:
         cursor = conn.execute("""
-            SELECT c.*, COUNT(cv.id) as video_count,
+            SELECT c.*, cd.destination_id AS facebook_page_id,
+                   cd.auto_publish AS facebook_auto_publish,
+                   fp.name AS facebook_page_name,
+                   COUNT(cv.id) as video_count,
                    SUM(CASE WHEN cv.publish_status = 'PUBLISHED' THEN 1 ELSE 0 END) as published_count,
                    SUM(CASE WHEN cv.publish_status = 'READY' THEN 1 ELSE 0 END) as ready_count
             FROM channels c
             LEFT JOIN channel_videos cv ON c.channel_id = cv.channel_id
+            LEFT JOIN channel_destinations cd
+              ON cd.channel_id = c.channel_id AND cd.provider = 'facebook'
+            LEFT JOIN facebook_pages fp ON fp.page_id = cd.destination_id
             GROUP BY c.channel_id
             ORDER BY c.created_at DESC
         """)
@@ -105,6 +111,7 @@ async def list_channels():
             except Exception:
                 d["overlays"] = []
             d["id"] = d.get("channel_id")
+            d["facebook_auto_publish"] = bool(d.get("facebook_auto_publish"))
             channels.append(d)
             
         return {"channels": channels, "total": len(channels)}
@@ -196,6 +203,11 @@ async def delete_channel(channel_id: str):
     Deletes a channel and all its video assignments.
     """
     with get_db_connection(settings.DB_PATH) as conn:
+        conn.execute(
+            "DELETE FROM distribution_jobs WHERE channel_video_id IN (SELECT id FROM channel_videos WHERE channel_id = ?)",
+            (channel_id,),
+        )
+        conn.execute("DELETE FROM channel_destinations WHERE channel_id = ?", (channel_id,))
         conn.execute("DELETE FROM channel_videos WHERE channel_id = ?", (channel_id,))
         conn.execute("DELETE FROM channels WHERE channel_id = ?", (channel_id,))
         conn.commit()
@@ -380,7 +392,19 @@ async def list_channel_videos(
     Lists all videos assigned to a specific channel.
     """
     with get_db_connection(settings.DB_PATH) as conn:
-        query = "SELECT * FROM channel_videos WHERE channel_id = ?"
+        query = """
+            SELECT cv.*,
+                   (SELECT dj.status FROM distribution_jobs dj
+                    WHERE dj.channel_video_id = cv.id AND dj.provider = 'facebook'
+                    ORDER BY dj.updated_at DESC LIMIT 1) AS distribution_status,
+                   (SELECT dj.last_error FROM distribution_jobs dj
+                    WHERE dj.channel_video_id = cv.id AND dj.provider = 'facebook'
+                    ORDER BY dj.updated_at DESC LIMIT 1) AS distribution_error,
+                   (SELECT dj.permalink FROM distribution_jobs dj
+                    WHERE dj.channel_video_id = cv.id AND dj.provider = 'facebook'
+                    ORDER BY dj.updated_at DESC LIMIT 1) AS facebook_permalink
+            FROM channel_videos cv WHERE cv.channel_id = ?
+        """
         params = [channel_id]
 
         if status_filter:
@@ -407,7 +431,7 @@ async def list_channel_videos(
 
 
 @router.post("/channels/{channel_id}/videos", status_code=status.HTTP_201_CREATED)
-async def assign_video_to_channel(channel_id: str, req: AssignVideoRequest):
+async def assign_video_to_channel(channel_id: str, req: AssignVideoRequest, request: Request):
     """
     Assigns a video to a channel with custom title, caption, hashtags, and status.
     """
@@ -434,6 +458,18 @@ async def assign_video_to_channel(channel_id: str, req: AssignVideoRequest):
             now, now
         ))
         conn.commit()
+
+    if (req.publish_status or "DRAFT").upper() == "READY":
+        from app.services.facebook_distribution import enqueue_channel_video
+
+        distribution_id = enqueue_channel_video(
+            settings.DB_PATH,
+            video_content_id,
+            require_auto_publish=True,
+        )
+        worker = getattr(request.app.state, "facebook_distribution_worker", None)
+        if distribution_id and worker:
+            worker.wake()
 
     return {
         "id": video_content_id,
@@ -496,6 +532,7 @@ async def remove_video_from_channel(video_id: str):
     Removes a video assignment from a channel.
     """
     with get_db_connection(settings.DB_PATH) as conn:
+        conn.execute("DELETE FROM distribution_jobs WHERE channel_video_id = ?", (video_id,))
         conn.execute("DELETE FROM channel_videos WHERE id = ?", (video_id,))
         conn.commit()
 

@@ -246,11 +246,14 @@ def remove_watermark(
 
     elif method_clean == "auto":
         try:
-            logger.info("Auto inpaint: hybrid Telea + LaMa neural")
-            inpainter = OpenCVInpainter(radius=max(radius, 5), method="hybrid")
+            # The default path must finish near realtime. Telea handles ordinary
+            # subtitles/logos well; neural LaMa remains available as an explicit
+            # advanced mode for difficult masks.
+            logger.info("Auto inpaint: fast Telea with sparse temporal OCR")
+            inpainter = OpenCVInpainter(radius=max(radius, 5), method="telea")
             return inpainter.inpaint_video(input_path, output_path, roi_tuple, progress_callback=progress_callback)
         except Exception as e:
-            logger.warning(f"Auto hybrid failed ({e}). Falling back to FFmpeg delogo.")
+            logger.warning(f"Auto Telea failed ({e}). Falling back to FFmpeg delogo.")
             return inpaint_video_ffmpeg(input_path, output_path, roi_tuple, filter_type="delogo", radius=radius)
 
     elif method_clean == "lama":

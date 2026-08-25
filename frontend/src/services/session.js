@@ -1,10 +1,10 @@
 import { getApiBase } from './api';
 
-const KEY = 'reup.studio.session.v3';
-const LEGACY_KEYS = ['reup.studio.session.v2', 'reup.studio.session.v1'];
+const KEY = 'reup.studio.session.v4';
+const LEGACY_KEYS = ['reup.studio.session.v3', 'reup.studio.session.v2', 'reup.studio.session.v1'];
 
 export const EMPTY_SESSION = {
-  sessionVersion: 3,
+  sessionVersion: 4,
   activeTab: 'extract',
   collapsed: false,
   selectedMedia: null,
@@ -13,7 +13,7 @@ export const EMPTY_SESSION = {
   extractMode: 'video',
   extractUrl: '',
   maxVideos: 8,
-  autoReup: true,
+  autoReup: false,
   selectedChannelId: null,
   targetPlatforms: ['tiktok', 'youtube_shorts', 'facebook'],
   frameStudio: {
@@ -50,34 +50,19 @@ export function compactMedia(item) {
 
 export function compactOptions(options) {
   if (!options || typeof options !== 'object') return null;
-  const { overlays, ...rest } = options;
-  const cleanOverlays = Array.isArray(overlays)
-    ? overlays
-        .filter((o) => o && typeof o === 'object')
-        .map((o) => ({
-          id: o.id,
-          kind: o.kind,
-          src: isSafeUrl(o.src) ? o.src : '',
-          url: isSafeUrl(o.url) ? o.url : '',
-          image_path: typeof o.image_path === 'string' ? o.image_path : '',
-          filename: o.filename || '',
-          x: o.x,
-          y: o.y,
-          w: o.w,
-          h: o.h,
-          opacity: o.opacity,
-        }))
-        .filter((o) => o.src || o.url || o.image_path)
-    : [];
-  return { ...rest, overlays: cleanOverlays };
+  const clean = { ...options };
+  delete clean.overlays;
+  delete clean.frame_enabled;
+  delete clean.frame_color;
+  delete clean.frame_thickness;
+  return clean;
 }
 
 function compactSession(raw) {
   const incoming = raw || {};
-  const isLegacy = Number(incoming.sessionVersion || 0) < 3;
+  const isLegacy = Number(incoming.sessionVersion || 0) < 4;
   const src = { ...EMPTY_SESSION, ...incoming };
   const workbenchOptions = compactOptions(src.workbenchOptions);
-  if (isLegacy && workbenchOptions) workbenchOptions.frame_enabled = false;
   const list = Array.isArray(src.extractedMediaList)
     ? src.extractedMediaList.map(compactMedia).filter(Boolean).slice(0, 80)
     : [];
@@ -90,12 +75,12 @@ function compactSession(raw) {
     collapsed: !!src.collapsed,
     selectedMedia: compactMedia(src.selectedMedia),
     extractedMediaList: list,
-    sessionVersion: 3,
+    sessionVersion: 4,
     workbenchOptions,
     extractMode: src.extractMode === 'channel' ? 'channel' : 'video',
     extractUrl: typeof src.extractUrl === 'string' ? src.extractUrl.slice(0, 4000) : '',
     maxVideos: Math.max(1, Math.min(50, Number(src.maxVideos) || 8)),
-    autoReup: src.autoReup !== false,
+    autoReup: isLegacy ? false : src.autoReup === true,
     selectedChannelId: src.selectedChannelId || null,
     targetPlatforms: platforms.length ? platforms : EMPTY_SESSION.targetPlatforms,
     frameStudio: {

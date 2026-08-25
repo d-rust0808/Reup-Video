@@ -46,7 +46,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
   const [isDragOver, setIsDragOver] = useState(false);
   const [samples, setSamples] = useState([]);
   const [maxVideos, setMaxVideos] = useState(boot.maxVideos || 8);
-  const [autoReup, setAutoReup] = useState(boot.autoReup !== false);
+  const [autoReup, setAutoReup] = useState(boot.autoReup === true);
   const [channelProfile, setChannelProfile] = useState(null);
   const [channelMessage, setChannelMessage] = useState('');
   const [queuedJobs, setQueuedJobs] = useState([]);
@@ -176,7 +176,6 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             enable_lipsync: opts.enable_lipsync !== false,
             burn_subtitles: opts.burn_subtitles !== false,
             subtitle_mode: opts.burn_subtitles === false ? 'off' : (opts.subtitle_mode || 'soft'),
-            overlays: opts.overlays || [],
             target_platforms: opts.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
             bgm_path: opts.bgm_path || opts.bgm_id,
             bgm_volume: opts.bgm_volume ?? 0.85,
@@ -288,7 +287,6 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
     setBatchBusy(true);
     setError(null);
     const opts = loadSession().workbenchOptions || {};
-    const overlays = opts.overlays || [];
     const wantsTts = opts.enable_tts !== false;
     const hasSavedAudioMode = typeof opts.enable_vocal_mute === 'boolean';
     const enableVocalMute = hasSavedAudioMode ? opts.enable_vocal_mute : wantsTts;
@@ -326,8 +324,6 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             target_lang: 'vi',
             channel_id: opts.channel_id,
             post_title: item.title,
-            overlays,
-            frame_enabled: false,
             target_platforms: opts.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
             bgm_path: opts.bgm_path || opts.bgm_id,
             bgm_volume: opts.bgm_volume ?? 0.85,
@@ -552,7 +548,17 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
           </div>
 
           {mode === 'channel' && (
-            <div className="flex flex-wrap items-center gap-3 p-3 rounded-2xl bg-purple-50/70 border border-purple-100">
+            <div className="space-y-2.5 p-3 rounded-2xl bg-purple-50/70 border border-purple-100">
+              <div className={`rounded-xl border px-3 py-2 text-xs font-bold ${
+                autoReup
+                  ? 'border-amber-200 bg-amber-50 text-amber-800'
+                  : 'border-emerald-200 bg-emerald-50 text-emerald-800'
+              }`}>
+                {autoReup
+                  ? 'Đang bật xử lý AI: tải xong sẽ xóa chữ/logo và reup từng video.'
+                  : 'Chỉ tải video gốc: không xóa watermark, không Vietsub, không lồng tiếng.'}
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
               <label className="flex items-center gap-2 text-xs font-bold text-slate-700">
                 <ListVideo className="w-4 h-4 text-purple-600" />
                 Tối đa
@@ -575,8 +581,9 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
                   className="w-4 h-4 accent-blue-600"
                 />
                 <Clapperboard className="w-4 h-4 text-blue-600" />
-                Reup luôn cả kênh (vietsub + lồng tiếng + khung)
+                Sau khi tải, tự đưa vào hàng xử lý AI
               </label>
+              </div>
             </div>
           )}
 

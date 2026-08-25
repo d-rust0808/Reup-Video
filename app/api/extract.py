@@ -37,7 +37,7 @@ class ChannelExtractRequest(BaseModel):
     url: str = ""
     urls: Optional[List[str]] = None
     max_videos: int = Field(default=8, ge=1, le=40)
-    auto_reup: bool = True
+    auto_reup: bool = False
     reup: Optional[Dict[str, Any]] = None
 
 

@@ -109,6 +109,26 @@ def test_opencv_detects_white_text_blob():
     assert int(mask.max()) == 255
 
 
+def test_auto_inpaint_rejects_scene_sized_false_text_boxes(monkeypatch):
+    from app.services import opencv_inpainter
+
+    frame = np.full((720, 1280, 3), 140, dtype=np.uint8)
+    monkeypatch.setattr(
+        "app.services.subtitle_detector.detect_text_boxes",
+        lambda *_args, **_kwargs: [(0, 90, 1280, 610)],
+    )
+    monkeypatch.setattr("app.services.subtitle_detector.detect_faces", lambda *_args, **_kwargs: [])
+
+    mask = opencv_inpainter.extract_dynamic_subtitle_mask(
+        frame,
+        tracker=opencv_inpainter.TemporalTextTracker(),
+        run_ocr=True,
+        roi_fallback=False,
+    )
+
+    assert np.count_nonzero(mask) == 0
+
+
 def test_reup_defaults_are_visible():
     cfg = ReupConfig()
     assert cfg.hflip is True
@@ -219,6 +239,22 @@ def test_identity_fx_still_has_grain_and_scale():
     assert "scale=trunc(iw/2)*2" in vf
 
 
+def test_identity_audio_is_preserved_without_audio_fx():
+    cfg = ReupConfig(
+        hflip=False,
+        crop_percent=0,
+        color_adjust=False,
+        film_grain=0,
+        pitch_shift=False,
+        speed_factor=1.0,
+    )
+    graph, has_audio, _, audio_filter = build_reup_filtergraph(cfg, has_audio=True)
+
+    assert has_audio is True
+    assert "[0:a]anull[a_out]" in graph
+    assert audio_filter == "anull"
+
+
 def test_scale_srt_timestamps(tmp_path):
     srt = tmp_path / "a.srt"
     srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nXin chào\n\n", encoding="utf-8")
@@ -251,6 +287,180 @@ def test_hardsub_filter_uses_original_timestamps_before_setpts(tmp_path):
     assert "subtitles=" in vf
     assert "BorderStyle=3" in vf
     assert vf.index("subtitles=") < vf.index("setpts=")
+
+
+def test_toggleable_vietsub_is_output_timed_and_embedded(tmp_path):
+    import json
+    import shutil
+    import subprocess
+
+    from app.services.reup_service import mux_toggleable_subtitle, prepare_output_subtitle
+
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        pytest.skip("FFmpeg is required for soft subtitle mux verification")
+
+    video = tmp_path / "softsub.mp4"
+    subprocess.run(
+        [
+            ffmpeg, "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=black:s=320x180:d=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-shortest", str(video),
+        ],
+        check=True,
+    )
+    source_srt = tmp_path / "source.srt"
+    source_srt.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nXin chào Nha Trang\n",
+        encoding="utf-8",
+    )
+
+    sidecar = prepare_output_subtitle(str(source_srt), str(video), speed_factor=2.0)
+    assert sidecar
+    with open(sidecar, encoding="utf-8") as subtitle_file:
+        assert "00:00:00,000 --> 00:00:00,500" in subtitle_file.read()
+    assert mux_toggleable_subtitle(str(video), sidecar, str(video)) is True
+
+    probe = subprocess.run(
+        [
+            ffprobe, "-v", "error",
+            "-show_entries", "stream=codec_type,codec_name:stream_tags=language,title:stream_disposition=default",
+            "-of", "json", str(video),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    streams = json.loads(probe.stdout)["streams"]
+    assert any(s["codec_type"] == "video" and s["codec_name"] == "h264" for s in streams)
+    assert any(s["codec_type"] == "audio" and s["codec_name"] == "aac" for s in streams)
+    subtitle = next(s for s in streams if s["codec_type"] == "subtitle")
+    assert subtitle["codec_name"] == "mov_text"
+    assert subtitle["tags"]["language"] == "vie"
+
+
+def test_subtitle_mode_can_be_soft_hard_or_off():
+    assert ReupConfig(subtitle_mode="soft").subtitle_mode == "soft"
+    assert ReupConfig(subtitle_mode="hard").subtitle_mode == "hard"
+    disabled = ReupConfig(burn_subtitles=False, subtitle_mode="soft")
+    assert disabled.subtitle_mode == "off"
+    assert disabled.burn_subtitles is False
+
+
+def test_pipeline_with_subtitles_off_does_not_reference_missing_srt(monkeypatch, tmp_path):
+    from app.services import reup_service
+
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "output.mp4"
+    source.write_bytes(b"video")
+    captured = {}
+
+    def fake_process_reup_video(**kwargs):
+        captured.update(kwargs)
+        return {"output_path": kwargs["output_path"]}
+
+    monkeypatch.setattr(reup_service, "process_reup_video", fake_process_reup_video)
+
+    result = reup_service.ReupService.process_reup_pipeline(
+        str(source),
+        ReupConfig(burn_subtitles=False, subtitle_mode="off", enable_tts=False),
+        str(output),
+    )
+
+    assert result == str(output)
+    assert captured["srt_override"] is None
+    assert captured["speech_intervals"] == []
+
+
+def test_empty_stt_never_turns_post_title_into_full_video_subtitle(monkeypatch, tmp_path):
+    from app.services import pyvideotrans_service, reup_service, tts_service
+
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "output.mp4"
+    source.write_bytes(b"video")
+    captured = {}
+
+    monkeypatch.setattr(tts_service, "get_audio_duration", lambda _path: 29.0)
+    monkeypatch.setattr(
+        pyvideotrans_service.PyVideoTransService,
+        "speech_to_text",
+        lambda *_args, **_kwargs: {"status": "empty", "srt_path": None},
+    )
+
+    def fail_translation(*_args, **_kwargs):
+        raise AssertionError("An empty STT result must not translate the post title")
+
+    monkeypatch.setattr(
+        pyvideotrans_service.PyVideoTransService,
+        "translate_subtitles",
+        fail_translation,
+    )
+
+    def fake_process_reup_video(**kwargs):
+        captured.update(kwargs)
+        return {"output_path": kwargs["output_path"]}
+
+    monkeypatch.setattr(reup_service, "process_reup_video", fake_process_reup_video)
+
+    result = reup_service.ReupService.process_reup_pipeline(
+        str(source),
+        ReupConfig(
+            burn_subtitles=True,
+            subtitle_mode="hard",
+            enable_tts=False,
+            post_title="Tây Tạng Mê Tho — tiêu đề bài đăng",
+        ),
+        str(output),
+    )
+
+    assert result == str(output)
+    assert captured["srt_override"] is None
+    assert captured["speech_intervals"] == []
+    assert not (tmp_path / "source.title.srt").exists()
+
+
+def test_retry_reuses_only_completed_stage2(tmp_path):
+    from app.services.queue_manager import _can_resume_completed_stage2, _retry_progress_for_job
+
+    stage2 = tmp_path / "job_stage2.mp4"
+    stage2.write_bytes(b"x" * 6000)
+
+    completed = {
+        "job_id": "job",
+        "output_file_path": str(tmp_path / "job.mp4"),
+        "logs": [{
+            "level": "SUCCESS",
+            "message": "✨ Đã inpaint chữ/watermark -> job_stage2.mp4",
+        }]
+    }
+    assert _can_resume_completed_stage2(completed, str(stage2)) is False
+    (tmp_path / "job_stage2.mp4.complete").write_text("ok\n", encoding="ascii")
+    assert _can_resume_completed_stage2(completed, str(stage2)) is True
+    assert _retry_progress_for_job(completed) == pytest.approx(0.65)
+    assert _can_resume_completed_stage2({"logs": []}, str(stage2)) is False
+
+
+def test_fast_auto_cover_samples_only_stable_regions(monkeypatch):
+    from app.services.queue_manager import _fast_auto_cover_filters
+
+    captured = {}
+
+    def fake_detector(path, max_boxes, min_hits):
+        captured.update(path=path, max_boxes=max_boxes, min_hits=min_hits)
+        return ["delogo=x=10:y=20:w=100:h=30:show=0"]
+
+    monkeypatch.setattr(
+        "app.services.subtitle_detector.persistent_text_cover_filters",
+        fake_detector,
+    )
+
+    filters = _fast_auto_cover_filters("source.mp4")
+
+    assert filters == ["delogo=x=10:y=20:w=100:h=30:show=0"]
+    assert captured == {"path": "source.mp4", "max_boxes": 4, "min_hits": 2}
 
 
 def test_lipsync_preserves_script_and_rates():
@@ -726,13 +936,82 @@ def test_long_form_tts_groups_nearby_cues_without_cutting_text():
     assert "Câu số 60" in combined
 
 
+@pytest.mark.anyio
+async def test_tts_progress_callback_advances_after_each_batch(monkeypatch, tmp_path):
+    from app.services.tts_service import TTSService
+
+    srt = tmp_path / "many.srt"
+    cues = []
+    for index in range(7):
+        cues.append(
+            f"{index + 1}\n00:00:{index:02d},000 --> 00:00:{index + 1:02d},000\nCâu {index + 1}\n"
+        )
+    srt.write_text("\n".join(cues), encoding="utf-8")
+    output = tmp_path / "voice.wav"
+    progress = []
+    service = TTSService(output_dir=str(tmp_path))
+
+    async def fake_generate(**kwargs):
+        path = kwargs["output_path"]
+        with wave.open(path, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16000)
+            wav_file.writeframes(b"\x00\x00" * int(16000 * 0.2))
+        return path
+
+    monkeypatch.setattr(service, "generate_speech", fake_generate)
+    monkeypatch.setattr(service, "_assemble_synchronized_audio", lambda *_args: True)
+
+    result = await service.synthesize_synchronized_tts(
+        str(srt),
+        str(output),
+        voice="vieneu:Trúc Ly",
+        engine="vieneu",
+        enable_lipsync=False,
+        progress_callback=lambda completed, total: progress.append((completed, total)),
+    )
+
+    assert result["segment_count"] == 7
+    assert progress == [(0, 7), (6, 7), (7, 7)]
+
+
 def test_inpaint_progress_advances_immediately_after_pipeline_50_percent():
     import inspect
-    from app.services.opencv_inpainter import inpaint_video_opencv
+    from app.services.opencv_inpainter import _inpaint_frame_region, inpaint_video_opencv
 
     src = inspect.getsource(inpaint_video_opencv)
     assert "0.50 + 0.15 * (frames_processed / max(1, total_frames_est))" in src
     assert "0.35 + 0.30 * (frames_processed / max(1, total_frames_est))" not in src
+    assert "frames_processed % 12" in inspect.getsource(_inpaint_frame_region)
+
+
+def test_auto_watermark_mode_uses_fast_telea(monkeypatch, tmp_path):
+    from app.services import watermark_service
+
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "output.mp4"
+    source.write_bytes(b"video")
+    captured = {}
+
+    class FakeInpainter:
+        def __init__(self, radius, method):
+            captured["radius"] = radius
+            captured["method"] = method
+
+        def inpaint_video(self, input_path, output_path, roi, progress_callback=None):
+            captured["roi"] = roi
+            return output_path
+
+    monkeypatch.setattr(watermark_service, "OpenCVInpainter", FakeInpainter)
+    monkeypatch.setattr("app.services.tts_service.get_audio_duration", lambda _path: 10.0)
+
+    result = watermark_service.remove_watermark(
+        str(source), str(output), method="auto", radius=5
+    )
+
+    assert result == str(output)
+    assert captured["method"] == "telea"
 
 
 def test_watermark_removal_fallback_for_long_videos(monkeypatch, tmp_path):

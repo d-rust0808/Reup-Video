@@ -43,6 +43,7 @@ async def list_outputs(request: Request):
 
     outputs = []
     seen = set()
+    subtitle_modes = {}
     for j in completed_jobs:
         out_p = j.get("output_file_path") or j.get("output_path")
         if out_p and os.path.exists(out_p) and os.path.getsize(out_p) > 0:
@@ -53,6 +54,11 @@ async def list_outputs(request: Request):
                     raw_cfg = json.loads(raw_cfg)
                 except Exception:
                     raw_cfg = {}
+            subtitle_mode = (
+                (raw_cfg or {}).get("subtitle_mode")
+                or ("hard" if (raw_cfg or {}).get("burn_subtitles", True) else "off")
+            )
+            subtitle_modes[j["job_id"]] = subtitle_mode
             outputs.append({
                 "job_id": j["job_id"],
                 "output_path": out_p,
@@ -63,6 +69,7 @@ async def list_outputs(request: Request):
                 "title": (raw_cfg or {}).get("post_title"),
                 "caption": (raw_cfg or {}).get("post_caption"),
                 "platform": j.get("platform"),
+                "subtitle_mode": subtitle_mode,
             })
 
     from app.services.platform_export import PRESETS
@@ -93,6 +100,7 @@ async def list_outputs(request: Request):
                 "filename": fname,
                 "file_size": os.path.getsize(path),
                 "created_at": None,
+                "subtitle_mode": subtitle_modes.get(parent, "off"),
             })
             seen.add(abs_p)
 
@@ -160,6 +168,9 @@ async def download_batch_outputs(
                 out_p = job.get("output_file_path") or job.get("output_path")
                 if out_p and os.path.exists(out_p):
                     zf.write(out_p, arcname=f"{jid}.mp4")
+                    sidecar = os.path.splitext(out_p)[0] + ".vi.srt"
+                    if os.path.exists(sidecar):
+                        zf.write(sidecar, arcname=f"{jid}.vi.srt")
                     valid_files_count += 1
 
     if valid_files_count == 0:
@@ -212,7 +223,7 @@ async def delete_output(job_id: str, request: Request):
             from app.services.platform_export import PRESETS
             out_dir = getattr(settings, "OUTPUT_DIR", "data/outputs")
             for fname in os.listdir(out_dir) if os.path.isdir(out_dir) else []:
-                if fname == f"{job_id}.mp4" or fname.startswith(f"{job_id}."):
+                if fname == f"{job_id}.mp4" or fname == f"{job_id}.vi.srt" or fname.startswith(f"{job_id}."):
                     path = os.path.join(out_dir, fname)
                     if os.path.isfile(path):
                         try:

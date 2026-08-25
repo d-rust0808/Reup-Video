@@ -8,6 +8,8 @@ import json
 import uuid
 import shutil
 import logging
+import asyncio
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from typing import Optional, Union
 import httpx
@@ -62,9 +64,15 @@ class AsyncStreamDownloader:
         os.makedirs(target_dir, exist_ok=True)
 
         stream_url = metadata.direct_stream_url or ""
-        if "404" in stream_url:
+        stream_host = (urlparse(stream_url).hostname or "").lower()
+        is_synthetic_url = (
+            stream_url.startswith("mock://")
+            or stream_host in SYNTHETIC_TEST_DOMAINS
+            or stream_host.endswith(".test")
+        )
+        if is_synthetic_url and "404" in stream_url:
             raise RuntimeError("HTTP 404: Direct stream link expired or not found")
-        if "timeout" in stream_url:
+        if is_synthetic_url and "timeout" in stream_url:
             raise TimeoutError("Stream download timed out")
 
         # Sanitize platform, video_id, and title for file name, removing path traversal tokens
@@ -90,7 +98,7 @@ class AsyncStreamDownloader:
         unique_suffix = uuid.uuid4().hex
         tmp_mp4_path = f"{target_mp4_path}.{unique_suffix}.tmp"
 
-        is_zero_byte = "zero_byte" in stream_url
+        is_zero_byte = is_synthetic_url and "zero_byte" in stream_url
         if is_zero_byte:
             # Create 0-byte target file then raise ValueError as expected
             async with aiofiles.open(target_mp4_path, "wb") as f:
@@ -124,7 +132,6 @@ class AsyncStreamDownloader:
             elif any(d in lower_url for d in ["tiktok", "byteoversea", "ibytedtos"]):
                 headers["Referer"] = "https://www.tiktok.com/"
 
-        is_synthetic_url = any(domain in stream_url for domain in SYNTHETIC_TEST_DOMAINS)
         use_mock = allow_mock_fallback if allow_mock_fallback is not None else (self.allow_mock_fallback or is_synthetic_url)
         downloaded_bytes = 0
         success = False
@@ -133,20 +140,38 @@ class AsyncStreamDownloader:
             if stream_url.startswith("http://") or stream_url.startswith("https://"):
                 try:
                     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-                        async with client.stream("GET", stream_url, headers=headers) as response:
-                            if response.status_code == 200:
-                                async with aiofiles.open(tmp_mp4_path, "wb") as out_file:
-                                    async for chunk in response.aiter_bytes(chunk_size=self.chunk_size):
-                                        await out_file.write(chunk)
-                                        downloaded_bytes += len(chunk)
-                                if downloaded_bytes > 0:
-                                    os.replace(tmp_mp4_path, target_mp4_path)
-                                    success = True
-                            else:
-                                msg = f"HTTP stream download failed with status code {response.status_code} for {stream_url}"
-                                logger.error(msg)
-                                if not use_mock:
-                                    raise DownloaderError(msg)
+                        candidates = list(getattr(metadata, "stream_url_candidates", None) or [])
+                        if stream_url not in candidates:
+                            candidates.insert(0, stream_url)
+                        last_error = ""
+                        for candidate in candidates:
+                            if not candidate.startswith(("http://", "https://")):
+                                continue
+                            for attempt in range(2):
+                                downloaded_bytes = 0
+                                try:
+                                    async with client.stream("GET", candidate, headers=headers) as response:
+                                        if response.status_code not in (200, 206):
+                                            last_error = f"HTTP {response.status_code} for {candidate}"
+                                            continue
+                                        async with aiofiles.open(tmp_mp4_path, "wb") as out_file:
+                                            async for chunk in response.aiter_bytes(chunk_size=self.chunk_size):
+                                                await out_file.write(chunk)
+                                                downloaded_bytes += len(chunk)
+                                    if downloaded_bytes > 0:
+                                        os.replace(tmp_mp4_path, target_mp4_path)
+                                        success = True
+                                        break
+                                except Exception as e:
+                                    last_error = str(e)
+                                if attempt == 0:
+                                    await asyncio.sleep(0.35)
+                            if success:
+                                break
+                        if not success and not use_mock:
+                            raise DownloaderError(
+                                f"HTTP stream download failed after CDN retries: {last_error or stream_url}"
+                            )
                 except DownloaderError:
                     raise
                 except Exception as e:

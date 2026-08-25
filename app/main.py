@@ -24,6 +24,7 @@ from app.core.ws_manager import ws_manager
 from app.services.queue_manager import BatchQueueManager
 from app.scraper.manager import ScraperManager
 from app.services.sample_media import seed_sample_videos
+from app.services.facebook_distribution import FacebookDistributionWorker
 
 logger = logging.getLogger("app.main")
 
@@ -52,6 +53,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("Initializing application storage directories...")
     queue_mgr = None
+    facebook_worker = None
     try:
         settings.ensure_directories()
         _seed_sample_media()
@@ -70,14 +72,21 @@ async def lifespan(app: FastAPI):
         queue_mgr.register_callback(ws_manager.on_queue_update)
         await queue_mgr.start()
 
+        facebook_worker = FacebookDistributionWorker(settings.DB_PATH)
+        await facebook_worker.start()
+
         # Store singletons on app.state
         app.state.queue_manager = queue_mgr
         app.state.ws_manager = ws_manager
         app.state.scraper_manager = scraper_mgr
+        app.state.facebook_distribution_worker = facebook_worker
 
         yield
     finally:
         try:
+            if facebook_worker is not None:
+                logger.info("Stopping Facebook distribution worker...")
+                await facebook_worker.stop()
             if queue_mgr is not None:
                 logger.info("Stopping Batch Queue Manager workers...")
                 await queue_mgr.stop()

@@ -190,6 +190,10 @@ export function getStreamUrl(mediaId) {
   return `${API_BASE}/videos/stream/${mediaId}`;
 }
 
+export function getSubtitleUrl(mediaId) {
+  return `${API_BASE}/videos/subtitles/${mediaId}`;
+}
+
 export function getDownloadUrl(jobId) {
   return `${API_BASE}/outputs/download/${jobId}`;
 }
@@ -355,6 +359,64 @@ export async function removeVideoFromChannel(videoId) {
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Failed to remove video from channel');
+  }
+  return res.json();
+}
+
+export async function fetchFacebookSettings() {
+  const res = await fetch(`${API_BASE}/facebook/settings`);
+  if (!res.ok) throw new Error('Không tải được cấu hình Facebook');
+  return res.json();
+}
+
+export async function saveFacebookSettings(payload) {
+  const res = await fetch(`${API_BASE}/facebook/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Kết nối Facebook thất bại');
+  }
+  return res.json();
+}
+
+export async function syncFacebookPages() {
+  const res = await fetch(`${API_BASE}/facebook/sync-pages`, { method: 'POST' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Đồng bộ Fanpage thất bại');
+  }
+  return res.json();
+}
+
+export async function fetchFacebookPages() {
+  const res = await fetch(`${API_BASE}/facebook/pages`);
+  if (!res.ok) throw new Error('Không tải được danh sách Fanpage');
+  return res.json();
+}
+
+export async function bindFacebookPage(channelId, payload) {
+  const res = await fetch(`${API_BASE}/facebook/channels/${channelId}/binding`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Liên kết Fanpage thất bại');
+  }
+  return res.json();
+}
+
+export async function publishFacebookReel(videoId) {
+  const res = await fetch(`${API_BASE}/facebook/channel-videos/${videoId}/publish`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Không thể đăng Facebook Reel');
   }
   return res.json();
 }

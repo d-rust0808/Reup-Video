@@ -105,6 +105,13 @@ def test_video_has_overlay_text_missing_file():
     from app.services.subtitle_detector import video_has_overlay_text
     assert video_has_overlay_text("/no/such/file.mp4") is True
 
+
+def test_channel_download_does_not_auto_reup_by_default():
+    from app.api.extract import ChannelExtractRequest
+
+    request = ChannelExtractRequest(url="https://example.com/channel")
+    assert request.auto_reup is False
+
 def test_build_caption_hashtags():
     from app.services.caption import build_caption
     cap = build_caption("Mèo vui", "douyin", ["viral"])

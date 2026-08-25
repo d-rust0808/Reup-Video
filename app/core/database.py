@@ -116,6 +116,82 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chan_vid_channel ON channel_videos(channel_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chan_vid_status ON channel_videos(publish_status)")
 
+        # Facebook credentials stay in the OS credential store. SQLite only
+        # keeps non-secret metadata and stable references to those secrets.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS facebook_connections (
+                id TEXT PRIMARY KEY,
+                app_id TEXT NOT NULL DEFAULT '',
+                graph_version TEXT NOT NULL DEFAULT 'v24.0',
+                user_id TEXT NOT NULL DEFAULT '',
+                user_name TEXT NOT NULL DEFAULT '',
+                scopes TEXT NOT NULL DEFAULT '[]',
+                token_expires_at TEXT,
+                app_secret_ref TEXT NOT NULL DEFAULT '',
+                user_token_ref TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'DISCONNECTED',
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS facebook_pages (
+                page_id TEXT PRIMARY KEY,
+                connection_id TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT '',
+                tasks TEXT NOT NULL DEFAULT '[]',
+                picture_url TEXT NOT NULL DEFAULT '',
+                page_token_ref TEXT NOT NULL DEFAULT '',
+                can_publish INTEGER NOT NULL DEFAULT 0,
+                last_synced_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_facebook_pages_connection ON facebook_pages(connection_id)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS channel_destinations (
+                channel_id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                destination_id TEXT NOT NULL,
+                auto_publish INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (channel_id, provider)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_dest_provider ON channel_destinations(provider, destination_id)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS distribution_jobs (
+                id TEXT PRIMARY KEY,
+                channel_video_id TEXT NOT NULL,
+                job_id TEXT NOT NULL DEFAULT '',
+                provider TEXT NOT NULL,
+                destination_id TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                caption TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                upload_phase TEXT NOT NULL DEFAULT '',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 5,
+                next_attempt_at TEXT,
+                lease_until TEXT,
+                upload_video_id TEXT NOT NULL DEFAULT '',
+                upload_url TEXT NOT NULL DEFAULT '',
+                remote_media_id TEXT NOT NULL DEFAULT '',
+                remote_post_id TEXT NOT NULL DEFAULT '',
+                permalink TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                published_at TEXT,
+                UNIQUE (channel_video_id, provider, destination_id)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_distribution_ready ON distribution_jobs(provider, status, next_attempt_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_distribution_video ON distribution_jobs(channel_video_id)")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS studio_state (
                 id TEXT PRIMARY KEY,
@@ -139,4 +215,3 @@ def checkpoint_db(db_path: str = DEFAULT_DB_PATH) -> None:
         logger.info(f"WAL checkpoint completed for: {db_path}")
     except Exception as e:
         logger.warning(f"WAL checkpoint failed for {db_path}: {e}")
-

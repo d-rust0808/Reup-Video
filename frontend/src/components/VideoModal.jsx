@@ -1,8 +1,11 @@
-import React, { useEffect } from 'react';
-import { X, Download, ShieldCheck, Film } from 'lucide-react';
-import { getStreamUrl, getDownloadUrl } from '../services/api';
+import React, { useEffect, useRef, useState } from 'react';
+import { X, Download, ShieldCheck, Film, Captions } from 'lucide-react';
+import { getStreamUrl, getSubtitleUrl, getDownloadUrl } from '../services/api';
 
 export function VideoModal({ isOpen, onClose, video }) {
+  const videoRef = useRef(null);
+  const [captionsOn, setCaptionsOn] = useState(false);
+
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
@@ -19,12 +22,25 @@ export function VideoModal({ isOpen, onClose, video }) {
     };
   }, [isOpen, onClose]);
 
+  useEffect(() => {
+    setCaptionsOn(false);
+  }, [video?.job_id, video?.video_id, video?.filename]);
+
   if (!isOpen || !video) return null;
 
   const mediaId = video.job_id || video.video_id || video.filename;
   const streamUrl = getStreamUrl(mediaId);
   const downloadUrl = getDownloadUrl(mediaId);
   const title = video.title || video.filename || `Video Thành Phẩm (${mediaId})`;
+  const hasToggleableSubtitles = video.subtitle_mode === 'soft';
+
+  const toggleCaptions = () => {
+    const textTrack = videoRef.current?.textTracks?.[0];
+    if (!textTrack) return;
+    const nextOn = textTrack.mode !== 'showing';
+    textTrack.mode = nextOn ? 'showing' : 'disabled';
+    setCaptionsOn(nextOn);
+  };
 
   return (
     <div
@@ -61,6 +77,7 @@ export function VideoModal({ isOpen, onClose, video }) {
         {/* Video Player Container */}
         <div className="bg-slate-950 flex items-center justify-center relative aspect-video w-full max-h-[60vh]">
           <video
+            ref={videoRef}
             src={streamUrl}
             controls
             autoPlay
@@ -69,8 +86,33 @@ export function VideoModal({ isOpen, onClose, video }) {
             type="video/mp4"
             className="w-full h-full object-contain"
           >
+            <track
+              kind="subtitles"
+              src={getSubtitleUrl(mediaId)}
+              srcLang="vi"
+              label="Vietsub"
+            />
             Trình duyệt của bạn không hỗ trợ phát video HTML5.
           </video>
+          {hasToggleableSubtitles && (
+            <button
+              type="button"
+              onClick={toggleCaptions}
+              className={`absolute bottom-14 right-4 z-10 inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] font-black shadow-lg transition ${
+                captionsOn
+                  ? 'border-amber-300 bg-amber-400 text-slate-950'
+                  : 'border-white/30 bg-slate-950/75 text-white hover:bg-slate-900'
+              }`}
+              title={captionsOn ? 'Tắt Vietsub' : 'Bật Vietsub'}
+            >
+              <Captions className="h-4 w-4" /> CC {captionsOn ? 'ON' : 'OFF'}
+            </button>
+          )}
+          {video.subtitle_mode === 'hard' && (
+            <div className="absolute bottom-14 right-4 z-10 rounded-lg border border-white/25 bg-slate-950/80 px-2.5 py-1.5 text-[11px] font-bold text-white shadow-lg">
+              Vietsub đã in cố định · Muốn có nút CC, hãy reup lại bằng chế độ CC
+            </div>
+          )}
         </div>
 
         {/* Modal Footer & Actions */}

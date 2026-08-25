@@ -44,6 +44,48 @@ def _run_coro_sync(coro):
         return asyncio.run(coro)
 
 
+def _can_resume_completed_stage2(job: Dict[str, Any], stage2_path: str) -> bool:
+    """Reuse an inpaint result only when the prior attempt logged its completion."""
+    if not stage2_path or not os.path.isfile(stage2_path) or os.path.getsize(stage2_path) < 5000:
+        return False
+    if not os.path.isfile(stage2_path + ".complete"):
+        return False
+    logs = job.get("logs") or []
+    if isinstance(logs, str):
+        try:
+            logs = json.loads(logs)
+        except Exception:
+            return False
+    return any(
+        isinstance(item, dict)
+        and str(item.get("level") or "").upper() == "SUCCESS"
+        and "Đã inpaint chữ/watermark" in str(item.get("message") or "")
+        for item in logs
+    )
+
+
+def _retry_progress_for_job(job: Optional[Dict[str, Any]]) -> float:
+    """Keep UI progress at 65% when a retry can reuse completed inpainting."""
+    if not job:
+        return 0.05
+    output_path = job.get("output_path") or job.get("output_file_path")
+    job_id = job.get("job_id")
+    if not output_path or not job_id:
+        return 0.05
+    stage2_path = os.path.join(
+        os.path.dirname(os.path.abspath(output_path)),
+        f"{job_id}_stage2.mp4",
+    )
+    return 0.65 if _can_resume_completed_stage2(job, stage2_path) else 0.05
+
+
+def _fast_auto_cover_filters(video_path: str) -> List[str]:
+    """Detect stable overlay regions from five samples instead of every frame."""
+    from app.services.subtitle_detector import persistent_text_cover_filters
+
+    return persistent_text_cover_filters(video_path, max_boxes=4, min_hits=2)
+
+
 class BatchQueueManager:
     """
     Asynchronous task queue manager backed by SQLite persistence (jobs.sqlite)
@@ -150,6 +192,33 @@ class BatchQueueManager:
             if self._abort_requested(job_id):
                 raise JobAborted(job_id)
             self.update_job_progress(job_id, p, stage=stage)
+
+        return _cb
+
+    def _tts_progress_callback(self, job_id: str) -> Callable[[int, int], None]:
+        """Expose long-form TTS progress instead of leaving the UI frozen at 85%."""
+        last_logged_bucket = -1
+
+        def _cb(completed: int, total: int) -> None:
+            nonlocal last_logged_bucket
+            if self._abort_requested(job_id):
+                raise JobAborted(job_id)
+            safe_total = max(1, int(total or 0))
+            safe_completed = max(0, min(safe_total, int(completed or 0)))
+            ratio = safe_completed / safe_total
+            progress = 0.85 + (0.07 * ratio)
+            bucket = min(10, int(ratio * 10))
+            if safe_completed > 0 and bucket > last_logged_bucket:
+                last_logged_bucket = bucket
+                self.append_job_log(
+                    job_id,
+                    f"🎙️ TTS đã xử lý {safe_completed}/{safe_total} đoạn ({ratio:.0%})",
+                    level="INFO",
+                    stage="REUP_TRANSFORM",
+                    progress=progress,
+                )
+            else:
+                self.update_job_progress(job_id, progress, stage="REUP_TRANSFORM")
 
         return _cb
 
@@ -666,7 +735,9 @@ class BatchQueueManager:
             # Platform exports use <job_id>.<platform>.mp4 and otherwise reappear
             # when /outputs scans the directory after a page reload.
             for name in os.listdir(out_dir) if os.path.isdir(out_dir) else []:
-                if name == f"{master_stem}.mp4" or (name.startswith(f"{master_stem}.") and name.endswith(".mp4")):
+                is_video = name == f"{master_stem}.mp4" or (name.startswith(f"{master_stem}.") and name.endswith(".mp4"))
+                is_subtitle = name == f"{master_stem}.vi.srt"
+                if is_video or is_subtitle:
                     try:
                         os.remove(os.path.join(out_dir, name))
                     except OSError as e:
@@ -706,11 +777,13 @@ class BatchQueueManager:
                 jid = r["job_id"]
                 job_ids_to_del.append(jid)
                 out_p = r["output_file_path"]
-                if out_p and os.path.exists(out_p):
-                    try:
-                        os.remove(out_p)
-                    except OSError as e:
-                        logger.warning(f"Could not delete output file {out_p}: {e}")
+                if out_p:
+                    for target in (out_p, os.path.splitext(out_p)[0] + ".vi.srt"):
+                        if os.path.exists(target):
+                            try:
+                                os.remove(target)
+                            except OSError as e:
+                                logger.warning(f"Could not delete output file {target}: {e}")
 
             if job_ids_to_del:
                 placeholders = ",".join("?" * len(job_ids_to_del))
@@ -857,12 +930,15 @@ class BatchQueueManager:
                 f"{job_id}_stage2.mp4"
             )
 
-            # Defensive purge of any stale partial stage 2 file from prior interrupted run
-            if os.path.exists(stage2_out_path):
-                try:
-                    os.remove(stage2_out_path)
-                except Exception:
-                    pass
+            resume_stage2 = _can_resume_completed_stage2(job, stage2_out_path)
+            # Partial files without a completion log are unsafe to reuse.
+            if not resume_stage2:
+                for stale_path in (stage2_out_path, stage2_out_path + ".complete"):
+                    if os.path.exists(stale_path):
+                        try:
+                            os.remove(stale_path)
+                        except Exception:
+                            pass
 
             algo_name = wm_config.algorithm or "auto"
             self.append_job_log(
@@ -937,6 +1013,36 @@ class BatchQueueManager:
                     stage="WATERMARK_REMOVAL",
                     progress=0.60,
                 )
+            elif fold_algo == "auto":
+                if resume_stage2:
+                    stage2_res_path = stage2_out_path
+                    current_video_path = stage2_out_path
+                    self.append_job_log(
+                        job_id,
+                        "♻️ Dùng lại kết quả khử chữ/logo đã hoàn tất từ lần chạy trước",
+                        level="SUCCESS",
+                        stage="WATERMARK_REMOVAL",
+                        progress=0.65,
+                    )
+                else:
+                    covers = _fast_auto_cover_filters(current_video_path)
+                    if covers:
+                        reup_config.text_cover_vf = ",".join(covers)
+                        self.append_job_log(
+                            job_id,
+                            f"⚡ Phát hiện {len(covers)} vùng chữ/logo ổn định; xử lý cùng một lần render",
+                            level="SUCCESS",
+                            stage="WATERMARK_REMOVAL",
+                            progress=0.65,
+                        )
+                    else:
+                        self.append_job_log(
+                            job_id,
+                            "✨ Không thấy vùng chữ/logo ổn định — bỏ qua inpaint từng frame",
+                            level="SUCCESS",
+                            stage="WATERMARK_REMOVAL",
+                            progress=0.65,
+                        )
             else:
                 from app.services.subtitle_detector import video_has_overlay_text
                 dirty = True
@@ -952,10 +1058,25 @@ class BatchQueueManager:
                         stage="WATERMARK_REMOVAL",
                         progress=0.62,
                     )
-                else:
+                elif resume_stage2:
+                    stage2_res_path = stage2_out_path
+                    current_video_path = stage2_out_path
                     self.append_job_log(
                         job_id,
-                        "🧹 Đang khử chữ/logo: hybrid Telea + LaMa (không cắt đáy hình)…",
+                        "♻️ Dùng lại kết quả khử chữ/logo đã hoàn tất từ lần chạy trước",
+                        level="SUCCESS",
+                        stage="WATERMARK_REMOVAL",
+                        progress=0.65,
+                    )
+                else:
+                    inpaint_label = (
+                        "Telea nhanh + OCR thưa"
+                        if fold_algo == "auto"
+                        else "hybrid Telea + LaMa"
+                    )
+                    self.append_job_log(
+                        job_id,
+                        f"🧹 Đang khử chữ/logo: {inpaint_label} (không cắt đáy hình)…",
                         level="INFO",
                         stage="WATERMARK_REMOVAL",
                         progress=0.50
@@ -971,6 +1092,8 @@ class BatchQueueManager:
 
                     if stage2_res_path and os.path.exists(stage2_res_path):
                         current_video_path = stage2_res_path
+                        with open(stage2_out_path + ".complete", "w", encoding="ascii") as marker:
+                            marker.write("ok\n")
                         self.append_job_log(
                             job_id,
                             f"✨ Đã inpaint chữ/watermark -> {os.path.basename(stage2_res_path)}",
@@ -1006,13 +1129,14 @@ class BatchQueueManager:
             mute_val = getattr(reup_config, "enable_vocal_mute", False)
             tts_val = getattr(reup_config, "enable_tts", False)
             burn_val = getattr(reup_config, "burn_subtitles", True)
+            subtitle_mode = getattr(reup_config, "subtitle_mode", "soft") if burn_val else "off"
 
             self.append_job_log(
                 job_id,
                 (
                     f"🎬 [Giai đoạn 3] Reup FX: hflip={hflip_val}, speed={speed_val}x, "
                     f"pitch={pitch_val}, crop={crop_val:.2%}, grain={grain_val}, "
-                    f"mute={mute_val}, tts={tts_val}, hardsub={burn_val}, md5={md5_val}"
+                    f"mute={mute_val}, tts={tts_val}, subtitles={subtitle_mode}, md5={md5_val}"
                 ),
                 level="INFO",
                 stage="REUP_TRANSFORM",
@@ -1048,7 +1172,8 @@ class BatchQueueManager:
             final_video_path = ReupService.process_reup_pipeline(
                 video_path=current_video_path,
                 config=reup_config,
-                output_path=target_out_path
+                output_path=target_out_path,
+                tts_progress_callback=self._tts_progress_callback(job_id),
             )
 
 
@@ -1056,6 +1181,10 @@ class BatchQueueManager:
             if stage2_res_path and stage2_res_path != target_out_path and stage2_res_path != final_video_path and os.path.exists(stage2_res_path):
                 try:
                     os.remove(stage2_res_path)
+                except OSError:
+                    pass
+                try:
+                    os.remove(stage2_out_path + ".complete")
                 except OSError:
                     pass
 
@@ -1118,7 +1247,7 @@ class BatchQueueManager:
                     seen_p.add(pth)
                     unique_paths.append(pth)
 
-            def _assign(channel_id: str, video_path: str, suffix: str = "") -> None:
+            def _assign(channel_id: str, video_path: str, suffix: str = "") -> str:
                 cv_id = f"cvid_{uuid.uuid4().hex[:8]}"
                 raw_tags = getattr(reup_config, "post_tags", None) or params.get("post_tags") or []
                 tags_json = json.dumps(raw_tags if isinstance(raw_tags, list) else [], ensure_ascii=False)
@@ -1138,10 +1267,43 @@ class BatchQueueManager:
                         tags_json, p_status, video_path, now, now
                     ))
                     conn.commit()
+                try:
+                    from app.services.facebook_distribution import enqueue_channel_video
+
+                    enqueue_channel_video(
+                        self.db_path,
+                        cv_id,
+                        require_auto_publish=True,
+                    )
+                except Exception as e:
+                    logger.warning(f"Facebook auto-publish enqueue skipped for {cv_id}: {e}")
+                return cv_id
 
             if chan_id:
                 try:
-                    _assign(chan_id, unique_paths[0] if unique_paths else final_video_path)
+                    selected_path = unique_paths[0] if unique_paths else final_video_path
+                    with self._get_conn() as conn:
+                        selected_channel = conn.execute(
+                            "SELECT platform FROM channels WHERE channel_id = ?",
+                            (chan_id,),
+                        ).fetchone()
+                    selected_platform = (
+                        str(selected_channel["platform"] or "").lower()
+                        if selected_channel
+                        else ""
+                    )
+                    platform_alias = {
+                        "youtube": "youtube_shorts",
+                        "fb": "facebook",
+                    }
+                    selected_platform = platform_alias.get(selected_platform, selected_platform)
+                    selected_variant = next(
+                        (v for v in variants if v.get("platform") == selected_platform and v.get("path")),
+                        None,
+                    )
+                    if selected_variant:
+                        selected_path = selected_variant["path"]
+                    _assign(chan_id, selected_path)
                     self.append_job_log(
                         job_id,
                         "📢 Đã tự động phân bổ video vào kênh thành công!",
@@ -1158,18 +1320,19 @@ class BatchQueueManager:
                         rows = conn.execute(
                             "SELECT channel_id, platform FROM channels WHERE UPPER(status) = 'ACTIVE'"
                         ).fetchall()
-                    plat_to_chan = {}
+                    plat_to_chans = {}
                     for row in rows:
                         plat = (row["platform"] or "").lower()
-                        plat_to_chan.setdefault(plat, row["channel_id"])
-                    plat_to_chan["youtube_shorts"] = plat_to_chan.get("youtube_shorts") or plat_to_chan.get("youtube")
+                        plat_to_chans.setdefault(plat, []).append(row["channel_id"])
+                    if not plat_to_chans.get("youtube_shorts"):
+                        plat_to_chans["youtube_shorts"] = list(plat_to_chans.get("youtube") or [])
                     assigned_extra = 0
                     for v in variants:
-                        cid = plat_to_chan.get(v["platform"])
-                        if not cid or cid == chan_id:
-                            continue
-                        _assign(cid, v["path"], v.get("label") or v["platform"])
-                        assigned_extra += 1
+                        for cid in plat_to_chans.get(v["platform"], []):
+                            if cid == chan_id:
+                                continue
+                            _assign(cid, v["path"], v.get("label") or v["platform"])
+                            assigned_extra += 1
                     if assigned_extra:
                         self.append_job_log(
                             job_id,
@@ -1207,7 +1370,12 @@ class BatchQueueManager:
                 level="WARN",
                 stage="DOWNLOADING",
             )
-            self.update_job_status(job_id, "PENDING", progress=0.05, error_message=None)
+            self.update_job_status(
+                job_id,
+                "PENDING",
+                progress=_retry_progress_for_job(self.get_job(job_id)),
+                error_message=None,
+            )
             return self._run_pipeline_stages(job_id)
 
     def process_next_pending(self) -> Optional[Dict[str, Any]]:
@@ -1262,7 +1430,12 @@ class BatchQueueManager:
                 return
             try:
                 self.append_job_log(job_id, f"🔁 Tự chạy lại 1 lần sau lỗi: {e}", level="WARN")
-                self.update_job_status(job_id, "PENDING", progress=0.05, error_message=None)
+                self.update_job_status(
+                    job_id,
+                    "PENDING",
+                    progress=_retry_progress_for_job(self.get_job(job_id)),
+                    error_message=None,
+                )
                 await loop.run_in_executor(None, self._run_pipeline_stages, job_id)
             except Exception as e2:
                 logger.error(f"Retry also failed for {job_id}: {e2}")

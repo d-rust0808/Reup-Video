@@ -69,7 +69,10 @@ def remux_faststart(path: str) -> bool:
     if not ffmpeg_bin or not os.path.exists(path):
         return False
     tmp = path + ".faststart.mp4"
-    cmd = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-i", path, "-c", "copy", "-movflags", "+faststart", tmp]
+    cmd = [
+        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-i", path,
+        "-map", "0", "-c", "copy", "-movflags", "+faststart", tmp,
+    ]
     res = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if res.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
         os.replace(tmp, path)
@@ -301,9 +304,11 @@ def build_reup_filtergraph(
         else:
             filter_complex = f"[0:v]{vf_graph}[v_out];[0:a]{af_str}[a_out]"
         return filter_complex, True, vf_str, af_str
-    else:
-        filter_complex = f"[0:v]{vf_graph}[v_out]"
-        return filter_complex, False, vf_str, af_str
+    if has_audio:
+        filter_complex = f"[0:v]{vf_graph}[v_out];[0:a]anull[a_out]"
+        return filter_complex, True, vf_str, "anull"
+    filter_complex = f"[0:v]{vf_graph}[v_out]"
+    return filter_complex, False, vf_str, af_str
 
 
 def apply_vietnamese_dubbing(video_path: str, text_to_translate: str, output_path: Optional[str] = None) -> bool:
@@ -442,7 +447,7 @@ def prepare_output_subtitle(srt_path: str, output_path: str, speed_factor: float
 
 
 def mux_toggleable_subtitle(video_path: str, srt_path: str, output_path: Optional[str] = None) -> bool:
-    """Embed a Vietnamese mov_text track that is disabled until the viewer enables CC."""
+    """Embed a Vietnamese mov_text track that compatible players can toggle."""
     ffmpeg_bin = find_ffmpeg_binary()
     if not ffmpeg_bin or not os.path.exists(video_path) or not os.path.exists(srt_path):
         return False
@@ -1209,6 +1214,7 @@ class ReupService:
 
         synced_tts_audio: Optional[str] = None
         translated_srt: Optional[str] = None
+        srt_path: Optional[str] = None
         tts_warning: Optional[str] = None
 
         preset_srt = getattr(cfg, "srt_path", None)
@@ -1250,10 +1256,6 @@ class ReupService:
                     cfg.tts_voice = LANG_DEFAULT_VOICE.get(lang, voice)
                     cfg.tts_engine = "edge-tts"
 
-                clip_title = source_clip_title(video_path, cfg)
-                import re as _re
-                title_cjk = "".join(_re.findall(r"[\u4e00-\u9fff]", clip_title or ""))
-
                 stt_max = 90.0 if style == "recap" and (vid_dur or 0) > 180 else None
                 stt_res = pyvideotrans.speech_to_text(
                     video_path,
@@ -1263,14 +1265,6 @@ class ReupService:
                 )
                 srt_path = stt_res.get("srt_path")
                 is_fallback = stt_res.get("status") in ("fallback", "empty")
-
-                # Fallback to clip title ONLY if STT was completely empty or failed
-                if (not srt_path or not os.path.exists(srt_path) or is_fallback) and len(title_cjk) >= 4:
-                    title_srt = os.path.splitext(video_path)[0] + ".title.srt"
-                    srt_path = write_single_cue_srt(title_srt, clip_title, vid_dur or 8.0)
-                    stt_res = {"status": "success", "srt_path": srt_path}
-                    is_fallback = False
-                    logger.info(f"STT returned empty — fallback to title: {clip_title}")
 
                 if isinstance(srt_path, str) and os.path.exists(srt_path) and not is_fallback:
                     trans_res = pyvideotrans.translate_subtitles(
@@ -1342,6 +1336,7 @@ class ReupService:
                             total_duration=vid_dur,
                             enable_lipsync=getattr(cfg, "enable_lipsync", True) and style == "dub",
                             timeline_speed=cfg.speed_factor,
+                            progress_callback=kwargs.get("tts_progress_callback"),
                         )
 
                     tts_result = None
@@ -1395,6 +1390,7 @@ class ReupService:
                         total_duration=vid_dur,
                         enable_lipsync=getattr(cfg, "enable_lipsync", True) and (getattr(cfg, "vietsub_style", "dub") == "dub"),
                         timeline_speed=cfg.speed_factor,
+                        progress_callback=kwargs.get("tts_progress_callback"),
                     )
 
                 tts_result = None

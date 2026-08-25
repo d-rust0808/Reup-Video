@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { fetchOutputs, getDownloadUrl, getStreamUrl, downloadBatchZip, deleteOutput, deleteBatchOutputs, clearAllOutputs } from '../services/api';
+import { fetchOutputs, getDownloadUrl, getStreamUrl, getSubtitleUrl, downloadBatchZip, deleteOutput, deleteBatchOutputs, clearAllOutputs } from '../services/api';
 import { ConfirmModal } from './ConfirmModal';
 import { Toast } from './Toast';
 import { VideoModal } from './VideoModal';
@@ -322,7 +322,14 @@ export function OutputGallery() {
                     controls
                     className="w-full h-full object-contain"
                     onClick={(e) => e.stopPropagation()}
-                  />
+                  >
+                    <track
+                      kind="subtitles"
+                      src={getSubtitleUrl(jobId)}
+                      srcLang="vi"
+                      label="Vietsub"
+                    />
+                  </video>
                 </div>
                 <div className="flex items-start justify-between gap-2 min-w-0">
                   <div className="flex items-center space-x-2.5 min-w-0 flex-1">

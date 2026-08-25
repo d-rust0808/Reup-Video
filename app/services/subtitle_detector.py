@@ -564,7 +564,11 @@ def detect_subtitle_roi(video_path: str, padding: int = 8) -> Tuple[int, int, in
     return SubtitleDetector().detect_subtitle_roi(video_path, padding=padding)
 
 
-def persistent_text_cover_filters(video_path: str, max_boxes: int = 4) -> List[str]:
+def persistent_text_cover_filters(
+    video_path: str,
+    max_boxes: int = 4,
+    min_hits: int = 1,
+) -> List[str]:
     """
     Sample a few frames, find caption-like boxes anywhere except tiny corners,
     and return ffmpeg delogo filters. Bottom Chinese hardsub is included because
@@ -629,7 +633,7 @@ def persistent_text_cover_filters(video_path: str, max_boxes: int = 4) -> List[s
                 break
         if not hit:
             clusters.append([x, y, x2, y2, 1])
-    clusters = [c for c in clusters if c[4] >= 1]
+    clusters = [c for c in clusters if c[4] >= max(1, int(min_hits))]
     clusters.sort(key=lambda c: c[4], reverse=True)
     filters: List[str] = []
     for x, y, x2, y2, _ in clusters[:max_boxes]:
@@ -674,4 +678,3 @@ def video_has_overlay_text(video_path: str) -> bool:
     finally:
         cap.release()
     return hits >= 2
-

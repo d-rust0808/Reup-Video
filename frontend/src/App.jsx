@@ -6,8 +6,6 @@ import { VideoWorkbench } from './components/VideoWorkbench';
 import { BatchQueue } from './components/BatchQueue';
 import { OutputGallery } from './components/OutputGallery';
 import { ChannelManager } from './components/ChannelManager';
-import { FrameStudio } from './components/FrameStudio';
-import { BgmStudio } from './components/BgmStudio';
 import { fetchJobs, fetchOutputs, fetchLibrary } from './services/api';
 import { WebSocketClient } from './services/websocket';
 import { loadSession, saveSession, hydrateSession } from './services/session';
@@ -20,9 +18,15 @@ function mergeMedia(a = [], b = []) {
   return Array.from(map.values());
 }
 
+const AVAILABLE_TABS = new Set(['extract', 'workbench', 'queue', 'gallery', 'channels']);
+
+function normalizeActiveTab(tab) {
+  return AVAILABLE_TABS.has(tab) ? tab : 'extract';
+}
+
 export default function App() {
   const boot = useRef(loadSession()).current;
-  const [activeTab, setActiveTab] = useState(boot.activeTab || 'extract');
+  const [activeTab, setActiveTab] = useState(normalizeActiveTab(boot.activeTab));
   const [collapsed, setCollapsed] = useState(!!boot.collapsed);
   const [serverOnline, setServerOnline] = useState(false);
   const [wsStatus, setWsStatus] = useState('connecting');
@@ -47,7 +51,7 @@ export default function App() {
     (async () => {
       const remote = await hydrateSession();
       if (cancelled) return;
-      if (remote.activeTab) setActiveTab(remote.activeTab);
+      if (remote.activeTab) setActiveTab(normalizeActiveTab(remote.activeTab));
       setCollapsed(!!remote.collapsed);
       if (remote.extractedMediaList?.length) {
         setExtractedMediaList((prev) => mergeMedia(prev, remote.extractedMediaList));
@@ -133,12 +137,6 @@ export default function App() {
       } else if (e.key === '5') {
         e.preventDefault();
         setActiveTab('channels');
-      } else if (e.key === '6') {
-        e.preventDefault();
-        setActiveTab('frames');
-      } else if (e.key === '7') {
-        e.preventDefault();
-        setActiveTab('bgm');
       } else if (e.key.toLowerCase() === 'b') {
         e.preventDefault();
         setCollapsed((prev) => !prev);
@@ -170,10 +168,6 @@ export default function App() {
         return 'Thư Viện Video Thành Phẩm';
       case 'channels':
         return 'Kênh & Quản Lý Nội Dung';
-      case 'frames':
-        return 'Khung Video — In vào clip';
-      case 'bgm':
-        return 'Nhạc nền — Tách BGM & gắn vào reup';
       default:
         return 'Reup Studio';
     }
@@ -230,13 +224,6 @@ export default function App() {
             <ChannelManager />
           </div>
 
-          <div className={activeTab === 'frames' ? '' : 'hidden'}>
-            <FrameStudio />
-          </div>
-
-          <div className={activeTab === 'bgm' ? '' : 'hidden'}>
-            <BgmStudio />
-          </div>
         </main>
       </div>
     </div>

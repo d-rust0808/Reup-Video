@@ -21,6 +21,7 @@ class VideoMetadata(BaseModel):
     file_size_bytes: int = 0
     downloaded_at: Optional[str] = None
     stream_headers: Dict[str, str] = Field(default_factory=dict)
+    stream_url_candidates: List[str] = Field(default_factory=list)
 
 
 class BaseScraper(ABC):
@@ -66,6 +67,13 @@ class BaseScraper(ABC):
     def _check_test_error_triggers(self, url: str) -> None:
         """Check for simulated error conditions in test environment."""
         url_clean = url.strip()
+        hostname = (urlparse(self.extract_url_from_text(url_clean)).hostname or "").lower()
+        is_test_url = (
+            hostname in {"mock.test", "synthetic-test.local", "mock-domain.internal"}
+            or hostname.endswith(".test")
+        )
+        if not is_test_url:
+            return
         if "404" in url_clean:
             raise RuntimeError(f"HTTP 404: {self.__class__.__name__} video not found")
         if "500" in url_clean:
