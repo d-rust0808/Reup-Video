@@ -58,7 +58,8 @@ const ELECTRON_MANAGES_BACKEND = !isDev;
 // --- PYTHON BACKEND LIFECYCLE ---
 
 function testPythonRuntime(bin) {
-  if (!bin || !fs.existsSync(bin)) return false;
+  if (!bin) return false;
+  if (path.isAbsolute(bin) && !fs.existsSync(bin)) return false;
   try {
     const res = spawnSync(bin, ['-c', 'import uvicorn, fastapi; print("RUNTIME_OK")'], {
       timeout: 4000,
@@ -70,6 +71,92 @@ function testPythonRuntime(bin) {
     });
     return res.status === 0 && res.stdout && res.stdout.includes('RUNTIME_OK');
   } catch {
+    return false;
+  }
+}
+
+function resolveWindowsPython() {
+  const candidates = [
+    path.join(process.env.LocalAppData || '', 'Programs', 'Python', 'Python311', 'python.exe'),
+    path.join(process.env.ProgramFiles || '', 'Python311', 'python.exe'),
+    path.join(process.env.ProgramFiles || '', 'Python312', 'python.exe'),
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (testPythonVersion(candidate)) return candidate;
+  }
+  try {
+    const launcher = spawnSync('py', ['-3.11', '-c', 'import sys; print(sys.executable)'], {
+      timeout: 5000,
+      encoding: 'utf-8',
+      windowsHide: true,
+    });
+    const candidate = (launcher.stdout || '').trim().split(/\r?\n/).pop();
+    if (candidate && testPythonVersion(candidate)) return candidate;
+  } catch {
+    // Python Launcher is optional on Windows.
+  }
+  try {
+    const result = spawnSync('where', ['python'], { timeout: 5000, encoding: 'utf-8', windowsHide: true });
+    for (const candidate of (result.stdout || '').split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
+      if (testPythonVersion(candidate)) return candidate;
+    }
+  } catch {
+    // PATH lookup is best effort; the error is surfaced by the caller.
+  }
+  return null;
+}
+
+function testPythonVersion(bin) {
+  if (!bin || (path.isAbsolute(bin) && !fs.existsSync(bin))) return false;
+  try {
+    const result = spawnSync(bin, ['-c', 'import sys; print(sys.version_info[0], sys.version_info[1])'], {
+      timeout: 4000,
+      encoding: 'utf-8',
+      windowsHide: true,
+    });
+    const match = (result.stdout || '').trim().match(/^(\d+)\s+(\d+)/);
+    return result.status === 0 && match && Number(match[1]) === 3 && Number(match[2]) >= 10;
+  } catch {
+    return false;
+  }
+}
+
+function ensureWindowsPythonRuntime() {
+  if (process.platform !== 'win32' || !ELECTRON_MANAGES_BACKEND) return true;
+  const venvPython = path.join(process.resourcesPath, 'venv', 'Scripts', 'python.exe');
+  if (testPythonRuntime(venvPython)) return true;
+
+  const basePython = resolveWindowsPython();
+  if (!basePython) {
+    dialog.showErrorBox(
+      'Chưa tìm thấy Python',
+      'Reup-Video đã tự tìm Python Launcher, PATH và thư mục cài đặt mặc định nhưng không thấy Python 3.10+.'
+    );
+    return false;
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(venvPython), { recursive: true });
+    const venvResult = spawnSync(basePython, ['-m', 'venv', path.dirname(path.dirname(venvPython))], {
+      timeout: 120000,
+      encoding: 'utf-8',
+      windowsHide: true,
+    });
+    if (venvResult.status !== 0 || !fs.existsSync(venvPython)) {
+      throw new Error((venvResult.stderr || 'Không tạo được môi trường Python').trim());
+    }
+    const requirementsPath = path.join(process.resourcesPath, 'requirements.txt');
+    const pipResult = spawnSync(venvPython, ['-m', 'pip', 'install', '-r', requirementsPath], {
+      timeout: 900000,
+      encoding: 'utf-8',
+      windowsHide: true,
+    });
+    if (pipResult.status !== 0) {
+      throw new Error((pipResult.stderr || pipResult.stdout || 'Cài backend thất bại').slice(-2000));
+    }
+    return testPythonRuntime(venvPython);
+  } catch (error) {
+    dialog.showErrorBox('Không thể cài backend', `Tự động chuẩn bị Python thất bại:\n${error.message}`);
     return false;
   }
 }
@@ -191,6 +278,7 @@ async function startPythonBackend() {
     return true;
   }
 
+  if (!ensureWindowsPythonRuntime()) return false;
   const pythonBin = findPythonExecutable();
   console.log(`[Electron] Starting FastAPI backend with: ${pythonBin} (cwd: ${ROOT_DIR})`);
 

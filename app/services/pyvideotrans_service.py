@@ -265,6 +265,7 @@ class PyVideoTransService:
 
     def _load_whisper_model(self, names: List[str], device: str, compute_type: str):
         import faster_whisper
+        from app.config import settings
         download_root = self._whisper_download_root()
         cache = _WHISPER_CACHE
         for name in names:
@@ -283,6 +284,8 @@ class PyVideoTransService:
                         compute_type=compute_type,
                         download_root=download_root,
                         local_files_only=local_only,
+                        cpu_threads=settings.STT_CPU_THREADS if device == "cpu" else 0,
+                        num_workers=settings.STT_WORKERS,
                     )
                     cache["model"] = model
                     cache["name"] = name
@@ -343,17 +346,21 @@ class PyVideoTransService:
         tmp_wav = audio_for_stt if audio_for_stt != video_or_audio_path else None
 
         try:
-            fw_model, used_name = self._load_whisper_model(model_candidates, device, compute_type)
-            logger.info(f"STT using faster-whisper '{used_name}' device={device} lang={w_lang or 'auto'}")
-            segments, info = fw_model.transcribe(
-                audio_for_stt,
-                language=w_lang,
-                vad_filter=True,
-                beam_size=1,
-                best_of=1,
-                condition_on_previous_text=False,
-                word_timestamps=True,
-            )
+            from app.services.performance import gpu_task_slot
+            with gpu_task_slot(enabled=device == "cuda"):
+                fw_model, used_name = self._load_whisper_model(model_candidates, device, compute_type)
+                logger.info(f"STT using faster-whisper '{used_name}' device={device} lang={w_lang or 'auto'}")
+                segments, info = fw_model.transcribe(
+                    audio_for_stt,
+                    language=w_lang,
+                    vad_filter=True,
+                    beam_size=1,
+                    best_of=1,
+                    condition_on_previous_text=False,
+                    word_timestamps=True,
+                )
+                # faster-whisper yields lazily; materialize while the GPU slot is held.
+                segments = list(segments)
             base_stem = os.path.splitext(os.path.basename(video_or_audio_path))[0]
             srt_path = os.path.join(target_dir, f"{base_stem}.srt")
             words = []
@@ -426,6 +433,7 @@ class PyVideoTransService:
         target_dir = os.path.abspath(output_dir) if output_dir else os.path.dirname(os.path.abspath(subtitle_file_path))
         os.makedirs(target_dir, exist_ok=True)
         ai_provider_available = False
+        ai_failure_reason = ""
 
         # 1. DeepSeek AI screenplay localization in one context-aware request.
         try:
@@ -467,6 +475,7 @@ class PyVideoTransService:
                                 "provider": "deepseek",
                                 "localized": True,
                             }
+                ai_failure_reason = ai_scriptwriter_service.last_error
         except Exception as e:
             logger.warning(f"DeepSeek subtitle translation failed: {e}. Falling back to next provider.")
 
@@ -508,7 +517,9 @@ class PyVideoTransService:
         # A configured AI returning invalid output is safer to surface as a clear
         # failure than to silently burn a fragmented word-by-word machine translation.
         if ai_provider_available:
-            warning = "AI không tạo được kịch bản Việt hợp lệ; đã bỏ qua Vietsub để tránh xuất bản dịch vô nghĩa."
+            warning = ai_failure_reason or (
+                "AI không tạo được kịch bản Việt hợp lệ; đã bỏ qua Vietsub để tránh xuất bản dịch vô nghĩa."
+            )
             logger.error(warning)
             return {"status": "failed", "srt_path": None, "warning": warning}
 

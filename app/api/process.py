@@ -62,7 +62,7 @@ class ReupPayload(BaseModel):
     enable_lipsync: Optional[bool] = True
     vietsub_style: Optional[str] = "dub"
     burn_subtitles: Optional[bool] = True
-    subtitle_mode: Optional[str] = "soft"
+    subtitle_mode: Optional[str] = "hard"
     tts_voice: Optional[str] = "vieneu:Trúc Ly"
     tts_engine: Optional[str] = "vieneu"
     target_lang: Optional[str] = "vi"
@@ -116,7 +116,7 @@ class ProcessJobRequest(BaseModel):
     enable_lipsync: Optional[bool] = True
     vietsub_style: Optional[str] = "dub"
     burn_subtitles: Optional[bool] = True
-    subtitle_mode: Optional[str] = "soft"
+    subtitle_mode: Optional[str] = "hard"
     tts_voice: Optional[str] = "vieneu:Trúc Ly"
     tts_engine: Optional[str] = "vieneu"
     target_lang: Optional[str] = "vi"

@@ -167,11 +167,29 @@ npm run electron:dev
 *Electron sẽ tự động khởi động backend FastAPI và mở cửa sổ ứng dụng Desktop.*
 
 #### Đóng Gói Bộ Cài Đặt Desktop (.dmg / .exe):
+
+Chọn nền tảng mặc định duy nhất tại `frontend/desktop-build.json`:
+```json
+{ "platform": "mac" }
+```
+Hoặc thêm biến vào `.env` (ưu tiên hơn file mặc định):
+```dotenv
+DESKTOP_PLATFORM=mac
+```
+Đổi thành `win` khi cần build Windows, sau đó chạy:
 ```bash
 cd frontend
 npm run electron:build
 ```
-*File cài đặt sẽ được xuất ra thư mục `frontend/release/`.*
+
+Hoặc ghi đè nhanh mà không sửa config:
+```bash
+npm run electron:build -- mac   # macOS: .dmg + .zip
+npm run electron:build -- win   # Windows: installer + portable
+```
+Có thể dùng lệnh ngắn tương đương `npm run electron:build:mac` hoặc `npm run electron:build:win`.
+Thêm `--dir` để tạo bản unpacked: `npm run electron:pack:mac` hoặc `npm run electron:pack:win`.
+File build được xuất ra thư mục `frontend/release/`. Không cần sửa `package.json` khi đổi nền tảng.
 
 
 ---
@@ -267,7 +285,13 @@ Application settings can be configured via environment variables or directly in 
 | `HOST` | `0.0.0.0` | Backend API bind host |
 | `PORT` | `8000` | Backend API bind port |
 | `DEBUG` | `false` | Enable verbose logging |
-| `MAX_CONCURRENT_JOBS` | `2` | Max concurrent video processing pipelines |
+| `MAX_CONCURRENT_JOBS` | `8` | Max concurrent video processing pipelines; tune down if RAM is limited |
+| `GPU_CONCURRENCY` | `1` | Max concurrent GPU-heavy AI jobs; keep at `1` for a 4 GB GTX 1050 Ti |
+| `ONNX_INTRA_OP_THREADS` | `8` | CPU threads for LaMa ONNX inpainting |
+| `TTS_CONCURRENCY` | `2` | Parallel VieNeu model instances; use `6` on a 56-thread/64 GB server |
+| `TTS_ONNX_THREADS` | `8` | CPU threads allocated to each VieNeu model instance |
+| `STT_CPU_THREADS` | `8` | CPU threads used by faster-whisper without CUDA |
+| `STT_WORKERS` | `2` | Parallel faster-whisper inference workers |
 | `RAW_INPUT_DIR` | `data/input/raw` | Storage directory for downloaded videos |
 | `OUTPUT_DIR` | `data/outputs` | Storage directory for processed videos |
 | `MODELS_DIR` | `data/models` | AI Model weights storage path |

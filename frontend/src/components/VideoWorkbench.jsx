@@ -23,7 +23,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       speed_ratio: 1.03,
       pitch_shift: true,
       crop_percent: 2.0,
-      subtitle_bottom_crop: 7.0,
+      subtitle_bottom_crop: 18.0,
       trim_start_sec: 0.0,
       trim_end_sec: 0.0,
       brightness: 0.01,
@@ -39,7 +39,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       enable_lipsync: true,
       vietsub_style: 'dub',
       burn_subtitles: true,
-      subtitle_mode: 'soft',
+      subtitle_mode: 'hard',
       tts_voice: 'vieneu:Trúc Ly',
       tts_engine: 'vieneu',
       target_lang: 'vi',
@@ -57,6 +57,14 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       ...(saved || {}),
     };
     const cleaningDisabled = ['none', 'off', 'disabled'].includes(merged.wm_method);
+    // Migrate the legacy crop that left the source caption band visible.
+    if (Number(merged.subtitle_bottom_crop || 0) > 0 && Number(merged.subtitle_bottom_crop) <= 7) {
+      merged.subtitle_bottom_crop = 18.0;
+    }
+    if (saved?.subtitle_mode === 'soft') {
+      // Native CC placement differs by browser and caused the subtitle to float upward.
+      merged.subtitle_mode = 'hard';
+    }
     const migrateLegacyTtsAudio = saved?.enable_tts
       && saved?.preset_id === 'clean_keep_bgm'
       && saved?.original_vocal_volume == null;
@@ -216,7 +224,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         enable_lipsync: options.enable_lipsync !== false,
         vietsub_style: options.vietsub_style || 'auto',
         burn_subtitles: options.burn_subtitles !== false,
-        subtitle_mode: options.burn_subtitles === false ? 'off' : (options.subtitle_mode || 'soft'),
+        subtitle_mode: options.burn_subtitles === false ? 'off' : (options.subtitle_mode || 'hard'),
         tts_voice: voice,
         tts_engine: ttsEngine,
         target_lang: options.target_lang || 'vi',

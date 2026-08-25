@@ -16,7 +16,7 @@ import threading
 from datetime import datetime, timezone
 
 from typing import Optional, List, Dict, Any, Callable, Union
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 
 from app.models.job import JobAborted, JobStatus, WatermarkConfig, ReupConfig
 from app.core.database import get_db_connection, init_db, DEFAULT_DB_PATH
@@ -89,19 +89,25 @@ def _fast_auto_cover_filters(video_path: str) -> List[str]:
 class BatchQueueManager:
     """
     Asynchronous task queue manager backed by SQLite persistence (jobs.sqlite)
-    and ProcessPoolExecutor for heavy video/audio anti-copyright transformations.
+    and a bounded thread pool for heavy video/audio subprocess transformations.
     """
 
-    def __init__(self, db_path: str = DEFAULT_DB_PATH, max_concurrent_jobs: int = 2):
+    def __init__(self, db_path: str = DEFAULT_DB_PATH, max_concurrent_jobs: int = 8):
         self.db_path = db_path
-        self.max_concurrent_jobs = max_concurrent_jobs
+        self.max_concurrent_jobs = max(1, int(max_concurrent_jobs))
         try:
             asyncio.get_event_loop()
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         self.queue: asyncio.Queue = asyncio.Queue()
-        self.executor = ProcessPoolExecutor(max_workers=max_concurrent_jobs)
+        # The pipeline owns callbacks, SQLite state, and cancellation checkpoints,
+        # so it cannot be safely pickled for a process pool. A bounded thread pool
+        # also lets FFmpeg/OpenCV subprocesses use all available native CPU threads.
+        self.executor = ThreadPoolExecutor(
+            max_workers=self.max_concurrent_jobs,
+            thread_name_prefix="reup-worker",
+        )
         self._workers: List[asyncio.Task] = []
         self._callbacks: List[Callable] = []
         self._shutdown = threading.Event()
@@ -219,6 +225,21 @@ class BatchQueueManager:
                 )
             else:
                 self.update_job_progress(job_id, progress, stage="REUP_TRANSFORM")
+
+        return _cb
+
+    def _pipeline_stage_callback(self, job_id: str) -> Callable[[float, str], None]:
+        """Publish STT/translation/TTS stage changes while the worker is busy."""
+        def _cb(progress: float, message: str) -> None:
+            if self._abort_requested(job_id):
+                raise JobAborted(job_id)
+            self.append_job_log(
+                job_id,
+                message,
+                level="INFO",
+                stage="REUP_TRANSFORM",
+                progress=progress,
+            )
 
         return _cb
 
@@ -1156,10 +1177,10 @@ class BatchQueueManager:
             if getattr(reup_config, "enable_tts", False):
                 self.append_job_log(
                     job_id,
-                    f"🎙️ Đang tổng hợp thuyết minh Tiếng Việt (Giọng: {getattr(reup_config, 'tts_voice', 'vieneu:Trúc Ly')})...",
+                    f"⏳ Đang chuẩn bị STT → dịch → thuyết minh Tiếng Việt (Giọng: {getattr(reup_config, 'tts_voice', 'vieneu:Trúc Ly')})...",
                     level="INFO",
                     stage="REUP_TRANSFORM",
-                    progress=0.85
+                    progress=0.75
                 )
 
             # Defensive purge of any stale output file before final render
@@ -1174,6 +1195,7 @@ class BatchQueueManager:
                 config=reup_config,
                 output_path=target_out_path,
                 tts_progress_callback=self._tts_progress_callback(job_id),
+                stage_progress_callback=self._pipeline_stage_callback(job_id),
             )
 
 
@@ -1428,7 +1450,7 @@ class BatchQueueManager:
 
         loop = asyncio.get_running_loop()
         try:
-            await loop.run_in_executor(None, self._run_pipeline_stages, job_id)
+            await loop.run_in_executor(self.executor, self._run_pipeline_stages, job_id)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -1443,6 +1465,6 @@ class BatchQueueManager:
                     progress=_retry_progress_for_job(self.get_job(job_id)),
                     error_message=None,
                 )
-                await loop.run_in_executor(None, self._run_pipeline_stages, job_id)
+                await loop.run_in_executor(self.executor, self._run_pipeline_stages, job_id)
             except Exception as e2:
                 logger.error(f"Retry also failed for {job_id}: {e2}")

@@ -82,7 +82,13 @@ def get_lama_session():
         return None
     try:
         opts = ort.SessionOptions()
-        opts.intra_op_num_threads = min(4, max(1, (os.cpu_count() or 2) // 2))
+        try:
+            from app.config import settings
+            configured_threads = int(settings.ONNX_INTRA_OP_THREADS)
+        except Exception:
+            configured_threads = 8
+        # Leave headroom for concurrent queue workers and FFmpeg processes.
+        opts.intra_op_num_threads = max(1, min(16, configured_threads))
         # ORT_ENABLE_ALL / ORT_ENABLE_EXTENDED segfault (SIGSEGV) loading lama.onnx on
         # onnxruntime 1.19.x. BASIC loads and runs full inference cleanly.
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
@@ -120,7 +126,10 @@ def lama_inpaint_bgr(frame_bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:
     img_t = np.transpose(rgb, (2, 0, 1))[None]
     mask_t = (mask512 > 0).astype(np.float32)[None, None]
     try:
-        out = sess.run(None, {"l_image_": img_t, "l_mask_": mask_t})[0]
+        from app.services.performance import gpu_task_slot
+        uses_cuda = "CUDAExecutionProvider" in sess.get_providers()
+        with gpu_task_slot(enabled=uses_cuda):
+            out = sess.run(None, {"l_image_": img_t, "l_mask_": mask_t})[0]
     except Exception as e:
         logger.warning(f"LaMa infer failed: {e}")
         return cv2.inpaint(frame_bgr, mask, 5, cv2.INPAINT_TELEA)

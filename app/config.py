@@ -19,8 +19,11 @@ def _load_env_file():
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
-                    if k.strip() not in os.environ:
-                        os.environ[k.strip()] = v.strip()
+                    k_str = k.strip()
+                    v_str = v.strip()
+                    val = os.environ.get(k_str)
+                    if not val or val == "sk-...":
+                        os.environ[k_str] = v_str
 
 _load_env_file()
 
@@ -105,8 +108,32 @@ class Settings(BaseModel):
         description="Allowed CORS origins list or JSON/comma-separated string"
     )
     MAX_CONCURRENT_JOBS: int = Field(
-        default_factory=lambda: int(os.getenv("MAX_CONCURRENT_JOBS", "3")),
-        description="Maximum concurrent video processing tasks"
+        default_factory=lambda: max(1, int(os.getenv("MAX_CONCURRENT_JOBS", "8"))),
+        description="Maximum concurrent video processing tasks. Keep this below the physical CPU capacity when GPU AI is enabled."
+    )
+    GPU_CONCURRENCY: int = Field(
+        default_factory=lambda: max(1, int(os.getenv("GPU_CONCURRENCY", "1"))),
+        description="Maximum concurrent GPU-heavy AI tasks; 1 is safest for 4 GB GPUs"
+    )
+    ONNX_INTRA_OP_THREADS: int = Field(
+        default_factory=lambda: max(1, int(os.getenv("ONNX_INTRA_OP_THREADS", "8"))),
+        description="CPU threads used by ONNX Runtime inpainting"
+    )
+    TTS_CONCURRENCY: int = Field(
+        default_factory=lambda: max(1, int(os.getenv("TTS_CONCURRENCY", "2"))),
+        description="Number of independent local VieNeu models used for parallel TTS"
+    )
+    TTS_ONNX_THREADS: int = Field(
+        default_factory=lambda: max(1, int(os.getenv("TTS_ONNX_THREADS", "8"))),
+        description="ONNX CPU threads allocated to each VieNeu TTS model"
+    )
+    STT_CPU_THREADS: int = Field(
+        default_factory=lambda: max(1, int(os.getenv("STT_CPU_THREADS", "8"))),
+        description="CPU threads used by faster-whisper when CUDA is unavailable"
+    )
+    STT_WORKERS: int = Field(
+        default_factory=lambda: max(1, int(os.getenv("STT_WORKERS", "2"))),
+        description="Parallel faster-whisper inference workers"
     )
 
 

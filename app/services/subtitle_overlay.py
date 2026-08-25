@@ -74,7 +74,8 @@ def render_srt_to_overlays(
         return []
 
     margin_x = int(video_w * 0.05)
-    margin_v = int(video_h * 0.05)
+    # Keep translated text close to the lower edge after source-caption crop.
+    margin_v = int(video_h * 0.025)
     max_text_w = video_w - 2 * margin_x
     line_gap = int(font_size * 0.28)
     pad_x, pad_y = int(font_size * 0.5), int(font_size * 0.32)

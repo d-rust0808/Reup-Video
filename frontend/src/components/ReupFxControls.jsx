@@ -159,7 +159,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
       onChange({
         ...options,
         preset_id: 'clean_keep_bgm',
-        subtitle_bottom_crop: 7.0,
+        subtitle_bottom_crop: 18.0,
         enable_vocal_mute: false,
         preserve_bgm: true,
         vocal_mute_strategy: 'auto',
@@ -172,7 +172,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
       onChange({
         ...options,
         preset_id: 'clean_duck_vocals',
-        subtitle_bottom_crop: 7.0,
+        subtitle_bottom_crop: 18.0,
         enable_vocal_mute: true,
         preserve_bgm: true,
         vocal_mute_strategy: 'demucs_duck',
@@ -186,7 +186,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
       onChange({
         ...options,
         preset_id: 'clean_mute_all',
-        subtitle_bottom_crop: 7.0,
+        subtitle_bottom_crop: 18.0,
         enable_vocal_mute: true,
         preserve_bgm: false,
         vocal_mute_strategy: 'mute_all',
@@ -452,14 +452,14 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
               <input
                 type="range"
                 min="0.0"
-                max="12.0"
+                max="22.0"
                 step="0.5"
                 value={options.subtitle_bottom_crop || 0}
                 onChange={(e) => handleChange('subtitle_bottom_crop', parseFloat(e.target.value))}
                 className="w-full accent-amber-600 bg-amber-200/70 rounded-lg cursor-pointer"
               />
               <span className="text-[10px] text-amber-800 font-medium block">
-                Cắt mép dưới (6-8%) để loại bỏ hoàn toàn dải chữ tiếng Trung cũ ở đáy.
+                Cắt mép dưới (16-18%) để loại bỏ hoàn toàn dải chữ tiếng Trung cũ ở đáy.
               </span>
             </div>
 
@@ -687,6 +687,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                         enable_vocal_mute: true,
                         preserve_bgm: true,
                         vocal_mute_strategy: 'demucs_duck',
+                        subtitle_mode: 'hard',
                         original_vocal_volume: options.original_vocal_volume ?? 0.10,
                       });
                     } else {

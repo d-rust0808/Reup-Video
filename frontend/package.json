@@ -11,83 +11,12 @@
     "preview": "vite preview",
     "electron:dev": "concurrently -k -n \"BACKEND,VITE,DESKTOP\" -c \"green,cyan,magenta\" \"cd .. && ./venv311/bin/python -m uvicorn app.main:app --port 8000 --host 127.0.0.1\" \"wait-on tcp:8000 && vite\" \"wait-on tcp:8000 && wait-on tcp:5273 && cross-env NODE_ENV=development electron .\"",
     "electron:dev:reload": "concurrently -k -n \"BACKEND,VITE,DESKTOP\" -c \"green,cyan,magenta\" \"cd .. && ./venv311/bin/python -m uvicorn app.main:app --port 8000 --host 127.0.0.1 --reload\" \"wait-on tcp:8000 && vite\" \"wait-on tcp:8000 && wait-on tcp:5273 && cross-env NODE_ENV=development electron .\"",
-    "electron:build": "vite build && electron-builder",
-    "electron:pack": "vite build && electron-builder --dir"
-  },
-  "build": {
-    "appId": "com.reupvideo.studio",
-    "productName": "Reup-Video Studio",
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "dist/**/*",
-      "electron/**/*",
-      "package.json"
-    ],
-    "extraResources": [
-      {
-        "from": "../app",
-        "to": "app",
-        "filter": ["**/*", "!**/__pycache__/*"]
-      },
-      {
-        "from": "../.env",
-        "to": ".env"
-      },
-      {
-        "from": "../data",
-        "to": "data",
-        "filter": ["**/*", "!**/cache/*", "!**/outputs/*", "!**/*.sqlite*"]
-      },
-      {
-        "from": "../requirements.txt",
-        "to": "requirements.txt"
-      },
-      {
-        "from": "../clean_data.py",
-        "to": "clean_data.py"
-      },
-      {
-        "from": "../venv311",
-        "to": "venv311",
-        "filter": ["**/*", "!**/__pycache__/*", "!**/*.pyc"]
-      }
-    ],
-    "mac": {
-      "target": [
-        {
-          "target": "dmg",
-          "arch": ["arm64"]
-        },
-        {
-          "target": "zip",
-          "arch": ["arm64"]
-        }
-      ],
-      "category": "public.app-category.video",
-      "icon": "electron/assets/icon.icns",
-      "identity": null
-    },
-    "dmg": {
-      "title": "Reup-Video Studio",
-      "contents": [
-        {
-          "x": 130,
-          "y": 220
-        },
-        {
-          "x": 410,
-          "y": 220,
-          "type": "link",
-          "path": "/Applications"
-        }
-      ]
-    },
-    "win": {
-      "target": ["nsis", "portable"],
-      "icon": "electron/assets/icon.png"
-    }
+    "electron:build": "vite build && node scripts/build-desktop.cjs",
+    "electron:build:win": "vite build && node scripts/build-desktop.cjs win",
+    "electron:build:mac": "vite build && node scripts/build-desktop.cjs mac",
+    "electron:pack": "vite build && node scripts/build-desktop.cjs --dir",
+    "electron:pack:win": "vite build && node scripts/build-desktop.cjs win --dir",
+    "electron:pack:mac": "vite build && node scripts/build-desktop.cjs mac --dir"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
@@ -109,4 +38,3 @@
     "wait-on": "^9.1.0"
   }
 }
-

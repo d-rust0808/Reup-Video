@@ -209,7 +209,7 @@ def build_reup_filtergraph(
         # High-contrast, clean subtitle plate: bold white text, black border & semi-transparent dark plate
         style = (
             "FontName=DejaVu Sans,FontSize=18,Bold=1,Alignment=2,"
-            "MarginV=24,MarginL=36,MarginR=36,BorderStyle=3,Outline=4,Shadow=0,"
+            "MarginV=12,MarginL=36,MarginR=36,BorderStyle=3,Outline=4,Shadow=0,"
             "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&HA0000000"
         )
         sub_path = _ffmpeg_subtitles_path(burn_srt_path)
@@ -577,7 +577,7 @@ def burn_vietnamese_hardsub(video_path: str, srt_path: str, output_path: str, sp
     fontfile = _find_subtitle_font()
     style = (
         "FontName=DejaVu Sans,FontSize=18,Bold=1,Alignment=2,"
-        "MarginV=24,MarginL=36,MarginR=36,BorderStyle=3,Outline=4,Shadow=0,"
+        "MarginV=12,MarginL=36,MarginR=36,BorderStyle=3,Outline=4,Shadow=0,"
         "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&HA0000000"
     )
     sub_path = _ffmpeg_subtitles_path(work_srt)
@@ -622,14 +622,35 @@ def burn_vietnamese_hardsub(video_path: str, srt_path: str, output_path: str, sp
     return False
 
 
-def build_tts_bgm_mix_filter() -> str:
-    """Mix Vietnamese TTS over the processed source track without lowering its gain."""
-    return (
-        "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.20,highpass=f=80,lowpass=f=12000,"
+def build_tts_bgm_mix_filter(
+    original_vocal_volume: Optional[float] = None,
+    original_vocal_speed: float = 1.0,
+) -> str:
+    """Mix TTS independently from the optional original-language vocal stem."""
+    voice = (
+        "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=2.20,highpass=f=80,lowpass=f=12000,"
         "acompressor=threshold=-22dB:ratio=2.5:attack=8:release=90:makeup=2.0[voice];"
-        "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.0[bg];"
-        "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amixed];"
-        "[amixed]alimiter=limit=0.95[aout]"
+    )
+    background = "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.0[bg];"
+    if original_vocal_volume is None:
+        bed = "[bg]anull[bed];"
+    else:
+        gain = max(0.0, min(1.0, float(original_vocal_volume)))
+        vocal_tempo = ",".join(_build_atempo_nodes(float(original_vocal_speed)))
+        vocal_tempo = f",{vocal_tempo}" if vocal_tempo else ""
+        bed = (
+            f"[2:a]aresample=44100,aformat=channel_layouts=stereo{vocal_tempo},volume={gain:.3f}[source_voice];"
+            "[bg][source_voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[bed];"
+        )
+    return (
+        voice
+        + background
+        + bed
+        # Duck the source bed only while Vietnamese speech is present. The TTS
+        # track remains full level and cannot be attenuated by the Chinese gain.
+        + "[bed][voice]sidechaincompress=threshold=0.03:ratio=10:attack=15:release=350:makeup=1[ducked];"
+        + "[ducked][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amixed];"
+        + "[amixed]alimiter=limit=0.95[aout]"
     )
 
 
@@ -642,7 +663,14 @@ def should_use_demucs_for_dubbing(cfg: ReupConfig, _speech_intervals: Optional[L
     )
 
 
-def mix_tts_with_background(video_path: str, tts_audio_path: str, output_path: str) -> bool:
+def mix_tts_with_background(
+    video_path: str,
+    tts_audio_path: str,
+    output_path: str,
+    original_vocal_path: Optional[str] = None,
+    original_vocal_volume: float = 0.10,
+    original_vocal_speed: float = 1.0,
+) -> bool:
     """
     Mix TTS voiceover with original (possibly vocal-muted) audio.
     Sidechain-ducks BGM under speech so silent stretches keep music body.
@@ -670,17 +698,25 @@ def mix_tts_with_background(video_path: str, tts_audio_path: str, output_path: s
     tmp_out = output_path + ".tmp_tts_mix.mp4"
     has_audio = detect_audio_stream(video_path)
     if has_audio:
-        fc = build_tts_bgm_mix_filter()
+        has_original_vocal = bool(original_vocal_path and os.path.exists(original_vocal_path))
+        fc = build_tts_bgm_mix_filter(
+            original_vocal_volume if has_original_vocal else None,
+            original_vocal_speed,
+        )
         cmd = [
             ffmpeg_bin, "-y",
             "-i", video_path,
             "-i", audio_to_use,
+        ]
+        if has_original_vocal:
+            cmd.extend(["-i", str(original_vocal_path)])
+        cmd.extend([
             "-filter_complex", fc,
             "-map", "0:v:0", "-map", "[aout]",
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             tmp_out,
-        ]
+        ])
     else:
         cmd = [
             ffmpeg_bin, "-y",
@@ -701,7 +737,7 @@ def mix_tts_with_background(video_path: str, tts_audio_path: str, output_path: s
             # Fallback: keep BGM loud instead of crushing it
             fc2 = (
                 "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.0[bg];"
-                "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.20[voice];"
+                "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=2.20[voice];"
                 "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amixed];"
                 "[amixed]dynaudnorm=f=120:g=10:p=0.95,alimiter=limit=0.94[aout]"
             )
@@ -789,6 +825,7 @@ def process_reup_video(
 
     has_audio = detect_audio_stream(input_path)
     demucs_bgm_path: Optional[str] = None
+    demucs_vocal_path: Optional[str] = None
     lib_bgm_path: Optional[str] = None
     raw_bgm = getattr(cfg, "bgm_path", None)
     if raw_bgm:
@@ -813,22 +850,44 @@ def process_reup_video(
     # Prefer a separated music stem for the "remove speech, keep BGM" mode.
     use_demucs = should_use_demucs_for_dubbing(cfg, speech_intervals)
     if (not lib_bgm_path) and has_audio and cfg.enable_vocal_mute and cfg.vocal_mute_strategy in ("auto", "demucs", "demucs_duck") and use_demucs:
-        from app.services.audio_service import check_demucs_available, extract_audio_stream, process_vocal_muting
+        from app.services.audio_service import (
+            check_demucs_available,
+            extract_audio_stream,
+            extract_vocals_demucs,
+            mix_separated_stems,
+        )
         if not check_demucs_available():
             if cfg.vocal_mute_strategy == "demucs":
                 raise RuntimeError("Demucs strategy requested but demucs is not installed")
         else:
             extracted_a: Optional[str] = None
             bgm_out: Optional[str] = None
+            vocal_out: Optional[str] = None
             try:
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_a:
                     extracted_a = tmp_a.name
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_bgm:
                     bgm_out = tmp_bgm.name
                 if extract_audio_stream(input_path, extracted_a):
-                    res_vm = process_vocal_muting(extracted_a, bgm_out, config=cfg)
-                    if res_vm.get("method") in ("demucs", "demucs_duck") and os.path.exists(bgm_out):
+                    with tempfile.TemporaryDirectory(prefix="demucs_reup_") as demucs_dir:
+                        vocal_path, separated_bgm_path = extract_vocals_demucs(extracted_a, demucs_dir)
+                        tts_override = kwargs.get("tts_audio_override")
+                        if cfg.vocal_mute_strategy == "demucs_duck" and not tts_override:
+                            if not mix_separated_stems(
+                                separated_bgm_path,
+                                vocal_path,
+                                bgm_out,
+                                vocal_volume=cfg.original_vocal_volume,
+                            ):
+                                raise RuntimeError("Failed to mix separated source stems")
+                        else:
+                            shutil.copyfile(separated_bgm_path, bgm_out)
                         demucs_bgm_path = bgm_out
+                        if cfg.vocal_mute_strategy == "demucs_duck" and tts_override:
+                            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_vocal:
+                                vocal_out = tmp_vocal.name
+                            shutil.copyfile(vocal_path, vocal_out)
+                            demucs_vocal_path = vocal_out
                 elif cfg.vocal_mute_strategy == "demucs":
                     raise RuntimeError("Failed to extract audio stream for Demucs vocal separation")
             except Exception as e:
@@ -844,6 +903,11 @@ def process_reup_video(
                 if bgm_out and bgm_out != demucs_bgm_path and os.path.exists(bgm_out):
                     try:
                         os.remove(bgm_out)
+                    except OSError:
+                        pass
+                if vocal_out and vocal_out != demucs_vocal_path and os.path.exists(vocal_out):
+                    try:
+                        os.remove(vocal_out)
                     except OSError:
                         pass
 
@@ -988,11 +1052,23 @@ def process_reup_video(
     dubbed_vi = False
     tts_audio_override = kwargs.get("tts_audio_override")
     if tts_audio_override and os.path.exists(tts_audio_override) and os.path.getsize(tts_audio_override) > 0:
-        dubbed_vi = mix_tts_with_background(output_path, tts_audio_override, output_path)
+        dubbed_vi = mix_tts_with_background(
+            output_path,
+            tts_audio_override,
+            output_path,
+            original_vocal_path=demucs_vocal_path,
+            original_vocal_volume=cfg.original_vocal_volume,
+            original_vocal_speed=cfg.speed_factor,
+        )
         if not dubbed_vi:
             logger.warning("TTS mix with background audio failed; keeping original audio track")
     elif vietnamese_dubbing and text_for_dubbing:
         dubbed_vi = apply_vietnamese_dubbing(output_path, text_for_dubbing, output_path=output_path)
+    if demucs_vocal_path and os.path.exists(demucs_vocal_path):
+        try:
+            os.remove(demucs_vocal_path)
+        except OSError:
+            pass
 
     # 4b. Add the selected subtitle output after TTS mixing.
     burned_sub = bool(burn_in_graph)
@@ -1200,6 +1276,15 @@ class ReupService:
         7. Hash modification
         """
         cfg = config or ReupConfig()
+        stage_callback = kwargs.get("stage_progress_callback")
+
+        def report_stage(progress: float, message: str) -> None:
+            if not callable(stage_callback):
+                return
+            try:
+                stage_callback(float(progress), message)
+            except Exception as e:
+                logger.debug("Pipeline progress callback failed: %s", e)
         # Only use text_cover_vf if explicitly provided by configuration, avoiding unsolicited delogo blurring
         if not output_path:
             base, ext = os.path.splitext(video_path)
@@ -1257,6 +1342,7 @@ class ReupService:
                     cfg.tts_engine = "edge-tts"
 
                 stt_max = 90.0 if style == "recap" and (vid_dur or 0) > 180 else None
+                report_stage(0.76, "🎧 Đang nhận dạng lời thoại gốc (Whisper)...")
                 stt_res = pyvideotrans.speech_to_text(
                     video_path,
                     detect_lang=src_lang,
@@ -1265,8 +1351,10 @@ class ReupService:
                 )
                 srt_path = stt_res.get("srt_path")
                 is_fallback = stt_res.get("status") in ("fallback", "empty")
+                report_stage(0.80, "✅ Đã nhận dạng lời thoại; chuẩn bị dịch DeepSeek...")
 
                 if isinstance(srt_path, str) and os.path.exists(srt_path) and not is_fallback:
+                    report_stage(0.82, "🌐 Đang dịch phụ đề sang tiếng Việt...")
                     trans_res = pyvideotrans.translate_subtitles(
                         srt_path,
                         target_lang=cfg.target_lang,
@@ -1282,6 +1370,7 @@ class ReupService:
                         and subtitle_matches_target_language(raw_trans_srt, cfg.target_lang)
                     ):
                         translated_srt = raw_trans_srt
+                        report_stage(0.85, "✅ Dịch tiếng Việt hoàn tất; bắt đầu tổng hợp giọng đọc...")
                         logger.info(f"Vietsub SRT ready: {translated_srt}")
                     else:
                         translated_srt = None
@@ -1340,6 +1429,7 @@ class ReupService:
                         )
 
                     tts_result = None
+                    report_stage(0.86, "🎙️ Đang tổng hợp thuyết minh tiếng Việt...")
                     try:
                         loop = asyncio.get_event_loop()
                         if loop.is_running():
@@ -1358,6 +1448,7 @@ class ReupService:
 
                     if os.path.exists(tts_out_path) and os.path.getsize(tts_out_path) > 2048:
                         synced_tts_audio = tts_out_path
+                        report_stage(0.93, "✅ Thuyết minh tiếng Việt đã sẵn sàng; bắt đầu render...")
                         aligned_srt = (tts_result or {}).get("aligned_srt_path")
                         if aligned_srt and os.path.exists(aligned_srt):
                             translated_srt = aligned_srt
@@ -1427,12 +1518,16 @@ class ReupService:
                 from app.services.tts_service import parse_srt_segments
                 segs = parse_srt_segments(target_srt_for_vad)
                 for s in segs:
-                    st_val = float(s.get("start", 0.0) or 0.0)
-                    en_val = float(s.get("end", 0.0) or 0.0)
+                    st_val = float(s.get("start_time", s.get("start", 0.0)) or 0.0)
+                    en_val = float(s.get("end_time", s.get("end", 0.0)) or 0.0)
                     if en_val > st_val:
                         speech_intervals.append((st_val, en_val))
             except Exception as e:
                 logger.warning(f"Could not parse speech intervals from SRT: {e}")
+
+        if cfg.enable_tts and not synced_tts_audio:
+            detail = tts_warning or "Không tạo được file TTS tiếng Việt hợp lệ."
+            raise RuntimeError(f"Lồng tiếng Việt thất bại: {detail}")
 
         try:
             res = process_reup_video(

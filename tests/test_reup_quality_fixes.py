@@ -57,6 +57,31 @@ def test_job_claim_is_atomic_and_deleted_job_requests_abort(tmp_path):
         manager.executor.shutdown(wait=False, cancel_futures=True)
 
 
+def test_high_core_queue_uses_configured_bounded_thread_pool(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from app.services.queue_manager import BatchQueueManager
+
+    manager = BatchQueueManager(db_path=str(tmp_path / "jobs.sqlite"), max_concurrent_jobs=8)
+    try:
+        assert isinstance(manager.executor, ThreadPoolExecutor)
+        assert manager.max_concurrent_jobs == 8
+        assert manager.executor._max_workers == 8
+    finally:
+        manager.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_nvenc_inpainting_flags_are_encoder_specific(monkeypatch):
+    from app.services import opencv_inpainter
+
+    class Result:
+        stdout = " V..... h264_nvenc NVIDIA NVENC H.264 encoder"
+
+    monkeypatch.setattr(opencv_inpainter.subprocess, "run", lambda *args, **kwargs: Result())
+    assert opencv_inpainter.get_best_h264_encoder("ffmpeg") == "h264_nvenc"
+    assert opencv_inpainter.get_h264_encoder_flags("h264_nvenc") == ["-preset", "p4", "-cq", "23"]
+    assert "-crf" not in opencv_inpainter.get_h264_encoder_flags("h264_nvenc")
+
+
 def test_backend_instance_lock_is_exclusive_and_recoverable(tmp_path):
     from app.core.instance_lock import BackendInstanceLock
 
@@ -422,6 +447,49 @@ def test_empty_stt_never_turns_post_title_into_full_video_subtitle(monkeypatch, 
     assert not (tmp_path / "source.title.srt").exists()
 
 
+def test_failed_tts_fails_job_instead_of_exporting_chinese_only(monkeypatch, tmp_path):
+    from app.services import reup_service, tts_service
+
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "output.mp4"
+    srt = tmp_path / "source.vi.srt"
+    source.write_bytes(b"video")
+    srt.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nXin chào\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    monkeypatch.setattr(tts_service, "get_audio_duration", lambda _path: 1.0)
+
+    async def fail_tts(**_kwargs):
+        raise RuntimeError("tts unavailable")
+
+    monkeypatch.setattr(tts_service.tts_service, "synthesize_synchronized_tts", fail_tts)
+
+    def fake_process_reup_video(**kwargs):
+        captured.update(kwargs)
+        return {"output_path": kwargs["output_path"]}
+
+    monkeypatch.setattr(reup_service, "process_reup_video", fake_process_reup_video)
+
+    with pytest.raises(RuntimeError, match="Lồng tiếng Việt thất bại"):
+        reup_service.ReupService.process_reup_pipeline(
+            str(source),
+            ReupConfig(
+                enable_tts=True,
+                enable_vocal_mute=True,
+                vocal_mute_strategy="demucs_duck",
+                preserve_bgm=True,
+                srt_path=str(srt),
+                subtitle_mode="hard",
+            ),
+            str(output),
+        )
+
+    assert captured == {}
+
+
 def test_retry_reuses_only_completed_stage2(tmp_path):
     from app.services.queue_manager import _can_resume_completed_stage2, _retry_progress_for_job
 
@@ -613,12 +681,17 @@ def test_tts_mix_preserves_source_gain():
     )
     from app.services.audio_service import build_timed_speech_ducking_filter, build_vocal_mute_ffmpeg_filter
     fc = build_tts_bgm_mix_filter()
-    assert "sidechaincompress" not in fc
+    assert "sidechaincompress" in fc
     assert "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.0[bg]" in fc
     assert "stereotools" not in fc
     assert "volume=0.22" not in fc
     assert "[0:a]lowpass=f=180" not in fc
     assert "alimiter" in fc or "dynaudnorm" in fc
+    separated_fc = build_tts_bgm_mix_filter(0.08, 1.22)
+    assert "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=2.20" in separated_fc
+    assert "[2:a]aresample=44100,aformat=channel_layouts=stereo,atempo=1.2200,volume=0.080" in separated_fc
+    assert "[bg][source_voice]amix=" in separated_fc
+    assert "[bed][voice]sidechaincompress=" in separated_fc
     mute = build_vocal_mute_ffmpeg_filter(preserve_bgm=True)
     assert "stereotools=" in mute
     assert "asplit=" in mute
@@ -717,7 +790,8 @@ async def test_vieneu_provider_uses_local_preset_voice(tmp_path, monkeypatch):
     )
 
     assert result == str(output)
-    assert calls["init"] == {"mode": "v3turbo", "backend": "onnx"}
+    assert calls["init"]["mode"] == "v3turbo"
+    assert calls["init"]["backend"] == "onnx"
     assert calls["infer"] == ("Xin chào Việt Nam", "Trúc Ly")
     assert output.stat().st_size > 256
 

@@ -16,6 +16,7 @@ import tempfile
 from typing import Dict, Any, Optional, Tuple, List
 
 from app.models.job import ReupConfig
+from app.services.performance import gpu_task_slot
 
 logger = logging.getLogger(__name__)
 
@@ -135,16 +136,33 @@ def extract_vocals_demucs(
     demucs_bin = shutil.which("demucs")
     os.makedirs(output_dir, exist_ok=True)
 
-    if demucs_bin:
-        cmd = [
-            demucs_bin,
-            "-n", model_name,
-            "-o", output_dir,
-            "--two-stems", "vocals",
-            input_audio_path
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if res.returncode == 0:
+    # Demucs is the main VRAM consumer on the 4 GB card. Serialize GPU-heavy
+    # separations while allowing independent FFmpeg/video jobs to continue.
+    with gpu_task_slot():
+        if demucs_bin:
+            cmd = [
+                demucs_bin,
+                "-n", model_name,
+                "-o", output_dir,
+                "--two-stems", "vocals",
+                input_audio_path
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if res.returncode == 0:
+                track_name = os.path.splitext(os.path.basename(input_audio_path))[0]
+                separated_dir = os.path.join(output_dir, model_name, track_name)
+                vocal_path = os.path.join(separated_dir, "vocals.wav")
+                bgm_path = os.path.join(separated_dir, "no_vocals.wav")
+
+                if os.path.exists(vocal_path) and os.path.exists(bgm_path):
+                    return vocal_path, bgm_path
+
+        # Try Python demucs module entry point if available
+        try:
+            import demucs.separate  # type: ignore
+            sys_args = ["-n", model_name, "-o", output_dir, "--two-stems", "vocals", input_audio_path]
+            demucs.separate.main(sys_args)
+
             track_name = os.path.splitext(os.path.basename(input_audio_path))[0]
             separated_dir = os.path.join(output_dir, model_name, track_name)
             vocal_path = os.path.join(separated_dir, "vocals.wav")
@@ -152,22 +170,8 @@ def extract_vocals_demucs(
 
             if os.path.exists(vocal_path) and os.path.exists(bgm_path):
                 return vocal_path, bgm_path
-
-    # Try Python demucs module entry point if available
-    try:
-        import demucs.separate  # type: ignore
-        sys_args = ["-n", model_name, "-o", output_dir, "--two-stems", "vocals", input_audio_path]
-        demucs.separate.main(sys_args)
-
-        track_name = os.path.splitext(os.path.basename(input_audio_path))[0]
-        separated_dir = os.path.join(output_dir, model_name, track_name)
-        vocal_path = os.path.join(separated_dir, "vocals.wav")
-        bgm_path = os.path.join(separated_dir, "no_vocals.wav")
-
-        if os.path.exists(vocal_path) and os.path.exists(bgm_path):
-            return vocal_path, bgm_path
-    except Exception as e:
-        logger.warning(f"Python demucs separation execution failed: {e}")
+        except Exception as e:
+            logger.warning(f"Python demucs separation execution failed: {e}")
 
     raise RuntimeError(f"Demucs vocal extraction failed or is unavailable for {input_audio_path}")
 

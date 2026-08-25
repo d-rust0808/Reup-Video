@@ -9,6 +9,7 @@ import sys
 import logging
 import asyncio
 import threading
+import queue
 import shutil
 import subprocess
 import tempfile
@@ -194,8 +195,43 @@ class MeloTTSProvider(BaseTTSProvider):
 class VieNeuTTSProvider(BaseTTSProvider):
     """Local Vietnamese TTS using VieNeu-TTS v3 Turbo (ONNX on CPU/macOS)."""
 
-    _model = None
-    _lock = threading.Lock()
+    _models = queue.LifoQueue()
+    _pool_lock = threading.Lock()
+    _model_count = 0
+
+    @classmethod
+    def _acquire_model(cls, model_factory):
+        from app.config import settings
+
+        try:
+            return cls._models.get_nowait()
+        except queue.Empty:
+            pass
+
+        create_model = False
+        pool_size = max(1, int(settings.TTS_CONCURRENCY))
+        with cls._pool_lock:
+            if cls._model_count < pool_size:
+                cls._model_count += 1
+                create_model = True
+
+        if create_model:
+            try:
+                return model_factory(
+                    mode="v3turbo",
+                    backend="onnx",
+                    threads=max(1, int(settings.TTS_ONNX_THREADS)),
+                )
+            except Exception:
+                with cls._pool_lock:
+                    cls._model_count -= 1
+                raise
+
+        return cls._models.get()
+
+    @classmethod
+    def _release_model(cls, model) -> None:
+        cls._models.put(model)
 
     async def generate(
         self,
@@ -225,20 +261,17 @@ class VieNeuTTSProvider(BaseTTSProvider):
             selected_voice = "Adam"
 
         def _synthesize() -> str:
-            # The model is expensive to initialize and its inference state is not
-            # guaranteed to be thread-safe, so share one instance per worker process.
             model_cls = type(self)
             needs_convert = not output_path.lower().endswith(".wav")
             wav_path = output_path
             if needs_convert:
                 fd, wav_path = tempfile.mkstemp(prefix="vieneu_", suffix=".wav")
                 os.close(fd)
+            model = None
             try:
-                with model_cls._lock:
-                    if model_cls._model is None:
-                        model_cls._model = Vieneu(mode="v3turbo", backend="onnx")
-                    audio = model_cls._model.infer(text, voice=selected_voice)
-                    model_cls._model.save(audio, wav_path)
+                model = model_cls._acquire_model(Vieneu)
+                audio = model.infer(text, voice=selected_voice)
+                model.save(audio, wav_path)
                 if needs_convert:
                     ffmpeg_bin = shutil.which("ffmpeg")
                     if not ffmpeg_bin:
@@ -252,6 +285,8 @@ class VieNeuTTSProvider(BaseTTSProvider):
                     if res.returncode != 0:
                         raise RuntimeError(f"VieNeu-TTS audio conversion failed: {(res.stderr or '')[-400:]}")
             finally:
+                if model is not None:
+                    model_cls._release_model(model)
                 if needs_convert and os.path.exists(wav_path):
                     os.remove(wav_path)
             return output_path

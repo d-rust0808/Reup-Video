@@ -47,6 +47,15 @@ class AIScriptwriterService:
         self.api_key = api_key or settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY", "")
         self.base_url = (base_url or settings.DEEPSEEK_BASE_URL or "https://api.deepseek.com").rstrip("/")
         self.model = model or settings.DEEPSEEK_MODEL or "deepseek-chat"
+        self.last_error = ""
+
+    def _set_http_error(self, error: urllib.error.HTTPError) -> None:
+        if error.code == 402:
+            self.last_error = "DeepSeek API trả HTTP 402: tài khoản hoặc API key không còn quota/thanh toán."
+        elif error.code in (401, 403):
+            self.last_error = f"DeepSeek API từ chối xác thực (HTTP {error.code})."
+        else:
+            self.last_error = f"DeepSeek API trả HTTP {error.code}."
 
     def is_available(self) -> bool:
         """Returns True if DeepSeek API credentials are configured."""
@@ -95,6 +104,10 @@ class AIScriptwriterService:
                 if (ans.startswith('"') and ans.endswith('"')) or (ans.startswith("'") and ans.endswith("'")):
                     ans = ans[1:-1].strip()
                 return ans or text
+        except urllib.error.HTTPError as e:
+            self._set_http_error(e)
+            logger.error(f"DeepSeek translate_text failed: {self.last_error}")
+            return text
         except Exception as e:
             logger.warning(f"DeepSeek translate_text failed: {e}")
             return text
@@ -114,6 +127,7 @@ class AIScriptwriterService:
             return []
         if not self.is_available():
             return None
+        self.last_error = ""
 
         lang_name = {
             "vi": "Tiếng Việt",
@@ -189,12 +203,25 @@ class AIScriptwriterService:
                     logger.warning(f"DeepSeek chunk format mismatch, falling back per-line for chunk {start}")
                     for t in chunk:
                         out.append(self.translate_text(t, target_lang=target_lang))
+                        if self.last_error and "HTTP" in self.last_error:
+                            return None
+            except urllib.error.HTTPError as e:
+                self._set_http_error(e)
+                logger.error(self.last_error)
+                if e.code in (401, 402, 403):
+                    return None
+                for t in chunk:
+                    out.append(self.translate_text(t, target_lang=target_lang))
+                    if self.last_error and "HTTP" in self.last_error:
+                        return None
             except Exception as e:
                 logger.warning(f"DeepSeek translate_cues chunk failed: {e}")
                 # A long/busy request can fail while smaller requests still work.
                 # Retry each cue separately before giving up on the whole subtitle.
                 for t in chunk:
                     out.append(self.translate_text(t, target_lang=target_lang))
+                    if self.last_error and "HTTP" in self.last_error:
+                        return None
 
         return out
 
@@ -326,18 +353,29 @@ class AIScriptwriterService:
         if not segments:
             return []
 
+        normalized_segments = []
+        for idx, s in enumerate(segments, start=1):
+            item = dict(s)
+            item.setdefault("index", idx)
+            st = float(item.get("start_time", 0.0) or 0.0)
+            et = float(item.get("end_time", 0.0) or 0.0)
+            item.setdefault("duration", max(0.0, et - st))
+            normalized_segments.append(item)
+        segments = normalized_segments
+
         if not self.is_available():
             logger.info("DeepSeek API key not configured. Using heuristic speaker diarization and pacing.")
             return self.heuristic_diarize_and_localize(segments, target_lang=target_lang)
+        self.last_error = ""
 
         # Send source and draft separately so the model can repair ASR/translation
         # errors from neighboring lines instead of polishing a bad draft blindly.
         dialogue_items = []
-        for s in segments:
+        for idx, s in enumerate(segments, start=1):
             dur = round(float(s.get("duration", 2.0)), 2)
             recommended_words = max(4, int(round(dur * 3.5)))
             dialogue_items.append({
-                "index": s["index"],
+                "index": s.get("index", idx),
                 "start_time": s.get("start_time", 0.0),
                 "end_time": s.get("end_time", 0.0),
                 "duration_sec": dur,
@@ -456,6 +494,8 @@ class AIScriptwriterService:
                 return enhanced_segments
 
         except Exception as e:
+            if isinstance(e, urllib.error.HTTPError):
+                self._set_http_error(e)
             logger.error(
                 f"DeepSeek script localization failed: {e}. "
                 "Retrying translation in smaller cue batches."

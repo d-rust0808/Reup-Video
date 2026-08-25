@@ -58,6 +58,15 @@ def get_best_h264_encoder(ffmpeg_bin: str) -> str:
     return "libx264"
 
 
+def get_h264_encoder_flags(encoder: str) -> List[str]:
+    """Return rate-control flags supported by the selected encoder."""
+    if encoder == "h264_videotoolbox":
+        return ["-b:v", "4M"]
+    if encoder == "h264_nvenc":
+        return ["-preset", "p4", "-cq", "23"]
+    return ["-preset", "ultrafast", "-crf", "23"]
+
+
 def _read_exact(stream, n_bytes: int) -> bytes:
     """Reads exactly n_bytes from stream or returns remaining bytes on EOF."""
     data = bytearray()
@@ -540,15 +549,16 @@ def inpaint_video_opencv(
     if ffmpeg_bin:
         cap.release()
         encoder = get_best_h264_encoder(ffmpeg_bin)
-        encoder_flags = ["-b:v", "4M"] if encoder == "h264_videotoolbox" else ["-preset", "ultrafast", "-crf", "23"]
+        # NVENC uses CQ/preset controls; libx264's CRF flags are invalid for it.
+        encoder_flags = get_h264_encoder_flags(encoder)
         frame_size = width * height * 3
 
         decoder_cmd = [
-            ffmpeg_bin, "-loglevel", "error", "-i", input_path,
+            ffmpeg_bin, "-loglevel", "error", "-threads", "0", "-i", input_path,
             "-f", "image2pipe", "-pix_fmt", "bgr24", "-vcodec", "rawvideo", "-"
         ]
         encoder_cmd = [
-            ffmpeg_bin, "-loglevel", "warning", "-y",
+            ffmpeg_bin, "-loglevel", "warning", "-y", "-threads", "0",
             "-f", "rawvideo", "-vcodec", "rawvideo", "-s", f"{width}x{height}",
             "-pix_fmt", "bgr24", "-r", f"{fps:.3f}", "-i", "-",
             "-i", input_path, "-map", "0:v:0", "-map", "1:a:0?",

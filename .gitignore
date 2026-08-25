@@ -127,6 +127,6 @@ Thumbs.db
 # Logs & Desktop Releases
 app/modules/logs/
 frontend/release/
+frontend/release-win/
 frontend/data/
 *.log
-
