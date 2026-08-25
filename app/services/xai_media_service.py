@@ -35,26 +35,25 @@ def _clean_cue(text: str) -> str:
 
 
 def compact_vi_cue(text: str, max_chars: int = 42) -> str:
-    """Keep burned-in lines short so they sit at the bottom without covering the picture."""
+    """Wrap burned-in lines cleanly so they sit at the bottom without cutting text."""
     t = _clean_cue(text)
     if len(t) <= max_chars:
         return t
     words = t.split()
     if not words:
-        return t[:max_chars]
-    line1, line2 = [], []
-    budget = max(12, max_chars // 2)
+        return t
+    lines = []
+    current_line = []
+    budget = max(18, max_chars // 2)
     for w in words:
-        if sum(len(x) for x in line1) + len(line1) + len(w) <= budget:
-            line1.append(w)
+        if current_line and (sum(len(x) for x in current_line) + len(current_line) + len(w) > budget):
+            lines.append(" ".join(current_line))
+            current_line = [w]
         else:
-            line2.append(w)
-    if not line1:
-        return t[:max_chars]
-    rest = " ".join(line2)
-    if len(rest) > budget:
-        rest = rest[: budget - 1].rstrip() + "…"
-    return (" ".join(line1) + ("\n" + rest if rest else "")).strip()
+            current_line.append(w)
+    if current_line:
+        lines.append(" ".join(current_line))
+    return "\n".join(lines).strip()
 
 
 def translate_cues(
