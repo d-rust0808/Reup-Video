@@ -83,7 +83,7 @@ def _fast_auto_cover_filters(video_path: str) -> List[str]:
     """Detect stable overlay regions from five samples instead of every frame."""
     from app.services.subtitle_detector import persistent_text_cover_filters
 
-    return persistent_text_cover_filters(video_path, max_boxes=4, min_hits=2)
+    return persistent_text_cover_filters(video_path, max_boxes=4, min_hits=3)
 
 
 class BatchQueueManager:
@@ -1318,7 +1318,14 @@ class BatchQueueManager:
                 try:
                     with self._get_conn() as conn:
                         rows = conn.execute(
-                            "SELECT channel_id, platform FROM channels WHERE UPPER(status) = 'ACTIVE'"
+                            """
+                            SELECT c.channel_id, c.platform
+                            FROM channels c
+                            LEFT JOIN channel_destinations cd
+                              ON cd.channel_id = c.channel_id AND cd.provider = 'facebook'
+                            WHERE UPPER(c.status) = 'ACTIVE'
+                              AND (LOWER(c.platform) != 'facebook' OR COALESCE(cd.auto_publish, 0) = 1)
+                            """
                         ).fetchall()
                     plat_to_chans = {}
                     for row in rows:

@@ -162,3 +162,36 @@ def test_facebook_worker_persists_upload_phases_and_publish_result(tmp_path, mon
     assert [call[0] for call in calls].count("start") == 1
     assert [call[0] for call in calls].count("upload") == 1
     assert [call[0] for call in calls].count("finish") == 1
+
+
+def test_synced_pages_are_materialized_as_bound_channels(tmp_path, monkeypatch):
+    from app.api import facebook
+    from app.config import settings
+
+    db_path = str(tmp_path / "pages.sqlite")
+    init_db(db_path)
+    monkeypatch.setattr(settings, "DB_PATH", db_path)
+    monkeypatch.setattr(facebook, "set_secret", lambda _ref, _value: None)
+
+    count = facebook._store_pages([
+        {
+            "id": "page_123",
+            "name": "Page Review",
+            "category": "Digital creator",
+            "tasks": ["CREATE_CONTENT", "ANALYZE"],
+            "access_token": "page-token",
+        }
+    ])
+
+    assert count == 1
+    with get_db_connection(db_path) as conn:
+        channel = dict(conn.execute(
+            "SELECT * FROM channels WHERE channel_id = 'chan_fb_page_123'"
+        ).fetchone())
+        binding = dict(conn.execute(
+            "SELECT * FROM channel_destinations WHERE channel_id = 'chan_fb_page_123'"
+        ).fetchone())
+    assert channel["name"] == "Page Review"
+    assert channel["platform"] == "facebook"
+    assert binding["destination_id"] == "page_123"
+    assert binding["auto_publish"] == 0

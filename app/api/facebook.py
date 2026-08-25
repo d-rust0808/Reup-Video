@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -53,7 +53,7 @@ class FacebookConnectRequest(BaseModel):
     app_secret: str = Field(min_length=1, max_length=500)
     user_token: str = Field(min_length=20, max_length=4000)
     graph_version: str = Field(default="v24.0", max_length=20)
-    exchange_token: bool = False
+    exchange_token: bool = True
 
 
 class FacebookBindRequest(BaseModel):
@@ -76,6 +76,54 @@ def _page_payload(page: Dict[str, Any]) -> Dict[str, Any]:
         "can_publish": "CREATE_CONTENT" in {task.upper() for task in tasks},
         "access_token": str(page.get("access_token") or ""),
     }
+
+
+def _materialize_page_channels(conn, pages: List[Dict[str, Any]]) -> int:
+    """Expose synced Fanpages in the existing channel manager without duplicates."""
+    now = _now()
+    created = 0
+    for page in pages:
+        page_id = str(page.get("page_id") or page.get("id") or "")
+        if not page_id:
+            continue
+        existing = conn.execute(
+            """
+            SELECT channel_id FROM channel_destinations
+            WHERE provider = 'facebook' AND destination_id = ?
+            LIMIT 1
+            """,
+            (page_id,),
+        ).fetchone()
+        if existing:
+            continue
+        channel_id = f"chan_fb_{page_id}"
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO channels (
+                channel_id, name, platform, handle, tags, description,
+                color, overlays, status, created_at, updated_at
+            ) VALUES (?, ?, 'facebook', ?, ?, ?, 'blue', '[]', 'ACTIVE', ?, ?)
+            """,
+            (
+                channel_id,
+                str(page.get("name") or f"Facebook Page {page_id}"),
+                page_id,
+                json.dumps(["facebook", "reels"], ensure_ascii=False),
+                str(page.get("category") or "Facebook Fanpage"),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO channel_destinations (
+                channel_id, provider, destination_id, auto_publish, created_at, updated_at
+            ) VALUES (?, 'facebook', ?, 0, ?, ?)
+            """,
+            (channel_id, page_id, now, now),
+        )
+        created += int(cursor.rowcount == 1)
+    return created
 
 
 def _store_pages(pages: List[Dict[str, Any]]) -> int:
@@ -123,6 +171,7 @@ def _store_pages(pages: List[Dict[str, Any]]) -> int:
                     now,
                 ),
             )
+        _materialize_page_channels(conn, normalized)
         if page_ids:
             placeholders = ",".join("?" for _ in page_ids)
             conn.execute(
@@ -149,6 +198,14 @@ async def get_facebook_settings():
     if not connection:
         return {"connected": False, "status": "DISCONNECTED", "page_count": 0}
     data = dict(connection)
+    expires_at = data["token_expires_at"]
+    token_kind = "UNKNOWN"
+    if expires_at:
+        try:
+            remaining = datetime.fromisoformat(expires_at) - datetime.now(timezone.utc)
+            token_kind = "LONG_LIVED" if remaining > timedelta(days=7) else "SHORT_LIVED"
+        except ValueError:
+            pass
     return {
         "connected": data["status"] == "CONNECTED",
         "status": data["status"],
@@ -157,7 +214,8 @@ async def get_facebook_settings():
         "user_id": data["user_id"],
         "user_name": data["user_name"],
         "scopes": json.loads(data["scopes"] or "[]"),
-        "token_expires_at": data["token_expires_at"],
+        "token_expires_at": expires_at,
+        "token_kind": token_kind,
         "page_count": page_count,
         "last_error": data["last_error"],
         "has_app_secret": bool(get_secret(data["app_secret_ref"])),
@@ -171,7 +229,18 @@ async def connect_facebook(req: FacebookConnectRequest):
     client = FacebookClient(graph_version)
     token = req.user_token.strip()
     try:
-        if req.exchange_token:
+        original_debug = client.debug_user_token(
+            token,
+            req.app_id.strip(),
+            req.app_secret.strip(),
+        )
+        original_metadata = token_metadata(original_debug)
+        should_exchange = bool(req.exchange_token and original_metadata["expires_at"])
+        if original_metadata["expires_at"]:
+            expires_at = datetime.fromisoformat(original_metadata["expires_at"])
+            should_exchange = should_exchange and expires_at - datetime.now(timezone.utc) <= timedelta(days=7)
+
+        if should_exchange:
             exchange = client.exchange_long_lived_token(
                 token,
                 req.app_id.strip(),
@@ -237,6 +306,8 @@ async def connect_facebook(req: FacebookConnectRequest):
             "connected": True,
             "user_name": user.get("name") or "",
             "page_count": page_count,
+            "token_exchanged": should_exchange,
+            "token_expires_at": metadata["expires_at"],
             "message": f"Đã kết nối Facebook và đồng bộ {page_count} Fanpage",
         }
     except Exception as error:
@@ -272,6 +343,11 @@ async def sync_facebook_pages():
 @router.get("/pages")
 async def list_facebook_pages():
     with get_db_connection(settings.DB_PATH) as conn:
+        stored_pages = [dict(row) for row in conn.execute(
+            "SELECT page_id, name, category FROM facebook_pages"
+        ).fetchall()]
+        _materialize_page_channels(conn, stored_pages)
+        conn.commit()
         rows = conn.execute(
             """
             SELECT fp.*, COUNT(cd.channel_id) AS bound_channels

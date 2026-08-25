@@ -460,7 +460,27 @@ def test_fast_auto_cover_samples_only_stable_regions(monkeypatch):
     filters = _fast_auto_cover_filters("source.mp4")
 
     assert filters == ["delogo=x=10:y=20:w=100:h=30:show=0"]
-    assert captured == {"path": "source.mp4", "max_boxes": 4, "min_hits": 2}
+    assert captured == {"path": "source.mp4", "max_boxes": 4, "min_hits": 3}
+
+
+def test_persistent_box_clusters_count_distinct_frames_and_use_median_size():
+    from app.services.subtitle_detector import _cluster_persistent_boxes
+
+    # Two neighboring detections from one frame must not impersonate persistence.
+    same_frame = [
+        (0, 10, 10, 300, 80),
+        (0, 40, 12, 180, 40),
+    ]
+    assert _cluster_persistent_boxes(same_frame, 1024, 576, min_hits=2) == []
+
+    boxes = [
+        (0, 35, 26, 106, 27),
+        (1, 34, 25, 108, 28),
+        (2, 11, 0, 190, 54),  # One oversized detector result.
+    ]
+    clustered = _cluster_persistent_boxes(boxes, 1024, 576, min_hits=3)
+
+    assert clustered == [(34, 25, 108, 28, 3)]
 
 
 def test_lipsync_preserves_script_and_rates():

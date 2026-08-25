@@ -564,6 +564,60 @@ def detect_subtitle_roi(video_path: str, padding: int = 8) -> Tuple[int, int, in
     return SubtitleDetector().detect_subtitle_roi(video_path, padding=padding)
 
 
+def _cluster_persistent_boxes(
+    raw_boxes: List[Tuple[int, int, int, int, int]],
+    frame_width: int,
+    frame_height: int,
+    min_hits: int,
+) -> List[Tuple[int, int, int, int, int]]:
+    """Cluster detections seen in distinct samples without growing to scene-sized unions."""
+    clusters: List[Dict[str, Any]] = []
+    for sample_id, x, y, bw, bh in raw_boxes:
+        center_x = x + bw / 2.0
+        center_y = y + bh / 2.0
+        best = None
+        best_distance = float("inf")
+        for cluster in clusters:
+            ref_x, ref_y, ref_w, ref_h = cluster["boxes"][-1]
+            ref_center_x = ref_x + ref_w / 2.0
+            ref_center_y = ref_y + ref_h / 2.0
+            width_ratio = max(bw, ref_w) / max(1.0, min(bw, ref_w))
+            height_ratio = max(bh, ref_h) / max(1.0, min(bh, ref_h))
+            dx = abs(center_x - ref_center_x)
+            dy = abs(center_y - ref_center_y)
+            if (
+                dx < frame_width * 0.10
+                and dy < frame_height * 0.06
+                and width_ratio <= 2.0
+                and height_ratio <= 2.0
+            ):
+                distance = dx + dy
+                if distance < best_distance:
+                    best = cluster
+                    best_distance = distance
+        if best is None:
+            clusters.append({"boxes": [(x, y, bw, bh)], "samples": {sample_id}})
+        else:
+            best["boxes"].append((x, y, bw, bh))
+            best["samples"].add(sample_id)
+
+    stable: List[Tuple[int, int, int, int, int]] = []
+    required = max(1, int(min_hits))
+    for cluster in clusters:
+        hits = len(cluster["samples"])
+        if hits < required:
+            continue
+        boxes = cluster["boxes"]
+        # Median bounds resist one oversized OCR/morphology detection smearing a corner.
+        x = int(np.median([box[0] for box in boxes]))
+        y = int(np.median([box[1] for box in boxes]))
+        bw = int(np.median([box[2] for box in boxes]))
+        bh = int(np.median([box[3] for box in boxes]))
+        stable.append((x, y, bw, bh, hits))
+    stable.sort(key=lambda item: item[4], reverse=True)
+    return stable
+
+
 def persistent_text_cover_filters(
     video_path: str,
     max_boxes: int = 4,
@@ -586,10 +640,10 @@ def persistent_text_cover_filters(
         cap.release()
         return []
     indices = [max(0, int(n * f)) for f in (0.12, 0.28, 0.45, 0.62, 0.80)] if n > 10 else [0]
-    raw_boxes: List[Tuple[int, int, int, int]] = []
+    raw_boxes: List[Tuple[int, int, int, int, int]] = []
     y_lo, y_hi = int(h * 0.02), int(h * 0.98)
     try:
-        for idx in indices:
+        for sample_id, idx in enumerate(indices):
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ok, frame = cap.read()
             if not ok or frame is None:
@@ -602,41 +656,27 @@ def persistent_text_cover_filters(
                     continue
                 ar = bw / float(bh)
                 near_bottom = cy >= h * 0.55
+                in_top_corner = cy <= h * 0.25 and (x + bw <= w * 0.35 or x >= w * 0.65)
                 min_ar = 1.05 if near_bottom else 1.25
-                min_frac = 0.08 if near_bottom else 0.12
+                min_frac = 0.035 if in_top_corner else (0.08 if near_bottom else 0.12)
                 if ar < min_ar or bw < w * min_frac:
                     continue
                 if bh > h * 0.28:
                     continue
                 if bw * bh > w * h * 0.16:
                     continue
-                raw_boxes.append((x, y, bw, bh))
+                if in_top_corner and (bh > h * 0.12 or bw * bh > w * h * 0.04):
+                    continue
+                raw_boxes.append((sample_id, x, y, bw, bh))
     finally:
         cap.release()
     if not raw_boxes:
         return []
 
-    # Cluster similar boxes across samples
-    clusters: List[List[int]] = []  # [x,y,x2,y2,count]
-    for x, y, bw, bh in raw_boxes:
-        x2, y2 = x + bw, y + bh
-        hit = False
-        for c in clusters:
-            cx, cy, cx2, cy2, cnt = c
-            if abs((x + x2) / 2 - (cx + cx2) / 2) < w * 0.12 and abs((y + y2) / 2 - (cy + cy2) / 2) < h * 0.08:
-                c[0] = min(cx, x)
-                c[1] = min(cy, y)
-                c[2] = max(cx2, x2)
-                c[3] = max(cy2, y2)
-                c[4] = cnt + 1
-                hit = True
-                break
-        if not hit:
-            clusters.append([x, y, x2, y2, 1])
-    clusters = [c for c in clusters if c[4] >= max(1, int(min_hits))]
-    clusters.sort(key=lambda c: c[4], reverse=True)
+    clusters = _cluster_persistent_boxes(raw_boxes, w, h, min_hits)
     filters: List[str] = []
-    for x, y, x2, y2, _ in clusters[:max_boxes]:
+    for x, y, bw, bh, _ in clusters[:max_boxes]:
+        x2, y2 = x + bw, y + bh
         x = max(8, x - 4)
         y = max(8, y - 4)
         x2 = min(w - 8, x2 + 4)

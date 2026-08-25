@@ -400,6 +400,12 @@ export function ChannelManager() {
     return true;
   });
 
+  const handleFacebookChanged = useCallback(async () => {
+    await loadChannels();
+    if (selectedChannelId) await loadChannelVideos(selectedChannelId);
+    window.dispatchEvent(new Event('reup:channels-changed'));
+  }, [loadChannels, loadChannelVideos, selectedChannelId]);
+
   return (
     <div className="space-y-6">
       {/* Top Banner & Strategy Description */}
@@ -426,11 +432,7 @@ export function ChannelManager() {
 
       <FacebookPublishingPanel
         activeChannel={activeChannel}
-        onChanged={async () => {
-          await loadChannels();
-          await loadChannelVideos(selectedChannelId);
-          window.dispatchEvent(new Event('reup:channels-changed'));
-        }}
+        onChanged={handleFacebookChanged}
       />
 
       {/* Main Grid: Channels Sidebar (Left) + Content Manager (Right) */}

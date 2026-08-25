@@ -13,7 +13,7 @@ const EMPTY_FORM = {
   app_secret: '',
   user_token: '',
   graph_version: 'v24.0',
-  exchange_token: false,
+  exchange_token: true,
 };
 
 export function FacebookPublishingPanel({ activeChannel, onChanged }) {
@@ -38,10 +38,11 @@ export function FacebookPublishingPanel({ activeChannel, onChanged }) {
         app_id: settingsData.app_id || prev.app_id,
         graph_version: settingsData.graph_version || prev.graph_version,
       }));
+      if ((pagesData.pages || []).length > 0) await onChanged?.();
     } catch (error) {
       setMessage({ type: 'error', text: error.message });
     }
-  }, []);
+  }, [onChanged]);
 
   useEffect(() => {
     load();
@@ -126,6 +127,13 @@ export function FacebookPublishingPanel({ activeChannel, onChanged }) {
             </span>
           </div>
 
+          {connected && settings.token_expires_at && (
+            <div className="flex items-center justify-between gap-3 rounded-xl bg-white/8 border border-white/10 px-3 py-2 text-[11px] text-blue-100">
+              <span>Token: <strong>{settings.token_kind === 'LONG_LIVED' ? 'Long-lived' : 'Short-lived'}</strong></span>
+              <span>Hết hạn: <strong>{new Date(settings.token_expires_at).toLocaleString('vi-VN')}</strong></span>
+            </div>
+          )}
+
           <form onSubmit={handleConnect} className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
             <input
               required
@@ -164,7 +172,7 @@ export function FacebookPublishingPanel({ activeChannel, onChanged }) {
                   onChange={(e) => setForm({ ...form, exchange_token: e.target.checked })}
                   className="accent-sky-400"
                 />
-                Đổi sang long-lived token
+                Tự đổi sang long-lived token
               </label>
             </div>
             <div className="flex justify-end gap-2">
