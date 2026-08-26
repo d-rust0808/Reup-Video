@@ -15,6 +15,16 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _image_aspect(path: str) -> float:
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            w, h = im.size
+        return float(w) / float(h) if h else 0.0
+    except Exception:
+        return 0.0
+
+
 def _as_dict(item: Any) -> Dict[str, Any]:
     if item is None:
         return {}
@@ -42,6 +52,8 @@ def normalize_overlays(raw: Optional[Sequence[Any]]) -> List[Dict[str, Any]]:
             kind = "frame"
         elif kind == "overlay":
             kind = "overlay"
+        elif kind in ("banner", "caption"):
+            kind = "banner"
         else:
             kind = "logo"
         try:
@@ -53,6 +65,15 @@ def normalize_overlays(raw: Optional[Sequence[Any]]) -> List[Dict[str, Any]]:
             continue
         if kind == "frame":
             x, y, w = 0.0, 0.0, 1.0
+        elif kind in ("banner", "caption"):
+            kind = "banner"
+            w = 1.0
+            x = 0.0
+        elif kind == "logo" and w >= 0.55 and _image_aspect(path) >= 2.2:
+            # Wide caption plates must never sit as a corner/top logo.
+            kind = "banner"
+            w = 1.0
+            x = 0.0
         elif kind == "overlay":
             w = max(0.04, min(3.0, w))
             x = max(-2.0, min(1.0, x))
@@ -61,6 +82,14 @@ def normalize_overlays(raw: Optional[Sequence[Any]]) -> List[Dict[str, Any]]:
             w = max(0.04, min(0.80, w))
             x = max(0.0, min(max(0.0, 1.0 - w), x))
             y = max(0.0, min(0.95, y))
+        band_h = 0.22
+        try:
+            band_h = float(d.get("band_h") or d.get("h") or 0.22)
+        except (TypeError, ValueError):
+            band_h = 0.22
+        if kind == "banner":
+            band_h = max(0.10, min(0.36, band_h))
+            y = 1.0 - band_h
         out.append({
             "id": d.get("id") or os.path.basename(path),
             "image_path": os.path.abspath(path),
@@ -70,8 +99,49 @@ def normalize_overlays(raw: Optional[Sequence[Any]]) -> List[Dict[str, Any]]:
             "x": x,
             "y": y,
             "w": w,
+            "band_h": band_h,
             "opacity": max(0.05, min(1.0, opacity)),
         })
+    return out
+
+
+def ensure_caption_cover_banner(
+    overlays: Optional[Sequence[Any]],
+    image_path: str,
+    band_h: float,
+) -> List[Dict[str, Any]]:
+    """Force the caption-cover image to a bottom banner; never treat it as a corner logo."""
+    items = normalize_overlays(overlays)
+    path = os.path.abspath(image_path or "")
+    if not path or not os.path.isfile(path):
+        return items
+    band = max(0.10, min(0.36, float(band_h or 0.22)))
+    banner = {
+        "id": os.path.basename(path),
+        "image_path": path,
+        "url": "",
+        "filename": os.path.basename(path),
+        "kind": "banner",
+        "x": 0.0,
+        "y": 1.0 - band,
+        "w": 1.0,
+        "band_h": band,
+        "opacity": 1.0,
+    }
+    out: List[Dict[str, Any]] = []
+    replaced = False
+    for item in items:
+        existing = os.path.abspath(item.get("image_path") or "")
+        if existing == path:
+            merged = {**item, **banner}
+            if item.get("url"):
+                merged["url"] = item["url"]
+            out.append(merged)
+            replaced = True
+        else:
+            out.append(item)
+    if not replaced:
+        out.append(banner)
     return out
 
 
@@ -113,6 +183,13 @@ def append_overlay_filter(
                 f"scale={mw}:{mh}:force_original_aspect_ratio=disable[{lg}]"
             )
             parts.append(f"[{prev}][{lg}]overlay=0:0:{persist}[{nxt}]")
+        elif kind == "banner":
+            bh = max(16, int(mh * float(ov.get("band_h") or 0.22)) // 2 * 2)
+            parts.append(
+                f"[{in_idx}:v]format=rgba,scale={mw}:{bh}:force_original_aspect_ratio=increase,"
+                f"crop={mw}:{bh},colorchannelmixer=aa={op:.3f}[{lg}]"
+            )
+            parts.append(f"[{prev}][{lg}]overlay=0:H-h:{persist}[{nxt}]")
         else:
             wf = max(0.04, min(3.0 if kind == "overlay" else 0.80, w))
             sw = max(16, int(mw * wf) // 2 * 2)
@@ -124,6 +201,7 @@ def append_overlay_filter(
             )
         prev = nxt
         paths.append(ov["image_path"])
+        logger.info("overlay[%d] kind=%s band_h=%s path=%s", i, kind, ov.get("band_h"), ov["image_path"])
 
     return fc + ";" + ";".join(parts), paths
 

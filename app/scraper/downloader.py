@@ -16,6 +16,7 @@ import httpx
 import aiofiles
 
 from app.scraper.base import VideoMetadata
+from app.scraper.youtube import download_youtube_to_file, is_youtube_url
 
 logger = logging.getLogger(__name__)
 
@@ -131,13 +132,42 @@ class AsyncStreamDownloader:
                 headers["Referer"] = "https://www.xiaohongshu.com/"
             elif any(d in lower_url for d in ["tiktok", "byteoversea", "ibytedtos"]):
                 headers["Referer"] = "https://www.tiktok.com/"
+            elif any(d in lower_url for d in ["youtube", "googlevideo", "youtu.be"]):
+                headers["Referer"] = "https://www.youtube.com/"
 
         use_mock = allow_mock_fallback if allow_mock_fallback is not None else (self.allow_mock_fallback or is_synthetic_url)
         downloaded_bytes = 0
         success = False
+        platform_l = (metadata.platform or "").lower()
+        youtube_source = (not is_synthetic_url) and (
+            platform_l in {"youtube", "yt", "youtube_shorts"}
+            or is_youtube_url(stream_url or "")
+            or is_youtube_url(getattr(metadata, "original_url", "") or "")
+        )
 
         try:
-            if stream_url.startswith("http://") or stream_url.startswith("https://"):
+            if youtube_source:
+                watch = metadata.original_url or stream_url or ""
+                if not is_youtube_url(watch):
+                    watch = stream_url if is_youtube_url(stream_url) else f"https://www.youtube.com/watch?v={safe_video_id}"
+                id_mp4_path = os.path.join(target_dir, f"{safe_video_id}.mp4")
+                if os.path.isfile(id_mp4_path) and os.path.getsize(id_mp4_path) >= 80_000:
+                    target_mp4_path = id_mp4_path
+                    downloaded_bytes = os.path.getsize(id_mp4_path)
+                    success = True
+                    logger.info("Reusing existing YouTube file %s", id_mp4_path)
+                else:
+                    try:
+                        downloaded_bytes = await asyncio.to_thread(
+                            download_youtube_to_file, watch, target_mp4_path
+                        )
+                        success = downloaded_bytes > 0
+                    except Exception as e:
+                        msg = f"YouTube download failed for {watch}: {e}"
+                        logger.error(msg)
+                        if not use_mock:
+                            raise DownloaderError(str(e) or msg) from e
+            elif stream_url.startswith("http://") or stream_url.startswith("https://"):
                 try:
                     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
                         candidates = list(getattr(metadata, "stream_url_candidates", None) or [])

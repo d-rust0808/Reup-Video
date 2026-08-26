@@ -9,6 +9,7 @@ from app.scraper.base import BaseScraper, VideoMetadata
 from app.scraper.douyin import DouyinScraper
 from app.scraper.kuaishou import KuaishouScraper
 from app.scraper.xiaohongshu import XiaohongshuScraper
+from app.scraper.youtube import YoutubeScraper
 from app.scraper.downloader import StreamDownloader
 
 logger = logging.getLogger(__name__)
@@ -22,10 +23,12 @@ class ScraperManager:
         self.douyin = DouyinScraper()
         self.kuaishou = KuaishouScraper()
         self.xiaohongshu = XiaohongshuScraper()
+        self.youtube = YoutubeScraper()
         self.scrapers: List[BaseScraper] = [
             self.douyin,
             self.kuaishou,
             self.xiaohongshu,
+            self.youtube,
         ]
         self.downloader = StreamDownloader(output_dir=output_dir)
 
@@ -66,22 +69,25 @@ class ScraperManager:
         urls_or_metadatas: List[Any],
         output_dir: Optional[str] = None,
         ignore_errors: bool = False,
+        concurrency: int = 3,
     ) -> List[VideoMetadata]:
         """
         Extract metadata and download stream concurrently for a list of URLs or VideoMetadata objects using asyncio.gather.
         If ignore_errors is True, individual item failures are skipped instead of raising.
         """
         target_dir = output_dir or self.output_dir
+        sem = asyncio.Semaphore(max(1, int(concurrency or 3)))
 
         async def _process_item(item: Any) -> VideoMetadata:
-            if isinstance(item, str):
-                metadata = await self.extract(item)
-            elif isinstance(item, VideoMetadata):
-                metadata = item
-            else:
-                raise ValueError(f"Invalid batch item type: {type(item)}")
+            async with sem:
+                if isinstance(item, str):
+                    metadata = await self.extract(item)
+                elif isinstance(item, VideoMetadata):
+                    metadata = item
+                else:
+                    raise ValueError(f"Invalid batch item type: {type(item)}")
 
-            return await self.downloader.download(metadata, output_dir=target_dir)
+                return await self.downloader.download(metadata, output_dir=target_dir)
 
         tasks = [_process_item(item) for item in urls_or_metadatas]
         results = await asyncio.gather(*tasks, return_exceptions=True)

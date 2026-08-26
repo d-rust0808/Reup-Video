@@ -5,6 +5,7 @@ import {
   Sliders,
   Layers,
   FolderDown,
+  BookOpen,
   Tv2,
   Server,
   Wifi,
@@ -27,7 +28,7 @@ export function Sidebar({
 }) {
   const isDesktopApp = typeof window !== 'undefined' && !!window.electronAPI?.isDesktop;
 
-  const menuItems = [
+  const processItems = [
     {
       id: 'extract',
       label: 'Bóc Tách & Nạp Video',
@@ -35,7 +36,7 @@ export function Sidebar({
       icon: Link2,
       badge: extractedCount,
       shortcut: '⌘1',
-      desc: 'Douyin, Kuaishou, XHS & File máy',
+      desc: 'Douyin, Kuaishou, XHS, YouTube & File máy',
       activeBg: 'bg-blue-50/90 text-blue-800 border-blue-200 shadow-xs font-bold',
       iconActive: 'bg-blue-600 text-white shadow-sm shadow-blue-500/20',
       iconInactive: 'bg-slate-100 text-slate-600 group-hover:bg-slate-200 group-hover:text-slate-900',
@@ -75,25 +76,100 @@ export function Sidebar({
       iconActive: 'bg-blue-600 text-white shadow-sm shadow-blue-500/20',
       iconInactive: 'bg-slate-100 text-slate-600 group-hover:bg-slate-200 group-hover:text-slate-900',
     },
+  ];
+
+  const catalogItems = [
+    {
+      id: 'content',
+      label: 'Quản Lý Nội Dung',
+      shortLabel: 'Nội Dung',
+      icon: BookOpen,
+      shortcut: '⌘5',
+      desc: 'Kênh YouTube/Douyin, đã đăng / chưa đăng',
+      activeBg: 'bg-indigo-50 text-indigo-900 border-indigo-200 shadow-xs font-bold',
+      iconActive: 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/20',
+      iconInactive: 'bg-indigo-100 text-indigo-700 group-hover:bg-indigo-200 group-hover:text-indigo-900',
+    },
     {
       id: 'channels',
-      label: 'Kênh & Quản Lý Nội Dung',
-      shortLabel: 'Quản Lý Kênh',
+      label: 'Fanpage & Đăng Bài',
+      shortLabel: 'Fanpage',
       icon: Tv2,
-      shortcut: '⌘5',
-      desc: 'Gắn nhãn, phân loại & lịch đăng',
+      shortcut: '⌘6',
+      desc: 'Nhóm Page, caption & nhật ký đăng',
       activeBg: 'bg-blue-50/90 text-blue-800 border-blue-200 shadow-xs font-bold',
       iconActive: 'bg-blue-600 text-white shadow-sm shadow-blue-500/20',
       iconInactive: 'bg-slate-100 text-slate-600 group-hover:bg-slate-200 group-hover:text-slate-900',
     },
   ];
 
+  const renderNavItem = (item) => {
+    const Icon = item.icon;
+    const isActive = activeTab === item.id;
+    return (
+      <button
+        key={item.id}
+        type="button"
+        onClick={() => setActiveTab(item.id)}
+        className={`w-full ${collapsed ? 'p-2.5 justify-center' : 'p-2.5 justify-between'} rounded-2xl transition-all duration-150 flex items-center group cursor-pointer border ${
+          isActive
+            ? item.activeBg
+            : 'border-transparent text-slate-700 hover:text-slate-900 hover:bg-slate-50 font-semibold'
+        }`}
+        title={collapsed ? `${item.label} (${item.desc}) - ${item.shortcut}` : undefined}
+      >
+        <div className={`flex items-center ${collapsed ? 'justify-center' : 'space-x-3'} min-w-0 relative`}>
+          <div
+            className={`p-2 rounded-xl transition-all shrink-0 ${
+              isActive ? item.iconActive : item.iconInactive
+            }`}
+          >
+            <Icon className="w-4 h-4" />
+          </div>
+          {collapsed && item.badge !== undefined && item.badge > 0 && (
+            <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-600 text-white text-[9px] font-black rounded-full flex items-center justify-center shadow-xs">
+              {item.badge}
+            </span>
+          )}
+          {!collapsed && (
+            <div className="text-left overflow-hidden">
+              <span className={`text-xs block leading-tight truncate font-bold ${isActive ? 'font-extrabold' : 'text-slate-800'}`}>
+                {item.label}
+              </span>
+              <span className="text-[11px] text-slate-500 font-medium block leading-tight mt-0.5 truncate">
+                {item.desc}
+              </span>
+            </div>
+          )}
+        </div>
+        {!collapsed && (
+          <div className="flex items-center space-x-1.5 shrink-0 ml-2">
+            {item.badge !== undefined && item.badge > 0 && (
+              <span
+                className={`px-2 py-0.5 text-xs font-black rounded-full shadow-xs ${
+                  isActive
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-slate-100 text-slate-700 border border-slate-200'
+                }`}
+              >
+                {item.badge}
+              </span>
+            )}
+            <span className="text-[10px] font-mono text-slate-500 font-bold px-1.5 py-0.5 rounded-md bg-slate-100 border border-slate-200">
+              {item.shortcut}
+            </span>
+          </div>
+        )}
+      </button>
+    );
+  };
+
 
   return (
     <aside
       className={`${
         collapsed ? 'w-20' : 'w-72'
-      } bg-white border-r border-slate-200 flex flex-col justify-between shrink-0 transition-all duration-300 z-30 shadow-sm relative select-none`}
+      } h-full bg-white border-r border-slate-200 flex flex-col shrink-0 transition-all duration-300 z-30 shadow-sm relative select-none overflow-hidden`}
     >
       {/* Collapse Toggle Button */}
       <button
@@ -106,7 +182,7 @@ export function Sidebar({
       </button>
 
       {/* Top Brand & Navigation */}
-      <div className={`${collapsed ? 'p-2.5' : 'p-4'} space-y-4 ${isDesktopApp ? 'pt-7' : ''}`}>
+      <div className={`${collapsed ? 'p-2.5' : 'p-4'} space-y-4 ${isDesktopApp ? 'pt-7' : ''} flex-1 min-h-0 overflow-y-auto`}>
         {/* macOS Traffic Lights drag region */}
         {isDesktopApp && (
           <div
@@ -139,81 +215,30 @@ export function Sidebar({
         </div>
 
         {/* Navigation Menu */}
-        <nav className="space-y-1.5 pt-1">
-          {!collapsed && (
-            <div className="flex items-center justify-between px-2.5 mb-2">
-              <p className="text-[11px] font-extrabold text-slate-400 uppercase tracking-wider">Khâu Xử Lý</p>
-              <span className="text-[11px] font-mono text-slate-400 font-medium">Phím tắt</span>
-            </div>
-          )}
+        <nav className="space-y-3 pt-1 pb-2">
+          <div className="space-y-1.5">
+            {!collapsed && (
+              <div className="flex items-center justify-between px-2.5 mb-1">
+                <p className="text-[11px] font-extrabold text-slate-400 uppercase tracking-wider">Khâu xử lý</p>
+                <span className="text-[11px] font-mono text-slate-400 font-medium">Phím tắt</span>
+              </div>
+            )}
+            {processItems.map(renderNavItem)}
+          </div>
 
-          {menuItems.map((item) => {
-            const Icon = item.icon;
-            const isActive = activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => setActiveTab(item.id)}
-                className={`w-full ${collapsed ? 'p-2.5 justify-center' : 'p-2.5 justify-between'} rounded-2xl transition-all duration-150 flex items-center group cursor-pointer border ${
-                  isActive
-                    ? item.activeBg
-                    : 'border-transparent text-slate-700 hover:text-slate-900 hover:bg-slate-50 font-semibold'
-                }`}
-                title={collapsed ? `${item.label} (${item.desc}) - ${item.shortcut}` : undefined}
-              >
-                <div className={`flex items-center ${collapsed ? 'justify-center' : 'space-x-3'} min-w-0 relative`}>
-                  <div
-                    className={`p-2 rounded-xl transition-all shrink-0 ${
-                      isActive ? item.iconActive : item.iconInactive
-                    }`}
-                  >
-                    <Icon className="w-4 h-4" />
-                  </div>
-
-                  {collapsed && item.badge !== undefined && item.badge > 0 && (
-                    <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-600 text-white text-[9px] font-black rounded-full flex items-center justify-center shadow-xs">
-                      {item.badge}
-                    </span>
-                  )}
-
-                  {!collapsed && (
-                    <div className="text-left overflow-hidden">
-                      <span className={`text-xs block leading-tight truncate font-bold ${isActive ? 'text-blue-950 font-extrabold' : 'text-slate-800'}`}>
-                        {item.label}
-                      </span>
-                      <span className="text-[11px] text-slate-500 font-medium block leading-tight mt-0.5 truncate">
-                        {item.desc}
-                      </span>
-                    </div>
-                  )}
-                </div>
-
-                {!collapsed && (
-                  <div className="flex items-center space-x-1.5 shrink-0 ml-2">
-                    {item.badge !== undefined && item.badge > 0 && (
-                      <span
-                        className={`px-2 py-0.5 text-xs font-black rounded-full shadow-xs ${
-                          isActive
-                            ? 'bg-blue-600 text-white'
-                            : 'bg-slate-100 text-slate-700 border border-slate-200'
-                        }`}
-                      >
-                        {item.badge}
-                      </span>
-                    )}
-                    <span className="text-[10px] font-mono text-slate-500 font-bold px-1.5 py-0.5 rounded-md bg-slate-100 border border-slate-200">
-                      {item.shortcut}
-                    </span>
-                  </div>
-                )}
-              </button>
-            );
-          })}
+          <div className="space-y-1.5 pt-1 border-t border-slate-100">
+            {!collapsed && (
+              <div className="flex items-center justify-between px-2.5 mb-1 mt-2">
+                <p className="text-[11px] font-extrabold text-indigo-500 uppercase tracking-wider">Nội dung & đăng</p>
+              </div>
+            )}
+            {catalogItems.map(renderNavItem)}
+          </div>
         </nav>
       </div>
 
       {/* Bottom Health & System Specs */}
-      <div className={`${collapsed ? 'p-2 m-2' : 'p-3.5 m-3'} bg-slate-50 rounded-2xl border border-slate-200/80 space-y-2.5`}>
+      <div className={`${collapsed ? 'p-2 m-2' : 'p-3.5 m-3'} bg-slate-50 rounded-2xl border border-slate-200/80 space-y-2.5 shrink-0`}>
         {!collapsed ? (
           <>
             <div className="flex items-center justify-between text-xs">
@@ -241,7 +266,7 @@ export function Sidebar({
                 </span>
               ) : (
                 <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-800 border border-amber-200">
-                  Connecting...
+                  {wsStatus === 'disconnected' ? 'Mất kết nối' : 'Connecting...'}
                 </span>
               )}
             </div>

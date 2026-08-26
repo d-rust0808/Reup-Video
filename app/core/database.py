@@ -94,6 +94,51 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             conn.execute("ALTER TABLE channels ADD COLUMN overlays TEXT NOT NULL DEFAULT '[]'")
         except Exception:
             pass
+        try:
+            conn.execute("ALTER TABLE channels ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS channel_groups (
+                group_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                notes TEXT NOT NULL DEFAULT '',
+                color TEXT NOT NULL DEFAULT 'blue',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS channel_group_members (
+                group_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                PRIMARY KEY (group_id, channel_id)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_group_members_channel ON channel_group_members(channel_id)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS publish_log (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL DEFAULT '',
+                channel_video_id TEXT NOT NULL DEFAULT '',
+                channel_id TEXT NOT NULL DEFAULT '',
+                channel_name TEXT NOT NULL DEFAULT '',
+                group_id TEXT NOT NULL DEFAULT '',
+                group_name TEXT NOT NULL DEFAULT '',
+                page_id TEXT NOT NULL DEFAULT '',
+                page_name TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                caption TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'ASSIGNED',
+                permalink TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_publish_log_job ON publish_log(job_id, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_publish_log_channel ON publish_log(channel_id, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_publish_log_video ON publish_log(channel_video_id)")
 
         # Channel Videos Table (Content Management)
         conn.execute("""
@@ -150,6 +195,17 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_facebook_pages_connection ON facebook_pages(connection_id)")
+        for col, spec in (
+            ("fan_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("followers_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("about", "TEXT NOT NULL DEFAULT ''"),
+            ("username", "TEXT NOT NULL DEFAULT ''"),
+            ("link", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            try:
+                conn.execute(f"ALTER TABLE facebook_pages ADD COLUMN {col} {spec}")
+            except Exception:
+                pass
         conn.execute("""
             CREATE TABLE IF NOT EXISTS channel_destinations (
                 channel_id TEXT NOT NULL,
@@ -191,6 +247,71 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_distribution_ready ON distribution_jobs(provider, status, next_attempt_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_distribution_video ON distribution_jobs(channel_video_id)")
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tiktok_connections (
+                id TEXT PRIMARY KEY,
+                client_key TEXT NOT NULL DEFAULT '',
+                redirect_uri TEXT NOT NULL DEFAULT '',
+                client_secret_ref TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'DISCONNECTED',
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tiktok_accounts (
+                open_id TEXT PRIMARY KEY,
+                connection_id TEXT NOT NULL,
+                username TEXT NOT NULL DEFAULT '',
+                nickname TEXT NOT NULL DEFAULT '',
+                avatar_url TEXT NOT NULL DEFAULT '',
+                scopes TEXT NOT NULL DEFAULT '[]',
+                privacy_options TEXT NOT NULL DEFAULT '[]',
+                access_token_ref TEXT NOT NULL DEFAULT '',
+                refresh_token_ref TEXT NOT NULL DEFAULT '',
+                token_expires_at TEXT,
+                can_publish INTEGER NOT NULL DEFAULT 0,
+                last_synced_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tiktok_accounts_connection ON tiktok_accounts(connection_id)")
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS content_channels (
+                channel_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                platform TEXT NOT NULL DEFAULT 'youtube',
+                url TEXT NOT NULL DEFAULT '',
+                handle TEXT NOT NULL DEFAULT '',
+                tags TEXT NOT NULL DEFAULT '[]',
+                notes TEXT NOT NULL DEFAULT '',
+                avatar TEXT NOT NULL DEFAULT '',
+                video_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_content_channels_platform ON content_channels(platform, handle)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS content_videos (
+                id TEXT PRIMARY KEY,
+                channel_id TEXT NOT NULL,
+                video_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                url TEXT NOT NULL DEFAULT '',
+                duration REAL NOT NULL DEFAULT 0,
+                posted INTEGER NOT NULL DEFAULT 0,
+                posted_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (channel_id, video_id)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_content_videos_channel ON content_videos(channel_id, posted)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_content_videos_native ON content_videos(video_id)")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS studio_state (

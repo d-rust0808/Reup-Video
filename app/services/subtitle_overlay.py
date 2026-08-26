@@ -50,7 +50,13 @@ def _wrap_lines(draw, text: str, font, max_w: int) -> List[str]:
 
 
 def render_srt_to_overlays(
-    srt_path: str, video_w: int, video_h: int, out_dir: str
+    srt_path: str,
+    video_w: int,
+    video_h: int,
+    out_dir: str,
+    *,
+    cover_band: float = 0.0,
+    cover_kind: str = "off",
 ) -> List[Dict[str, Any]]:
     """Render each cue to a full-frame transparent PNG. Returns [{png,start,end}]."""
     from PIL import Image, ImageDraw, ImageFont
@@ -66,7 +72,15 @@ def render_srt_to_overlays(
         return []
 
     os.makedirs(out_dir, exist_ok=True)
-    font_size = max(20, int(round(video_h * 0.042)))
+    band = max(0.0, min(0.36, float(cover_band or 0.0)))
+    cover = (cover_kind or "off").strip().lower()
+    has_band = band > 0 and cover not in ("", "off")
+    # Scale type to the remaining picture so a deep bottom banner does not inflate the font.
+    picture_h = max(64, int(round(video_h * (1.0 - band)))) if has_band else video_h
+    if has_band:
+        font_size = max(14, min(20, int(round(picture_h * 0.023))))
+    else:
+        font_size = max(20, int(round(video_h * 0.042)))
     try:
         font = ImageFont.truetype(font_path, font_size)
     except Exception as e:
@@ -74,11 +88,11 @@ def render_srt_to_overlays(
         return []
 
     margin_x = int(video_w * 0.05)
-    # Keep translated text close to the lower edge after source-caption crop.
+    # Keep translated text close to the lower edge of the *picture*, never on the logo banner.
     margin_v = int(video_h * 0.025)
     max_text_w = video_w - 2 * margin_x
     line_gap = int(font_size * 0.28)
-    pad_x, pad_y = int(font_size * 0.5), int(font_size * 0.32)
+    pad_x, pad_y = int(font_size * 0.45), int(font_size * 0.28)
     stroke_w = max(2, font_size // 10)
 
     scratch = Image.new("RGBA", (8, 8))
@@ -107,7 +121,13 @@ def render_srt_to_overlays(
         plate_w = block_w + 2 * pad_x
         plate_h = block_h + 2 * pad_y
         plate_x = (video_w - plate_w) // 2
-        plate_y = video_h - margin_v - plate_h
+        if has_band:
+            gap = max(6, int(round(video_h * 0.01)))
+            band_px = max(16, int(round(video_h * band)))
+            plate_y = video_h - band_px - gap - plate_h
+            plate_y = max(6, plate_y)
+        else:
+            plate_y = video_h - margin_v - plate_h
         radius = max(6, int(font_size * 0.35))
         d.rounded_rectangle(
             [plate_x, plate_y, plate_x + plate_w, plate_y + plate_h],
@@ -157,12 +177,22 @@ def render_srt_to_apng(
     video_w: int,
     video_h: int,
     output_path: str,
+    *,
+    cover_band: float = 0.0,
+    cover_kind: str = "off",
 ) -> Optional[str]:
     """Render all timed cues into one transparent APNG subtitle track."""
     from PIL import Image
 
     with tempfile.TemporaryDirectory(prefix="visub_frames_") as frame_dir:
-        overlays = render_srt_to_overlays(srt_path, video_w, video_h, frame_dir)
+        overlays = render_srt_to_overlays(
+            srt_path,
+            video_w,
+            video_h,
+            frame_dir,
+            cover_band=cover_band,
+            cover_kind=cover_kind,
+        )
         if not overlays:
             return None
 

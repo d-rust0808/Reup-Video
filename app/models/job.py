@@ -36,7 +36,7 @@ class JobAborted(BaseException):
 
 
 class OverlayItem(BaseModel):
-    """A channel branding logo or full-frame khung burned onto every output frame."""
+    """A channel branding logo, bottom caption banner, or full-frame khung."""
     model_config = ConfigDict(populate_by_name=True)
 
     id: Optional[str] = Field(default=None)
@@ -45,13 +45,40 @@ class OverlayItem(BaseModel):
     y: float = Field(default=0.04, ge=0.0, le=1.0, description="Top position as fraction of frame height")
     w: float = Field(default=0.18, ge=0.02, le=1.0, description="Overlay width as fraction of frame width")
     opacity: float = Field(default=1.0, ge=0.05, le=1.0)
-    kind: str = Field(default="logo", description="logo (corner badge) or frame (full-frame PNG)")
+    kind: str = Field(
+        default="logo",
+        description="logo (corner badge), banner (bottom caption plate), frame, or overlay",
+    )
+    band_h: float = Field(
+        default=0.22,
+        ge=0.0,
+        le=0.5,
+        description="Bottom-band height for kind=banner (fraction of frame height)",
+    )
+    url: str = Field(default="", description="Public URL of the overlay image")
+    filename: str = Field(default="", description="Original filename")
 
     @field_validator("kind", mode="before")
     @classmethod
     def _norm_kind(cls, v: Any) -> str:
         s = str(v or "logo").lower().strip()
-        return "frame" if s in ("frame", "khung", "border") else "logo"
+        if s in ("frame", "khung", "border"):
+            return "frame"
+        if s in ("banner", "caption"):
+            return "banner"
+        if s == "overlay":
+            return "overlay"
+        return "logo"
+
+    @model_validator(mode="after")
+    def _banner_geometry(self) -> "OverlayItem":
+        if self.kind == "banner":
+            self.x = 0.0
+            self.w = 1.0
+            bh = float(self.band_h or 0.22)
+            self.band_h = max(0.10, min(0.36, bh))
+            self.y = round(1.0 - self.band_h, 4)
+        return self
 
 
 class WatermarkConfig(BaseModel):
@@ -148,6 +175,25 @@ class ReupConfig(BaseModel):
         description="dub (gốc) | narrator (kể chuyện) | funny (vui nhộn) | recap | auto",
     )
     text_cover_vf: str = Field(default="", description="Extra ffmpeg vf nodes to cover mid-frame source text")
+    caption_cover: str = Field(
+        default="off",
+        description=(
+            "Hide source hardsub with a color bar instead of delogo: "
+            "off, black_soft, white_soft, black_solid, white_solid"
+        ),
+    )
+    force_bottom_crop: bool = Field(
+        default=False,
+        description="When True (Chỉ cắt đáy), always crop the source caption band off even if a cover plate is selected",
+    )
+    caption_cover_image: str = Field(
+        default="",
+        description="Absolute path to an image that fills the bottom caption band (keeps 9:16)",
+    )
+    caption_cover_url: str = Field(
+        default="",
+        description="Public URL of the caption-cover image (used to recover the file if the path is missing)",
+    )
     burn_subtitles: bool = Field(default=True, description="Includes translated Vietnamese subtitles in the output")
     subtitle_mode: str = Field(
         default="soft",
@@ -178,11 +224,28 @@ class ReupConfig(BaseModel):
 
     # Channel auto-distribution
     channel_id: Optional[str] = Field(default=None, description="Target distribution channel ID")
+    channel_ids: List[str] = Field(
+        default_factory=list,
+        description="Post the same video to multiple channels / Facebook Pages",
+    )
+    group_ids: List[str] = Field(
+        default_factory=list,
+        description="Channel groups whose member Pages should all receive the video",
+    )
+    video_note: str = Field(default="", description="Internal note stored on every channel video from this job")
     target_platforms: List[str] = Field(
         default_factory=lambda: ["tiktok", "youtube_shorts", "facebook"],
         description="Destination platforms to export after the master reup",
     )
     post_title: Optional[str] = Field(default=None, description="Title for post upon completion")
+    post_intent: str = Field(
+        default="",
+        description="Target CTA/copy that agy must keep (phone, service) while rewriting each post",
+    )
+    agy_write_post: bool = Field(
+        default=True,
+        description="When True, agy CLI writes a unique SEO title+caption per Fanpage",
+    )
     post_caption: Optional[str] = Field(default=None, description="Caption/Hashtags for post upon completion")
     post_tags: Optional[List[str]] = Field(default_factory=list, description="Tags/Labels for channel video")
     publish_status: Optional[str] = Field(default="READY", description="Publish status: DRAFT, READY, PUBLISHED")

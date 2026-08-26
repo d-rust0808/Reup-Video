@@ -32,6 +32,17 @@ if (isPrintOnly) {
   process.exit(0);
 }
 
+if (target === 'win') {
+  const prepare = spawnSync(process.execPath, [path.join(__dirname, 'prepare-windows-python.cjs')], {
+    cwd: path.resolve(__dirname, '..'),
+    stdio: 'inherit',
+    env: process.env,
+  });
+  if (prepare.status !== 0) {
+    process.exit(prepare.status ?? 1);
+  }
+}
+
 const builder = path.join(
   __dirname,
   '..',
@@ -54,4 +65,24 @@ if (result.error) {
   console.error(`[desktop-build] ${result.error.message}`);
   process.exit(1);
 }
+
+if (target === 'win') {
+  const unpacked = path.resolve(__dirname, '..', 'release', 'win', 'win-unpacked');
+  const pythonExe = path.join(unpacked, 'resources', 'python', 'python.exe');
+  const ffmpegExe = path.join(unpacked, 'resources', 'ffmpeg', 'ffmpeg.exe');
+  console.log(`[desktop-build] bundled python.exe: ${fs.existsSync(pythonExe) ? 'yes' : 'NO'} (${pythonExe})`);
+  console.log(`[desktop-build] bundled ffmpeg.exe: ${fs.existsSync(ffmpegExe) ? 'yes' : 'NO'} (${ffmpegExe})`);
+
+  if (fs.existsSync(unpacked) && (result.status ?? 1) !== 0) {
+    const zipOut = path.resolve(__dirname, '..', 'release', 'win', 'Reup-Video Studio-1.0.0-win-x64.zip');
+    console.log(`[desktop-build] installer failed; zipping unpacked app to ${zipOut}`);
+    const zip = spawnSync('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', unpacked, zipOut], {
+      stdio: 'inherit',
+    });
+    if (zip.status === 0) {
+      console.log(`[desktop-build] fallback zip ready: ${zipOut}`);
+    }
+  }
+}
+
 process.exit(result.status ?? 1);

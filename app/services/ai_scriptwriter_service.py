@@ -13,7 +13,7 @@ import urllib.request
 import urllib.error
 from typing import List, Dict, Any, Optional
 
-from app.config import settings
+from app.config import normalize_deepseek_model, settings
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ class AIScriptwriterService:
     ):
         self.api_key = api_key or settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY", "")
         self.base_url = (base_url or settings.DEEPSEEK_BASE_URL or "https://api.deepseek.com").rstrip("/")
-        self.model = model or settings.DEEPSEEK_MODEL or "deepseek-chat"
+        self.model = normalize_deepseek_model(model or settings.DEEPSEEK_MODEL or "deepseek-v4-flash")
         self.last_error = ""
 
     def _set_http_error(self, error: urllib.error.HTTPError) -> None:
@@ -60,6 +60,7 @@ class AIScriptwriterService:
     def is_available(self) -> bool:
         """Returns True if DeepSeek API credentials are configured."""
         self.api_key = self.api_key or settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY", "")
+        self.model = normalize_deepseek_model(self.model or settings.DEEPSEEK_MODEL or "deepseek-v4-flash")
         return bool(self.api_key and self.api_key.strip())
 
     def translate_text(self, text: str, target_lang: str = "vi") -> str:

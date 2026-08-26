@@ -145,7 +145,7 @@ pip install -r requirements.txt
 # 3. Start FastAPI Server
 python3 -m app.main
 ```
-*Backend will be running at:* `http://localhost:8000` (Swagger UI at `/docs`)
+*Backend will be running at:* `http://localhost:6000` (Swagger UI at `/docs`)
 
 ---
 
@@ -157,7 +157,7 @@ cd frontend
 npm install
 npm run dev
 ```
-*Giao diện Web sẽ chạy tại:* `http://localhost:3000`
+*Giao diện Web sẽ chạy tại:* `http://localhost:6001`
 
 #### Chạy Ứng Dụng Desktop (Electron):
 ```bash
@@ -224,7 +224,7 @@ File build được xuất ra thư mục `frontend/release/`. Không cần sửa
 | `DELETE` | `/api/v1/outputs/{filename}` | Delete finished video from disk |
 
 ### 5. Real-Time WebSockets
-- **Endpoint**: `ws://localhost:8000/ws/jobs`
+- **Endpoint**: `ws://localhost:6000/ws/jobs`
 - **Events**: `job_created`, `job_progress`, `job_completed`, `job_failed`, `pong`
 
 ---
@@ -283,7 +283,7 @@ Application settings can be configured via environment variables or directly in 
 | Environment Variable | Default | Description |
 |---|---|---|
 | `HOST` | `0.0.0.0` | Backend API bind host |
-| `PORT` | `8000` | Backend API bind port |
+| `PORT` | `6000` | Backend API bind port |
 | `DEBUG` | `false` | Enable verbose logging |
 | `MAX_CONCURRENT_JOBS` | `8` | Max concurrent video processing pipelines; tune down if RAM is limited |
 | `GPU_CONCURRENCY` | `1` | Max concurrent GPU-heavy AI jobs; keep at `1` for a 4 GB GTX 1050 Ti |

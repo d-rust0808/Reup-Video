@@ -1,9 +1,14 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { RoiCanvas } from './RoiCanvas';
 import { ReupFxControls } from './ReupFxControls';
-import { getStreamUrl, submitJob, uploadVideoFile } from '../services/api';
+import { getStreamUrl, submitJob, uploadVideoFile, getMediaUrl } from '../services/api';
 import { loadSession, saveSession } from '../services/session';
 import { Video, AlertCircle, CheckCircle2, Upload, Loader2 } from 'lucide-react';
+import {
+  platformsHaveHorizontal,
+  platformsHaveVertical,
+  resolveCanvasAspect,
+} from '../lib/previewCanvas';
 
 export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
   const videoRef = useRef(null);
@@ -24,6 +29,10 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       pitch_shift: true,
       crop_percent: 2.0,
       subtitle_bottom_crop: 18.0,
+      caption_cover: 'off',
+      caption_cover_image: '',
+      caption_cover_url: '',
+      caption_cover_name: '',
       trim_start_sec: 0.0,
       trim_end_sec: 0.0,
       brightness: 0.01,
@@ -46,17 +55,33 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       source_lang: 'auto',
 
     channel_id: null,
+    channel_ids: [],
+    group_ids: [],
+    video_note: '',
     post_title: '',
+    post_intent: '',
+    agy_write_post: true,
     post_caption: '',
     post_tags: [],
     publish_status: 'READY',
     target_platforms: ['tiktok', 'youtube_shorts', 'facebook'],
+    preview_aspect: '9:16',
     bgm_path: '',
     bgm_id: '',
     bgm_volume: 0.85,
       ...(saved || {}),
     };
-    const cleaningDisabled = ['none', 'off', 'disabled'].includes(merged.wm_method);
+    const allowedWm = new Set([
+      'auto', 'all', 'crop', 'none', 'off', 'disabled',
+      'telea', 'ns', 'lama', 'delogo', 'boxblur',
+      'opencv_telea', 'opencv_ns',
+    ]);
+    if (!allowedWm.has(String(merged.wm_method || ''))) {
+      merged.wm_method = 'auto';
+    }
+    if (merged.caption_cover === 'white_black') {
+      merged.caption_cover = 'white_solid';
+    }
     // Migrate the legacy crop that left the source caption band visible.
     if (Number(merged.subtitle_bottom_crop || 0) > 0 && Number(merged.subtitle_bottom_crop) <= 7) {
       merged.subtitle_bottom_crop = 18.0;
@@ -69,21 +94,17 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       && saved?.preset_id === 'clean_keep_bgm'
       && saved?.original_vocal_volume == null;
     if (merged.preset_id === 'clean_mute_all') {
-      if (cleaningDisabled) merged.wm_method = 'auto';
       merged.enable_vocal_mute = true;
       merged.preserve_bgm = false;
       merged.vocal_mute_strategy = 'mute_all';
     } else if (merged.preset_id === 'clean_duck_vocals' || migrateLegacyTtsAudio) {
-      if (cleaningDisabled) merged.wm_method = 'auto';
       merged.preset_id = 'clean_duck_vocals';
       merged.enable_vocal_mute = true;
       merged.preserve_bgm = true;
       merged.vocal_mute_strategy = 'demucs_duck';
       merged.original_vocal_volume = merged.original_vocal_volume ?? 0.10;
     } else {
-      const isCurrentPreset = merged.preset_id === 'clean_keep_bgm';
       merged.preset_id = 'clean_keep_bgm';
-      if (!isCurrentPreset || cleaningDisabled) merged.wm_method = 'auto';
       merged.enable_vocal_mute = false;
       merged.preserve_bgm = true;
       merged.vocal_mute_strategy = 'auto';
@@ -101,13 +122,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
   useEffect(() => {
     if (selectedMedia) {
       setCurrentMedia(selectedMedia);
-      if (selectedMedia.title) {
-        setOptions((prev) => ({
-          ...prev,
-          post_title: prev.post_title || selectedMedia.title,
-          post_caption: prev.post_caption || `${selectedMedia.title}\n\n#reup #trending #viral`,
-        }));
-      }
+      // Do not auto-fill post_title/caption from Douyin ids — agy writes those.
     }
   }, [selectedMedia]);
 
@@ -116,6 +131,26 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       videoRef.current.src = getStreamUrl(currentMedia.video_id);
     }
   }, [currentMedia?.video_id]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const rate = Math.max(0.8, Math.min(1.5, Number(options.speed_ratio) || 1));
+    const apply = () => {
+      try {
+        video.playbackRate = rate;
+      } catch {
+        /* some browsers reject mid-load */
+      }
+    };
+    apply();
+    video.addEventListener('loadedmetadata', apply);
+    video.addEventListener('play', apply);
+    return () => {
+      video.removeEventListener('loadedmetadata', apply);
+      video.removeEventListener('play', apply);
+    };
+  }, [options.speed_ratio, currentMedia?.video_id]);
 
   const handleFileUpload = async (e) => {
     const file = e.target?.files?.[0] || e;
@@ -134,13 +169,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         author: 'File Tải Lên',
       };
       setCurrentMedia(newMedia);
-      if (res.filename) {
-        setOptions((prev) => ({
-          ...prev,
-          post_title: prev.post_title || res.filename,
-          post_caption: prev.post_caption || `${res.filename}\n\n#reup #trending #viral`,
-        }));
-      }
+      // Filename is not a Facebook title; agy writes title/caption from post_intent.
     } catch (err) {
       setMsg({ type: 'error', text: err.message || 'Tải file video lên thất bại' });
     } finally {
@@ -194,8 +223,13 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       canvas_size: [vw, vh],
       video_resolution: [vw, vh],
       channel_id: options.channel_id,
-      post_title: options.post_title || currentMedia.title,
-      post_caption: options.post_caption,
+      channel_ids: options.channel_ids || (options.channel_id ? [options.channel_id] : []),
+      group_ids: options.group_ids || [],
+      video_note: options.video_note || '',
+      post_title: '',
+      post_intent: options.post_intent || '',
+      agy_write_post: Boolean((options.post_intent || '').trim()),
+      post_caption: '',
       post_tags: options.post_tags,
       publish_status: options.publish_status,
       watermark: {
@@ -209,6 +243,26 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         pitch_shift: options.pitch_shift,
         crop_percent: normCrop,
         subtitle_bottom_crop: Number(options.subtitle_bottom_crop || 0) / 100.0,
+        caption_cover: options.caption_cover || 'off',
+        caption_cover_image: options.caption_cover_image || '',
+        caption_cover_url: options.caption_cover_url || '',
+        overlays: [
+          ...((options.caption_cover === 'image' && options.caption_cover_image)
+            ? (() => {
+                const bandH = Math.max(0.10, Math.min(0.36, Number(options.subtitle_bottom_crop || 0) / 100 || 0.22));
+                return [{
+                  image_path: options.caption_cover_image,
+                  url: options.caption_cover_url || '',
+                  kind: 'banner',
+                  band_h: bandH,
+                  x: 0,
+                  y: 1 - bandH,
+                  w: 1,
+                  opacity: 1,
+                }];
+              })()
+            : []),
+        ],
         trim_start_sec: Number(options.trim_start_sec || 0),
         trim_end_sec: Number(options.trim_end_sec || 0),
         brightness: options.brightness,
@@ -230,8 +284,13 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         target_lang: options.target_lang || 'vi',
         source_lang: options.source_lang || (['douyin', 'kuaishou', 'xiaohongshu'].includes(currentMedia.platform) ? 'zh' : 'auto'),
         channel_id: options.channel_id,
-        post_title: options.post_title || currentMedia.title,
-        post_caption: options.post_caption,
+        channel_ids: options.channel_ids || (options.channel_id ? [options.channel_id] : []),
+        group_ids: options.group_ids || [],
+        video_note: options.video_note || '',
+        post_title: '',
+        post_intent: options.post_intent || '',
+        agy_write_post: Boolean((options.post_intent || '').trim()),
+        post_caption: '',
         post_tags: options.post_tags,
         publish_status: options.publish_status,
         target_platforms: options.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
@@ -357,7 +416,26 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
           </div>
         </div>
 
-        <RoiCanvas videoRef={videoRef} onRoiChange={setRoi} />
+        <RoiCanvas
+          videoRef={videoRef}
+          onRoiChange={setRoi}
+          onCanvasAspect={(aspect) => setOptions((prev) => ({ ...prev, preview_aspect: aspect }))}
+          preview={{
+            cropPercent: Number(options.crop_percent) || 0,
+            bottomCrop: Number(options.subtitle_bottom_crop) || 0,
+            captionCover: options.caption_cover || 'off',
+            captionCoverUrl: options.caption_cover_url ? getMediaUrl(options.caption_cover_url) : '',
+            wmMethod: options.wm_method,
+            hflip: Boolean(options.hflip),
+            speedRatio: Number(options.speed_ratio) || 1,
+            brightness: Number(options.brightness) || 0,
+            contrast: Number(options.contrast) || 1,
+            saturation: Number(options.saturation) || 1,
+            canvasAspect: resolveCanvasAspect(options.target_platforms, options.preview_aspect),
+            hasVertical: platformsHaveVertical(options.target_platforms),
+            hasHorizontal: platformsHaveHorizontal(options.target_platforms),
+          }}
+        />
       </div>
 
       {msg && (

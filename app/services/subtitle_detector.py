@@ -80,6 +80,47 @@ def _merge_boxes(boxes: List[Tuple[int, int, int, int]], gap: int = 12) -> List[
     return [(a, b, c - a, d - b) for a, b, c, d in merged]
 
 
+def _merge_same_line_boxes(
+    boxes: List[Tuple[int, int, int, int]],
+    frame_width: int,
+    frame_height: int,
+) -> List[Tuple[int, int, int, int]]:
+    """Join CJK glyph fragments that sit on one caption/watermark line."""
+    if not boxes:
+        return []
+    y_gap = max(8, int(frame_height * 0.03))
+    x_gap = max(18, int(frame_width * 0.045))
+    items: List[List[int]] = [[int(x), int(y), int(w), int(h)] for x, y, w, h in boxes]
+    changed = True
+    while changed and len(items) > 1:
+        changed = False
+        items = sorted(items, key=lambda b: (b[1], b[0]))
+        merged: List[List[int]] = []
+        for x, y, w, h in items:
+            x2, y2 = x + w, y + h
+            cy = y + h / 2.0
+            attached = False
+            for m in merged:
+                mx, my, mw, mh = m
+                mx2, my2 = mx + mw, my + mh
+                mcy = my + mh / 2.0
+                same_line = abs(cy - mcy) <= y_gap and abs(h - mh) <= max(y_gap, mh * 0.7)
+                close_x = x <= mx2 + x_gap and x2 >= mx - x_gap
+                if same_line and close_x:
+                    nx = min(mx, x)
+                    ny = min(my, y)
+                    nx2 = max(mx2, x2)
+                    ny2 = max(my2, y2)
+                    m[:] = [nx, ny, nx2 - nx, ny2 - ny]
+                    attached = True
+                    changed = True
+                    break
+            if not attached:
+                merged.append([x, y, w, h])
+        items = merged
+    return [(x, y, w, h) for x, y, w, h in items]
+
+
 def detect_faces_haar(frame: np.ndarray, padding: int = 15) -> List[Tuple[int, int, int, int]]:
     """OpenCV Haar cascade face detector (cross-platform fallback)."""
     if not HAS_OPENCV or frame is None or frame.size == 0:
@@ -618,15 +659,43 @@ def _cluster_persistent_boxes(
     return stable
 
 
+def _is_delogo_candidate(x: int, y: int, bw: int, bh: int, w: int, h: int) -> bool:
+    """True only for bottom hardsub or a small top-corner watermark."""
+    if bh <= 0 or bw <= 0 or w < 32 or h < 32:
+        return False
+    cy = y + bh / 2.0
+    if cy < h * 0.02 or cy > h * 0.98:
+        return False
+    ar = bw / float(bh)
+    near_bottom = cy >= h * 0.55
+    in_top_band = cy <= h * 0.20
+    in_top_corner = in_top_band and (x + bw <= w * 0.40 or x >= w * 0.60)
+    if not near_bottom and not in_top_corner:
+        return False
+    min_ar = 1.05
+    min_frac = 0.04 if in_top_corner else 0.08
+    if ar < min_ar or bw < w * min_frac:
+        return False
+    if bh > h * 0.18:
+        return False
+    if bw * bh > w * h * 0.10:
+        return False
+    if in_top_corner and (bh > h * 0.12 or bw * bh > w * h * 0.05):
+        return False
+    return True
+
+
 def persistent_text_cover_filters(
     video_path: str,
     max_boxes: int = 4,
     min_hits: int = 1,
 ) -> List[str]:
     """
-    Sample a few frames, find caption-like boxes anywhere except tiny corners,
-    and return ffmpeg delogo filters. Bottom Chinese hardsub is included because
-    we no longer thick-crop the lower band.
+    Sample a few frames and return ffmpeg delogo filters for stable overlays.
+
+    Only bottom hardsub and small top-corner watermarks are eligible. Mid/upper
+    scene texture (scaffolding, brick, netting) must not be delogo'd — that
+    smears the picture.
     """
     if not HAS_OPENCV or not video_path or not os.path.exists(video_path):
         return []
@@ -639,33 +708,19 @@ def persistent_text_cover_filters(
     if w < 32 or h < 32:
         cap.release()
         return []
-    indices = [max(0, int(n * f)) for f in (0.12, 0.28, 0.45, 0.62, 0.80)] if n > 10 else [0]
+    indices = [max(0, int(n * f)) for f in (0.06, 0.16, 0.28, 0.42, 0.58, 0.74)] if n > 10 else [0]
     raw_boxes: List[Tuple[int, int, int, int, int]] = []
-    y_lo, y_hi = int(h * 0.02), int(h * 0.98)
     try:
         for sample_id, idx in enumerate(indices):
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
-            for x, y, bw, bh in detect_text_boxes_opencv(frame, padding=4):
-                if bh <= 0 or bw <= 0:
-                    continue
-                cy = y + bh / 2.0
-                if cy < y_lo or cy > y_hi:
-                    continue
-                ar = bw / float(bh)
-                near_bottom = cy >= h * 0.55
-                in_top_corner = cy <= h * 0.25 and (x + bw <= w * 0.35 or x >= w * 0.65)
-                min_ar = 1.05 if near_bottom else 1.25
-                min_frac = 0.035 if in_top_corner else (0.08 if near_bottom else 0.12)
-                if ar < min_ar or bw < w * min_frac:
-                    continue
-                if bh > h * 0.28:
-                    continue
-                if bw * bh > w * h * 0.16:
-                    continue
-                if in_top_corner and (bh > h * 0.12 or bw * bh > w * h * 0.04):
+            line_boxes = _merge_same_line_boxes(
+                detect_text_boxes_opencv(frame, padding=4), w, h
+            )
+            for x, y, bw, bh in line_boxes:
+                if not _is_delogo_candidate(x, y, bw, bh, w, h):
                     continue
                 raw_boxes.append((sample_id, x, y, bw, bh))
     finally:
@@ -676,6 +731,8 @@ def persistent_text_cover_filters(
     clusters = _cluster_persistent_boxes(raw_boxes, w, h, min_hits)
     filters: List[str] = []
     for x, y, bw, bh, _ in clusters[:max_boxes]:
+        if not _is_delogo_candidate(x, y, bw, bh, w, h):
+            continue
         x2, y2 = x + bw, y + bh
         x = max(8, x - 4)
         y = max(8, y - 4)

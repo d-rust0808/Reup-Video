@@ -8,7 +8,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     host: '0.0.0.0',
-    port: 5273,
+    port: 6001,
     strictPort: true,
     allowedHosts: true,
     watch: {
@@ -24,11 +24,13 @@ export default defineConfig({
     },
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8000',
+        target: 'http://127.0.0.1:6000',
         changeOrigin: true,
+        ws: true,
       },
       '/ws': {
-        target: 'ws://127.0.0.1:8000',
+        target: 'http://127.0.0.1:6000',
+        changeOrigin: true,
         ws: true,
       },
     },

@@ -2,6 +2,8 @@
  * API Service for interacting with FastAPI Backend endpoints
  */
 
+import { DESKTOP_BACKEND_ORIGIN } from './backend';
+
 export const isDesktop =
   typeof window !== 'undefined' &&
   (!!window.electronAPI?.isDesktop || window.location.protocol === 'file:');
@@ -11,7 +13,7 @@ export const getApiBase = () => {
     typeof window !== 'undefined' &&
     (window.location.protocol === 'file:' || !window.location.host || window.location.host === '')
   ) {
-    return 'http://127.0.0.1:8000/api/v1';
+    return `${DESKTOP_BACKEND_ORIGIN}/api/v1`;
   }
   return '/api/v1';
 };
@@ -25,7 +27,7 @@ export function getMediaUrl(path) {
     const origin =
       typeof window !== 'undefined' &&
       (window.location.protocol === 'file:' || !window.location.host)
-        ? 'http://127.0.0.1:8000'
+        ? DESKTOP_BACKEND_ORIGIN
         : '';
     return `${origin}${path}`;
   }
@@ -140,8 +142,17 @@ export async function cancelJob(jobId) {
   const res = await fetch(`${API_BASE}/jobs/${jobId}/cancel`, {
     method: 'POST',
   });
-  if (!res.ok) throw new Error('Failed to cancel job');
-  return res.json();
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = data.detail;
+    const message =
+      (typeof detail === 'string' && detail) ||
+      detail?.message ||
+      data.message ||
+      'Không hủy được job';
+    throw new Error(message);
+  }
+  return data;
 }
 
 export async function deleteJob(jobId) {
@@ -352,6 +363,53 @@ export async function updateChannelVideo(videoId, payload) {
   return res.json();
 }
 
+export async function fetchChannelGroups() {
+  const res = await fetch(`${API_BASE}/channel-groups`);
+  if (!res.ok) throw new Error('Không tải được nhóm kênh');
+  return res.json();
+}
+
+export async function createChannelGroup(payload) {
+  const res = await fetch(`${API_BASE}/channel-groups`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Không tạo được nhóm');
+  }
+  return res.json();
+}
+
+export async function updateChannelGroup(groupId, payload) {
+  const res = await fetch(`${API_BASE}/channel-groups/${groupId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Không lưu được nhóm');
+  }
+  return res.json();
+}
+
+export async function deleteChannelGroup(groupId) {
+  const res = await fetch(`${API_BASE}/channel-groups/${groupId}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Không xóa được nhóm');
+  }
+  return res.json();
+}
+
+export async function fetchPublishLog(limit = 80) {
+  const res = await fetch(`${API_BASE}/publish-log?limit=${limit}`);
+  if (!res.ok) throw new Error('Không tải được nhật ký đăng');
+  return res.json();
+}
+
 export async function removeVideoFromChannel(videoId) {
   const res = await fetch(`${API_BASE}/channel-videos/${videoId}`, {
     method: 'DELETE',
@@ -417,6 +475,55 @@ export async function publishFacebookReel(videoId) {
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Không thể đăng Facebook Reel');
+  }
+  return res.json();
+}
+
+export async function fetchTikTokSettings() {
+  const res = await fetch(`${API_BASE}/tiktok/settings`);
+  if (!res.ok) throw new Error('Không tải được cấu hình TikTok');
+  return res.json();
+}
+
+export async function saveTikTokSettings(payload) {
+  const res = await fetch(`${API_BASE}/tiktok/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Kết nối TikTok thất bại');
+  }
+  return res.json();
+}
+
+export async function fetchTikTokAccounts() {
+  const res = await fetch(`${API_BASE}/tiktok/accounts`);
+  if (!res.ok) throw new Error('Không tải được tài khoản TikTok');
+  return res.json();
+}
+
+export async function bindTikTokAccount(channelId, payload) {
+  const res = await fetch(`${API_BASE}/tiktok/channels/${channelId}/binding`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Liên kết TikTok thất bại');
+  }
+  return res.json();
+}
+
+export async function publishTikTokVideo(videoId) {
+  const res = await fetch(`${API_BASE}/tiktok/channel-videos/${videoId}/publish`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Không thể đăng TikTok');
   }
   return res.json();
 }
@@ -597,5 +704,76 @@ export async function importOnlineBgm(track) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Không thêm được bản nhạc vào kho');
   }
+  return res.json();
+}
+
+async function readError(res, fallback) {
+  const err = await res.json().catch(() => ({}));
+  return err.detail || fallback;
+}
+
+export async function fetchContentChannels() {
+  const res = await fetch(`${API_BASE}/content/channels`);
+  if (!res.ok) throw new Error(await readError(res, 'Không tải được kênh nguồn'));
+  return res.json();
+}
+
+export async function addContentChannel(payload) {
+  const res = await fetch(`${API_BASE}/content/channels`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readError(res, 'Không thêm được kênh nguồn'));
+  return res.json();
+}
+
+export async function patchContentChannel(channelId, payload) {
+  const res = await fetch(`${API_BASE}/content/channels/${channelId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readError(res, 'Không lưu được kênh nguồn'));
+  return res.json();
+}
+
+export async function deleteContentChannel(channelId) {
+  const res = await fetch(`${API_BASE}/content/channels/${channelId}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(await readError(res, 'Không xóa được kênh nguồn'));
+  return res.json();
+}
+
+export async function fetchContentVideos(channelId, status = 'all') {
+  const res = await fetch(
+    `${API_BASE}/content/channels/${channelId}/videos?status=${encodeURIComponent(status)}`
+  );
+  if (!res.ok) throw new Error(await readError(res, 'Không tải được danh sách video'));
+  return res.json();
+}
+
+export async function syncContentChannel(channelId) {
+  const res = await fetch(`${API_BASE}/content/channels/${channelId}/sync`, { method: 'POST' });
+  if (!res.ok) throw new Error(await readError(res, 'Không đồng bộ được kênh'));
+  return res.json();
+}
+
+export async function fetchContentChannelVideos(channelId, videoIds) {
+  const res = await fetch(`${API_BASE}/content/channels/${channelId}/fetch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ video_ids: videoIds || null }),
+  });
+  if (!res.ok) throw new Error(await readError(res, 'Không tải được video kênh'));
+  return res.json();
+}
+
+export async function markContentVideoPosted(videoPk, posted) {
+  const res = await fetch(`${API_BASE}/content/videos/${videoPk}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ posted }),
+  });
+  if (!res.ok) throw new Error(await readError(res, 'Không đánh dấu được video'));
   return res.json();
 }

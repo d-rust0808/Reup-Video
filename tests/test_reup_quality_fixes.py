@@ -57,6 +57,53 @@ def test_job_claim_is_atomic_and_deleted_job_requests_abort(tmp_path):
         manager.executor.shutdown(wait=False, cancel_futures=True)
 
 
+def test_concurrent_append_job_log_keeps_every_line(tmp_path):
+    import threading
+    from app.services.queue_manager import BatchQueueManager
+
+    manager = BatchQueueManager(db_path=str(tmp_path / "jobs.sqlite"), max_concurrent_jobs=1)
+    try:
+        job_id = manager.enqueue_job("input.mp4", "output.mp4")
+
+        def writer(prefix, count):
+            for i in range(count):
+                manager.append_job_log(job_id, f"{prefix}-{i}", stage="REUP_TRANSFORM")
+
+        threads = [threading.Thread(target=writer, args=(f"t{n}", 20)) for n in range(5)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        logs = manager.get_job(job_id)["logs"]
+        assert len(logs) == 100
+        messages = {item["message"] for item in logs}
+        assert "t0-0" in messages
+        assert "t4-19" in messages
+    finally:
+        manager.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_cancel_running_job_cannot_be_overwritten_by_late_progress(tmp_path):
+    from app.services.queue_manager import BatchQueueManager
+
+    manager = BatchQueueManager(db_path=str(tmp_path / "jobs.sqlite"), max_concurrent_jobs=1)
+    try:
+        job_id = manager.enqueue_job("input.mp4", "output.mp4")
+        assert manager._claim_pending_job(job_id) is True
+        manager.update_job_status(job_id, "REUP_TRANSFORM", progress=0.76)
+        assert manager.cancel_job(job_id) is True
+        assert manager.get_job(job_id)["status"] == "CANCELLED"
+        assert manager._abort_requested(job_id) is True
+
+        manager.update_job_status(job_id, "COMPLETED", progress=1.0)
+        manager.update_job_progress(job_id, 0.99, stage="REUP_TRANSFORM")
+        assert manager.get_job(job_id)["status"] == "CANCELLED"
+        assert manager.cancel_job(job_id) is False
+    finally:
+        manager.executor.shutdown(wait=False, cancel_futures=True)
+
+
 def test_high_core_queue_uses_configured_bounded_thread_pool(tmp_path):
     from concurrent.futures import ThreadPoolExecutor
     from app.services.queue_manager import BatchQueueManager
@@ -304,6 +351,13 @@ def test_subtitle_bottom_crop_folded_into_reup():
     assert "crop=iw*(1-2*0.0200)" in vf
 
 
+def test_custom_speed_factor_lands_in_setpts():
+    cfg = ReupConfig(speed_factor=1.3, film_grain=0.0, frame_enabled=False, pitch_shift=False)
+    _, _, vf, af = build_reup_filtergraph(cfg, has_audio=True)
+    assert "setpts=PTS/1.3000" in vf
+    assert "atempo=1.3000" in af
+
+
 def test_hardsub_filter_uses_original_timestamps_before_setpts(tmp_path):
     srt = tmp_path / "vi.srt"
     srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nXin chào\n\n", encoding="utf-8")
@@ -473,21 +527,71 @@ def test_failed_tts_fails_job_instead_of_exporting_chinese_only(monkeypatch, tmp
 
     monkeypatch.setattr(reup_service, "process_reup_video", fake_process_reup_video)
 
-    with pytest.raises(RuntimeError, match="Lồng tiếng Việt thất bại"):
-        reup_service.ReupService.process_reup_pipeline(
-            str(source),
-            ReupConfig(
-                enable_tts=True,
-                enable_vocal_mute=True,
-                vocal_mute_strategy="demucs_duck",
-                preserve_bgm=True,
-                srt_path=str(srt),
-                subtitle_mode="hard",
-            ),
-            str(output),
-        )
+    result = reup_service.ReupService.process_reup_pipeline(
+        str(source),
+        ReupConfig(
+            enable_tts=True,
+            enable_vocal_mute=True,
+            vocal_mute_strategy="demucs_duck",
+            preserve_bgm=True,
+            srt_path=str(srt),
+            subtitle_mode="hard",
+        ),
+        str(output),
+    )
 
-    assert captured == {}
+    assert result == str(output)
+    assert captured["tts_audio_override"] is None
+    assert captured["cfg"].enable_tts is False
+    assert captured["cfg"].enable_vocal_mute is False
+
+
+def test_translation_failure_surfaces_provider_warning(monkeypatch, tmp_path):
+    from app.services import pyvideotrans_service, reup_service, tts_service
+
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "output.mp4"
+    srt = tmp_path / "source.srt"
+    source.write_bytes(b"video")
+    srt.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\n你好\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(tts_service, "get_audio_duration", lambda _path: 8.0)
+    monkeypatch.setattr(
+        pyvideotrans_service.PyVideoTransService,
+        "speech_to_text",
+        lambda *_args, **_kwargs: {"status": "success", "srt_path": str(srt)},
+    )
+    monkeypatch.setattr(
+        pyvideotrans_service.PyVideoTransService,
+        "translate_subtitles",
+        lambda *_args, **_kwargs: {
+            "status": "failed",
+            "srt_path": None,
+            "warning": "DeepSeek API trả HTTP 402: tài khoản hoặc API key không còn quota/thanh toán.",
+        },
+    )
+
+    captured = {}
+
+    def fake_process_reup_video(**kwargs):
+        captured.update(kwargs)
+        return {"output_path": kwargs["output_path"]}
+
+    monkeypatch.setattr(reup_service, "process_reup_video", fake_process_reup_video)
+
+    result = reup_service.ReupService.process_reup_pipeline(
+        str(source),
+        ReupConfig(enable_tts=True, subtitle_mode="hard", source_lang="zh", target_lang="vi"),
+        str(output),
+    )
+
+    assert result == str(output)
+    assert captured["tts_audio_override"] is None
+    assert captured["srt_override"] is None
+    assert captured["cfg"].enable_tts is False
 
 
 def test_retry_reuses_only_completed_stage2(tmp_path):
@@ -511,6 +615,43 @@ def test_retry_reuses_only_completed_stage2(tmp_path):
     assert _can_resume_completed_stage2({"logs": []}, str(stage2)) is False
 
 
+def test_crop_and_off_modes_never_attach_delogo():
+    from app.services.queue_manager import _apply_skip_inpaint, _text_cover_allowed
+
+    assert _text_cover_allowed("auto") is True
+    assert _text_cover_allowed("all") is True
+    assert _text_cover_allowed("crop") is False
+    assert _text_cover_allowed("none") is False
+    assert _text_cover_allowed("off") is False
+
+    crop_cfg = ReupConfig(
+        text_cover_vf="delogo=x=10:y=20:w=400:h=200:show=0",
+        subtitle_bottom_crop=0.0,
+    )
+    crop_msg = _apply_skip_inpaint("crop", crop_cfg)
+    assert crop_cfg.text_cover_vf == ""
+    assert crop_cfg.subtitle_bottom_crop >= 0.06
+    assert "delogo" in crop_msg.lower()
+    assert "không delogo" in crop_msg.lower()
+
+    off_cfg = ReupConfig(text_cover_vf="delogo=x=10:y=20:w=400:h=200:show=0")
+    off_msg = _apply_skip_inpaint("none", off_cfg)
+    assert off_cfg.text_cover_vf == ""
+    assert "tắt" in off_msg.lower()
+
+
+def test_delogo_rejects_scaffolding_keeps_bottom_caption():
+    from app.services.subtitle_detector import _is_delogo_candidate
+
+    w, h = 540, 960
+    # Upper building / scaffolding smear box from job_997f353f
+    assert _is_delogo_candidate(20, 40, 500, 180, w, h) is False
+    # Bottom Chinese hardsub
+    assert _is_delogo_candidate(40, 780, 400, 70, w, h) is True
+    # Small top-left watermark
+    assert _is_delogo_candidate(12, 16, 90, 36, w, h) is True
+
+
 def test_fast_auto_cover_samples_only_stable_regions(monkeypatch):
     from app.services.queue_manager import _fast_auto_cover_filters
 
@@ -528,7 +669,7 @@ def test_fast_auto_cover_samples_only_stable_regions(monkeypatch):
     filters = _fast_auto_cover_filters("source.mp4")
 
     assert filters == ["delogo=x=10:y=20:w=100:h=30:show=0"]
-    assert captured == {"path": "source.mp4", "max_boxes": 4, "min_hits": 3}
+    assert captured == {"path": "source.mp4", "max_boxes": 4, "min_hits": 2}
 
 
 def test_persistent_box_clusters_count_distinct_frames_and_use_median_size():
@@ -549,6 +690,26 @@ def test_persistent_box_clusters_count_distinct_frames_and_use_median_size():
     clustered = _cluster_persistent_boxes(boxes, 1024, 576, min_hits=3)
 
     assert clustered == [(34, 25, 108, 28, 3)]
+
+
+def test_same_line_fragments_merge_into_top_banner():
+    from app.services.subtitle_detector import _merge_same_line_boxes
+
+    fragments = [
+        (22, 19, 56, 28),
+        (51, 18, 93, 29),
+        (162, 20, 27, 27),
+        (211, 20, 28, 27),
+        (258, 18, 26, 29),
+        (470, 78, 183, 141),
+    ]
+    merged = _merge_same_line_boxes(fragments, 1024, 576)
+    top = [box for box in merged if box[1] < 40]
+    assert len(top) == 1
+    x, y, bw, bh = top[0]
+    assert x <= 22
+    assert bw >= 250
+    assert bh <= 40
 
 
 def test_lipsync_preserves_script_and_rates():
@@ -682,16 +843,24 @@ def test_tts_mix_preserves_source_gain():
     from app.services.audio_service import build_timed_speech_ducking_filter, build_vocal_mute_ffmpeg_filter
     fc = build_tts_bgm_mix_filter()
     assert "sidechaincompress" in fc
-    assert "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.0[bg]" in fc
+    assert "asplit=2[voice_duck][voice_mix]" in fc
+    assert "[bed][voice_duck]sidechaincompress=" in fc
+    assert "[safebed][voice_mix]amix=" in fc
+    assert "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=0.50[bed]" in fc
+    assert "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=2.50" in fc
+    assert "[2:a]" not in fc
+    assert "source_voice" not in fc
     assert "stereotools" not in fc
     assert "volume=0.22" not in fc
     assert "[0:a]lowpass=f=180" not in fc
-    assert "alimiter" in fc or "dynaudnorm" in fc
-    separated_fc = build_tts_bgm_mix_filter(0.08, 1.22)
-    assert "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=2.20" in separated_fc
-    assert "[2:a]aresample=44100,aformat=channel_layouts=stereo,atempo=1.2200,volume=0.080" in separated_fc
-    assert "[bg][source_voice]amix=" in separated_fc
-    assert "[bed][voice]sidechaincompress=" in separated_fc
+    assert "weights=0.55 1.20" in fc
+    overlay_fc = build_tts_bgm_mix_filter(0.08, 1.22)
+    assert overlay_fc == fc
+    import inspect
+    from app.services.reup_service import process_reup_video
+    process_src = inspect.getsource(process_reup_video)
+    assert "vocal_volume=cfg.original_vocal_volume" in process_src
+    assert "Đang phủ giọng Việt riêng" in process_src
     mute = build_vocal_mute_ffmpeg_filter(preserve_bgm=True)
     assert "stereotools=" in mute
     assert "asplit=" in mute
@@ -716,6 +885,43 @@ def test_tts_mix_preserves_source_gain():
     assert should_use_demucs_for_dubbing(mute_all_cfg, [(1.0, 2.0)]) is False
 
 
+def test_vietnamese_overlay_keeps_tts_in_the_mix(tmp_path):
+    import shutil
+    import subprocess
+
+    from app.services.reup_service import build_tts_bgm_mix_filter, find_ffmpeg_binary
+
+    ffmpeg = find_ffmpeg_binary() or shutil.which("ffmpeg")
+    if not ffmpeg:
+        pytest.skip("FFmpeg is required to verify the TTS overlay graph")
+
+    bed = tmp_path / "bed.wav"
+    voice = tmp_path / "voice.wav"
+    mixed = tmp_path / "mixed.wav"
+    for path, freq in ((bed, 120), (voice, 1200)):
+        subprocess.run(
+            [
+                ffmpeg, "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", f"sine=frequency={freq}:sample_rate=44100:duration=1",
+                "-ac", "2", str(path),
+            ],
+            check=True,
+        )
+    result = subprocess.run(
+        [
+            ffmpeg, "-y", "-loglevel", "error",
+            "-i", str(bed), "-i", str(voice),
+            "-filter_complex", build_tts_bgm_mix_filter(),
+            "-map", "[aout]", str(mixed),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert mixed.exists() and mixed.stat().st_size > 1000
+
+
 def test_vietsub_style_auto_picks_recap_for_long_clips():
     from app.services.xai_media_service import resolve_vietsub_style, compact_vi_cue
     assert resolve_vietsub_style("auto", 60) == "dub"
@@ -732,9 +938,136 @@ def test_vietsub_style_auto_picks_recap_for_long_clips():
 
 
 def test_mid_text_cover_appended_to_filtergraph():
-    cfg = ReupConfig(text_cover_vf="delogo=x=10:y=10:w=80:h=20:show=0", film_grain=0)
+    cfg = ReupConfig(
+        text_cover_vf="drawbox=x=10:y=10:w=80:h=20:t=fill:color=black@0.7",
+        film_grain=0,
+    )
     _, _, vf, _ = build_reup_filtergraph(cfg, has_audio=False)
-    assert "delogo=" in vf
+    assert "drawbox=" in vf
+    assert "delogo=" not in vf
+
+
+def test_delogo_nodes_are_stripped_from_filtergraph():
+    cfg = ReupConfig(
+        text_cover_vf="delogo=x=10:y=10:w=80:h=20:show=0,drawbox=x=0:y=0:w=10:h=10:t=fill:color=black@1",
+        film_grain=0,
+    )
+    _, _, vf, _ = build_reup_filtergraph(cfg, has_audio=False)
+    assert "delogo=" not in vf
+    assert "drawbox=" in vf
+
+
+def test_caption_cover_paints_bar_instead_of_cropping():
+    from app.services.caption_cover import caption_cover_drawbox, subtitle_force_style
+
+    cfg = ReupConfig(
+        caption_cover="white_solid",
+        subtitle_bottom_crop=0.20,
+        crop_percent=0,
+        film_grain=0,
+        hflip=False,
+    )
+    _, _, vf, _ = build_reup_filtergraph(cfg, has_audio=False)
+    assert "drawbox=" in vf
+    assert "t=fill" in vf
+    assert "white@1" in vf
+    assert "crop=iw:trunc(ih*(1-0.20" not in vf
+    style = subtitle_force_style("white_solid")
+    assert "PrimaryColour=&H00000000" in style
+
+    off = ReupConfig(caption_cover="off", subtitle_bottom_crop=0.20, crop_percent=0, film_grain=0, hflip=False)
+    _, _, vf_off, _ = build_reup_filtergraph(off, has_audio=False)
+    assert "crop=iw:trunc(ih*(1-0.2000" in vf_off
+    assert caption_cover_drawbox("off", 0.2) == ""
+    assert "black@0.62" in caption_cover_drawbox("black_soft", 0.18)
+
+
+def test_resolve_caption_cover_image_from_studio_url(tmp_path, monkeypatch):
+    from app.config import settings as app_settings
+    from app.services.caption_cover import resolve_caption_cover_image
+
+    studio = tmp_path / "studio"
+    studio.mkdir()
+    banner = studio / "abc123.png"
+    banner.write_bytes(b"img")
+    monkeypatch.setattr(app_settings, "CHANNELS_DIR", str(tmp_path), raising=False)
+    found = resolve_caption_cover_image("", "/api/v1/studio/overlay/abc123.png")
+    assert os.path.isfile(found)
+    assert found.endswith("abc123.png")
+
+
+def test_filtered_size_image_cover_keeps_full_height(monkeypatch):
+    from app.services import reup_service
+
+    monkeypatch.setattr(reup_service, "_probe_video_size", lambda _p: (720, 1280))
+    cfg = ReupConfig(
+        caption_cover="image",
+        caption_cover_image="/tmp/x.png",
+        subtitle_bottom_crop=0.30,
+        crop_percent=0.02,
+        force_bottom_crop=False,
+        film_grain=0,
+        hflip=False,
+    )
+    w, h = reup_service._filtered_video_size("in.mp4", cfg)
+    assert w == 690
+    assert h == 1228
+
+
+def test_subtitle_style_on_image_cover_is_white():
+    from app.services.caption_cover import subtitle_force_style
+
+    style = subtitle_force_style("image", 0.30)
+    assert "PrimaryColour=&H00FFFFFF" in style
+    assert "BorderStyle=3" in style
+    assert "FontSize=16" in style
+    assert "MarginV=340" in style
+
+
+def test_image_cover_keeps_frame_instead_of_cropping():
+    cfg = ReupConfig(
+        caption_cover="image",
+        caption_cover_image="/tmp/does-not-need-to-exist-for-vf.png",
+        subtitle_bottom_crop=0.24,
+        crop_percent=0,
+        film_grain=0,
+        hflip=False,
+        force_bottom_crop=False,
+    )
+    _, _, vf, _ = build_reup_filtergraph(cfg, has_audio=False)
+    assert "crop=iw:trunc(ih*(1-0.24" not in vf
+    assert "drawbox=" not in vf
+
+
+def test_banner_overlay_fills_bottom_band(tmp_path):
+    from app.services.overlay_service import append_overlay_filter, normalize_overlays
+
+    img = tmp_path / "banner.jpg"
+    img.write_bytes(b"\xff" * 64)
+    items = normalize_overlays([{
+        "image_path": str(img),
+        "kind": "banner",
+        "band_h": 0.22,
+    }])
+    assert items and items[0]["kind"] == "banner"
+    fc, paths = append_overlay_filter("[0:v]null[v_out]", items, first_overlay_index=1, main_size=(1080, 1920))
+    assert paths == [str(img.resolve())]
+    assert "overlay=0:H-h" in fc
+    assert "crop=1080:422" in fc or "crop=1080:" in fc
+
+
+def test_crop_mode_cuts_bottom_even_if_cover_selected():
+    cfg = ReupConfig(
+        caption_cover="white_solid",
+        force_bottom_crop=True,
+        subtitle_bottom_crop=0.30,
+        crop_percent=0,
+        film_grain=0,
+        hflip=False,
+    )
+    _, _, vf, _ = build_reup_filtergraph(cfg, has_audio=False)
+    assert "crop=iw:trunc(ih*(1-0.3000" in vf
+    assert "drawbox=" not in vf
 
 
 def test_default_vietnamese_engine_uses_local_vieneu_presets():
@@ -982,6 +1315,18 @@ def test_srt_renders_to_overlay_pngs(tmp_path):
         assert os.path.exists(ov["png"])
         assert ov["end"] > ov["start"]
 
+    from PIL import Image
+    banded = render_srt_to_overlays(
+        str(srt), 1080, 1920, str(tmp_path / "ovl_band"),
+        cover_band=0.30, cover_kind="image",
+    )
+    assert banded
+    bbox = Image.open(banded[0]["png"]).getbbox()
+    assert bbox is not None
+    band_top = int(1920 * 0.70)
+    assert bbox[3] <= band_top + 8
+    assert bbox[1] < band_top - 8
+
 
 def test_srt_renders_to_single_timed_apng(tmp_path):
     import os
@@ -1139,3 +1484,96 @@ def test_smart_voice_mapping():
     assert DEFAULT_VOICES["vi"]["narrator"] == "vieneu:Thái Sơn"
     assert DEFAULT_VOICES["en"]["male"] == "en-US-GuyNeural"
     assert DEFAULT_VOICES["en"]["elder_male"] == "en-US-RyanNeural"
+
+
+def test_heartbeat_emits_keep_alive_while_step_runs():
+    import time
+    from app.services.activity import heartbeat
+
+    notes = []
+    with heartbeat(notes.append, "Whisper đang nhận dạng lời thoại", interval=0.05):
+        time.sleep(0.18)
+    assert any("vẫn đang chạy" in note for note in notes)
+    assert any("Whisper" in note for note in notes)
+
+
+def test_pipeline_reports_live_stt_and_translate_status(monkeypatch, tmp_path):
+    from app.services import pyvideotrans_service, reup_service, tts_service
+
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "output.mp4"
+    srt = tmp_path / "source.srt"
+    vi = tmp_path / "source_vi.srt"
+    source.write_bytes(b"video")
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\n你好\n", encoding="utf-8")
+    vi.write_text("1\n00:00:00,000 --> 00:00:01,000\nXin chào\n", encoding="utf-8")
+    messages = []
+
+    monkeypatch.setattr(tts_service, "get_audio_duration", lambda _path: 8.0)
+
+    def fake_stt(_self, *_args, **kwargs):
+        on_status = kwargs.get("on_status")
+        if on_status:
+            on_status("🎧 Đang nạp model Whisper 'base'...")
+        return {
+            "status": "success",
+            "srt_path": str(srt),
+            "cue_count": 1,
+            "model": "base",
+            "detected_language": "zh",
+        }
+
+    def fake_translate(_self, *_args, **kwargs):
+        on_status = kwargs.get("on_status")
+        if on_status:
+            on_status("🌐 Đang gửi 1 câu sang DeepSeek (deepseek-v4-flash)...")
+        return {"status": "success", "srt_path": str(vi), "provider": "deepseek"}
+
+    monkeypatch.setattr(pyvideotrans_service.PyVideoTransService, "speech_to_text", fake_stt)
+    monkeypatch.setattr(pyvideotrans_service.PyVideoTransService, "translate_subtitles", fake_translate)
+    monkeypatch.setattr(
+        reup_service,
+        "process_reup_video",
+        lambda **kwargs: {"output_path": kwargs["output_path"]},
+    )
+
+    result = reup_service.ReupService.process_reup_pipeline(
+        str(source),
+        ReupConfig(
+            enable_tts=False,
+            subtitle_mode="hard",
+            burn_subtitles=True,
+            source_lang="zh",
+            target_lang="vi",
+        ),
+        str(output),
+        stage_progress_callback=lambda _progress, message: messages.append(message),
+    )
+
+    assert result == str(output)
+    blob = "\n".join(messages)
+    assert "Whisper" in blob
+    assert "1 câu" in blob
+    assert "DeepSeek" in blob
+    assert "render" in blob.lower()
+
+
+def test_tts_and_inpaint_callbacks_write_activity_logs(tmp_path):
+    from app.services.queue_manager import BatchQueueManager
+
+    manager = BatchQueueManager(db_path=str(tmp_path / "jobs.sqlite"), max_concurrent_jobs=1)
+    try:
+        job_id = manager.enqueue_job("input.mp4", "output.mp4")
+        tts_cb = manager._tts_progress_callback(job_id)
+        tts_cb(0, 10)
+        tts_cb(4, 10)
+        inpaint_cb = manager._stage_progress_callback(job_id, "WATERMARK_REMOVAL")
+        inpaint_cb(0.515)
+        inpaint_cb(0.575)
+        messages = [entry["message"] for entry in manager.get_job(job_id)["logs"]]
+        assert any("Bắt đầu TTS" in message for message in messages)
+        assert any("4/10" in message for message in messages)
+        assert any("10%" in message for message in messages)
+        assert any("50%" in message for message in messages)
+    finally:
+        manager.executor.shutdown(wait=False, cancel_futures=True)

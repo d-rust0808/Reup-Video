@@ -25,6 +25,9 @@ SAMPLE_IDS = ("douyin_123", "kuaishou_456", "xiaohongshu_789")
 
 
 def _ffmpeg() -> Optional[str]:
+    env_path = os.environ.get("FFMPEG_PATH")
+    if env_path and os.path.exists(env_path):
+        return env_path
     path = shutil.which("ffmpeg")
     if path:
         return path

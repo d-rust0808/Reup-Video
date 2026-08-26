@@ -4,6 +4,28 @@ const http = require('http');
 const { spawn, spawnSync, execSync } = require('child_process');
 const fs = require('fs');
 
+function isBrokenPipeError(err) {
+  const code = err && err.code;
+  return code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || code === 'ERR_STREAM_WRITE_AFTER_END';
+}
+
+for (const stream of [process.stdout, process.stderr]) {
+  if (!stream || typeof stream.on !== 'function') continue;
+  stream.on('error', (err) => {
+    if (!isBrokenPipeError(err)) throw err;
+  });
+}
+
+process.on('uncaughtException', (err) => {
+  if (isBrokenPipeError(err)) return;
+  console.error('[Electron] Uncaught exception:', err);
+  try {
+    dialog.showErrorBox('A JavaScript error occurred in the main process', err.stack || String(err));
+  } catch {
+    // Dialog is unavailable before app ready.
+  }
+});
+
 let mainWindow = null;
 let pythonProcess = null;
 let tray = null;
@@ -47,13 +69,123 @@ if (process.platform === 'darwin') {
   process.env.PATH = Array.from(new Set([...searchPaths.filter((p) => fs.existsSync(p)), ...existingPath.split(':')])).join(':');
 }
 
+if (process.platform === 'win32') {
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  const local = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+  const searchPaths = [
+    path.join(home, '.local', 'bin'),
+    path.join(local, 'agy'),
+    path.join(local, 'Programs', 'agy'),
+    path.join(local, 'Google', 'Antigravity'),
+    path.join(local, 'Antigravity', 'cli'),
+    path.join(home, 'AppData', 'Roaming', 'npm'),
+  ];
+  const existingPath = process.env.PATH || '';
+  process.env.PATH = Array.from(new Set([...searchPaths.filter((p) => fs.existsSync(p)), ...existingPath.split(';')])).join(';');
+}
+
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 const ROOT_DIR = isDev
   ? path.resolve(__dirname, '..', '..')
   : (fs.existsSync(path.join(process.resourcesPath, 'app')) ? process.resourcesPath : path.resolve(__dirname, '..', '..'));
-const BACKEND_PORT = 8000;
+const BACKEND_PORT = 6000;
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 const ELECTRON_MANAGES_BACKEND = !isDev;
+
+function bundledWindowsPython() {
+  return path.join(process.resourcesPath, 'python', 'python.exe');
+}
+
+function pathDelimiter() {
+  return process.platform === 'win32' ? ';' : ':';
+}
+
+function bundledSitePackages() {
+  return path.join(process.resourcesPath, 'python', 'Lib', 'site-packages');
+}
+
+function applyWindowsRuntimePath() {
+  if (process.platform !== 'win32' || isDev) return;
+  const pythonDir = path.join(process.resourcesPath, 'python');
+  const ffmpegDir = path.join(process.resourcesPath, 'ffmpeg');
+  const torchLib = path.join(pythonDir, 'Lib', 'site-packages', 'torch', 'lib');
+  const extras = [pythonDir, ffmpegDir, torchLib].filter((item) => fs.existsSync(item));
+  if (extras.length) {
+    process.env.PATH = [...extras, process.env.PATH || ''].join(';');
+  }
+  const ffmpeg = path.join(ffmpegDir, 'ffmpeg.exe');
+  const ffprobe = path.join(ffmpegDir, 'ffprobe.exe');
+  if (fs.existsSync(ffmpeg)) process.env.FFMPEG_PATH = ffmpeg;
+  if (fs.existsSync(ffprobe)) process.env.FFPROBE_PATH = ffprobe;
+}
+
+function pythonPathValue() {
+  const parts = [
+    ROOT_DIR,
+    path.join(ROOT_DIR, 'app'),
+    path.resolve(__dirname, '..', '..'),
+  ];
+  const site = bundledSitePackages();
+  if (fs.existsSync(site)) parts.push(site);
+  if (process.env.PYTHONPATH) parts.push(process.env.PYTHONPATH);
+  return parts.filter(Boolean).join(pathDelimiter());
+}
+
+function patchBundledPythonPth(pythonDir) {
+  const pth = path.join(pythonDir, 'python312._pth');
+  if (!fs.existsSync(pythonDir)) return;
+  try {
+    fs.writeFileSync(
+      pth,
+      [
+        'python312.zip',
+        '.',
+        'Lib',
+        'Lib\\site-packages',
+        ROOT_DIR,
+        '..',
+        'import site',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+  } catch (err) {
+    console.warn('[Electron] Could not patch python312._pth:', err.message);
+  }
+}
+
+function writeBackendLauncher() {
+  const dir = app.getPath('userData');
+  fs.mkdirSync(dir, { recursive: true });
+  const launcher = path.join(dir, 'launch_backend.py');
+  const rootLiteral = JSON.stringify(ROOT_DIR);
+  fs.writeFileSync(
+    launcher,
+    [
+      'import os, sys',
+      'from pathlib import Path',
+      `ROOT = Path(${rootLiteral})`,
+      'os.chdir(ROOT)',
+      'sys.path.insert(0, str(ROOT))',
+      'os.environ["PYTHONPATH"] = str(ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")',
+      'import uvicorn',
+      `uvicorn.run("app.main:app", host="127.0.0.1", port=${BACKEND_PORT}, log_level="info")`,
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  return launcher;
+}
+
+function readLogTail(logFile, maxChars = 2500) {
+  try {
+    if (!fs.existsSync(logFile)) return '';
+    const text = fs.readFileSync(logFile, 'utf8');
+    return text.slice(-maxChars).trim();
+  } catch {
+    return '';
+  }
+}
 
 // --- PYTHON BACKEND LIFECYCLE ---
 
@@ -62,11 +194,12 @@ function testPythonRuntime(bin) {
   if (path.isAbsolute(bin) && !fs.existsSync(bin)) return false;
   try {
     const res = spawnSync(bin, ['-c', 'import uvicorn, fastapi; print("RUNTIME_OK")'], {
-      timeout: 4000,
+      timeout: 8000,
       encoding: 'utf-8',
       env: {
         ...process.env,
-        PYTHONPATH: [ROOT_DIR, path.join(ROOT_DIR, 'app'), path.resolve(__dirname, '..', '..')].join(process.platform === 'win32' ? ';' : ':'),
+        PYTHONPATH: pythonPathValue(),
+        PYTHONNOUSERSITE: '1',
       },
     });
     return res.status === 0 && res.stdout && res.stdout.includes('RUNTIME_OK');
@@ -123,6 +256,13 @@ function testPythonVersion(bin) {
 
 function ensureWindowsPythonRuntime() {
   if (process.platform !== 'win32' || !ELECTRON_MANAGES_BACKEND) return true;
+  applyWindowsRuntimePath();
+  const bundled = bundledWindowsPython();
+  if (fs.existsSync(bundled) && testPythonRuntime(bundled)) return true;
+  if (fs.existsSync(bundled)) {
+    console.log(`[Electron] Bundled Windows Python present at ${bundled}`);
+    return true;
+  }
   const venvPython = path.join(process.resourcesPath, 'venv', 'Scripts', 'python.exe');
   if (testPythonRuntime(venvPython)) return true;
 
@@ -162,8 +302,16 @@ function ensureWindowsPythonRuntime() {
 }
 
 function findPythonExecutable() {
-  if (process.env.PYTHON_PATH && testPythonRuntime(process.env.PYTHON_PATH)) {
+  if (process.env.PYTHON_PATH && (testPythonRuntime(process.env.PYTHON_PATH) || fs.existsSync(process.env.PYTHON_PATH))) {
     return process.env.PYTHON_PATH;
+  }
+
+  if (!isDev && process.platform === 'win32') {
+    const bundled = bundledWindowsPython();
+    if (fs.existsSync(bundled)) {
+      console.log(`[Electron] Using bundled Windows Python: ${bundled}`);
+      return bundled;
+    }
   }
 
   const home = process.env.HOME || '';
@@ -181,9 +329,11 @@ function findPythonExecutable() {
     path.join(devWorkspaceRoot, 'venv', 'bin', 'python'),
 
     // 2. ExtraResources location if bundled
+    path.join(process.resourcesPath, 'python', 'python.exe'),
     path.join(process.resourcesPath, 'venv311', 'bin', 'python'),
     path.join(process.resourcesPath, 'venv311', 'bin', 'python3'),
     path.join(process.resourcesPath, 'venv', 'bin', 'python'),
+    path.join(process.resourcesPath, 'venv', 'Scripts', 'python.exe'),
 
     // 3. User Application Support venv
     path.join(home, 'Library', 'Application Support', 'Reup-Video Studio', 'venv', 'bin', 'python'),
@@ -279,10 +429,12 @@ async function startPythonBackend() {
   }
 
   if (!ensureWindowsPythonRuntime()) return false;
+  applyWindowsRuntimePath();
   const pythonBin = findPythonExecutable();
-  console.log(`[Electron] Starting FastAPI backend with: ${pythonBin} (cwd: ${ROOT_DIR})`);
-
-  const args = ['-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT)];
+  const pythonDir = path.dirname(pythonBin);
+  patchBundledPythonPth(pythonDir);
+  const launcher = writeBackendLauncher();
+  console.log(`[Electron] Starting FastAPI backend with: ${pythonBin} ${launcher} (cwd: ${ROOT_DIR})`);
 
   const logDir = app.getPath('userData');
   if (!fs.existsSync(logDir)) {
@@ -291,25 +443,42 @@ async function startPythonBackend() {
   const logFile = path.join(logDir, 'backend.log');
   const logStream = fs.createWriteStream(logFile, { flags: 'a' });
   logStream.write(`\n--- [${new Date().toISOString()}] Starting Backend (${pythonBin}) ---\n`);
+  logStream.write(`[LAUNCHER] ${launcher}\n[ROOT] ${ROOT_DIR}\n`);
 
+  const ffmpegDir = path.join(process.resourcesPath, 'ffmpeg');
+  const torchLib = path.join(pythonDir, 'Lib', 'site-packages', 'torch', 'lib');
+  const pathExtras = [pythonDir, ffmpegDir, torchLib].filter((item) => fs.existsSync(item));
+  const cacheDir = path.join(logDir, 'cache');
+  fs.mkdirSync(cacheDir, { recursive: true });
   const pythonEnv = {
     ...process.env,
     PYTHONUNBUFFERED: '1',
-    PYTHONPATH: [
-      ROOT_DIR,
-      path.join(ROOT_DIR, 'app'),
-      path.resolve(__dirname, '..', '..'),
-      process.env.PYTHONPATH,
-    ]
-      .filter(Boolean)
-      .join(process.platform === 'win32' ? ';' : ':'),
+    PYTHONNOUSERSITE: '1',
+    PYTHONUTF8: '1',
+    PYTHONIOENCODING: 'utf-8',
+    PYTHONPATH: pythonPathValue(),
+    PATH: [...pathExtras, process.env.PATH || ''].join(pathDelimiter()),
+    PORT: String(BACKEND_PORT),
+    REUP_ROOT: ROOT_DIR,
+    HF_HOME: path.join(cacheDir, 'huggingface'),
+    HUGGINGFACE_HUB_CACHE: path.join(cacheDir, 'huggingface'),
+    TORCH_HOME: path.join(cacheDir, 'torch'),
+    XDG_CACHE_HOME: cacheDir,
+    NUMBA_CACHE_DIR: path.join(cacheDir, 'numba'),
   };
+  if (fs.existsSync(path.join(ffmpegDir, 'ffmpeg.exe'))) {
+    pythonEnv.FFMPEG_PATH = path.join(ffmpegDir, 'ffmpeg.exe');
+  }
+  if (fs.existsSync(path.join(ffmpegDir, 'ffprobe.exe'))) {
+    pythonEnv.FFPROBE_PATH = path.join(ffmpegDir, 'ffprobe.exe');
+  }
 
   try {
-    pythonProcess = spawn(pythonBin, args, {
+    pythonProcess = spawn(pythonBin, [launcher], {
       cwd: ROOT_DIR,
       env: pythonEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
     });
 
     pythonProcess.stdout.on('data', (data) => {
@@ -335,9 +504,29 @@ async function startPythonBackend() {
       pythonProcess = null;
     });
 
-    const isReady = await waitForBackend(45, 400);
+    let isReady = false;
+    for (let i = 0; i < 90; i++) {
+      if (await checkBackendHealth(800)) {
+        isReady = true;
+        break;
+      }
+      if (!pythonProcess) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
     if (!isReady) {
       console.warn('[Electron] Backend did not respond within timeout.');
+      const tail = readLogTail(logFile);
+      dialog.showErrorBox(
+        'Backend Python không chạy',
+        [
+          'Giao diện đã mở nhưng API Server đang Offline.',
+          `Python: ${pythonBin}`,
+          `Thư mục: ${ROOT_DIR}`,
+          `Log: ${logFile}`,
+          '',
+          tail || 'Chưa ghi được log. Thường do Python embeddable không import được gói app.',
+        ].join('\n'),
+      );
     }
     return isReady;
   } catch (err) {
@@ -458,13 +647,15 @@ function createTray() {
         },
       },
       {
-        label: 'Kiểm tra Backend (Port 8000)',
+        label: 'Kiểm tra Backend (Port 6000)',
         click: async () => {
           const healthy = await checkBackendHealth();
           dialog.showMessageBox({
             type: 'info',
             title: 'Trạng Thái Backend',
-            message: healthy ? 'FastAPI Backend đang hoạt động bình thường! (127.0.0.1:8000)' : 'Backend đang ngắt kết nối.',
+            message: healthy
+              ? 'FastAPI Backend đang hoạt động bình thường! (127.0.0.1:6000)'
+              : 'Backend đang ngắt kết nối. Xem backend.log trong thư mục dữ liệu ứng dụng.',
           });
         },
       },

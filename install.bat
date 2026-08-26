@@ -31,7 +31,7 @@ if %errorlevel% neq 0 (
 call npm -v >nul 2>&1
 echo   -> Đã tìm thấy Node.js & npm.
 
-REM 3. Kiểm tra FFmpeg
+REM 3. Kiểm tra FFmpeg / Google CLI (agy)
 echo [3/4] Kiểm tra FFmpeg...
 ffmpeg -version >nul 2>&1
 if %errorlevel% neq 0 (
@@ -39,6 +39,15 @@ if %errorlevel% neq 0 (
     echo    Vui lòng cài đặt FFmpeg và thêm vào PATH hệ thống để các tính năng video hoạt động trơn tru.
 ) else (
     echo   -> Đã tìm thấy FFmpeg.
+)
+
+where agy >nul 2>&1
+if %errorlevel% neq 0 (
+    echo ⚠️ Chưa thấy Google CLI `agy` trong PATH.
+    echo    Cài: curl -fsSL https://antigravity.google/cli/install.sh ^| bash
+    echo    hoặc thêm agy.exe vào PATH ^(%%LOCALAPPDATA%%\agy^).
+) else (
+    echo   -> Đã tìm thấy Google CLI agy.
 )
 
 REM 4. Khởi tạo môi trường ảo Python và cài đặt thư viện

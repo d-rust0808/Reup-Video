@@ -10,8 +10,12 @@ import {
   removeVideoFromChannel,
   fetchOutputs,
   publishFacebookReel,
+  publishTikTokVideo,
+  getMediaUrl,
 } from '../services/api';
 import { FacebookPublishingPanel } from './FacebookPublishingPanel';
+import { TikTokPublishingPanel } from './TikTokPublishingPanel';
+import { ChannelGroupsPanel } from './ChannelGroups';
 import { ConfirmModal } from './ConfirmModal';
 import { Toast } from './Toast';
 import { VideoModal } from './VideoModal';
@@ -46,6 +50,62 @@ const PLATFORMS = [
   { id: 'instagram', name: 'Instagram Reels', color: 'text-purple-600 bg-purple-50 border-purple-200' },
   { id: 'xiaohongshu', name: 'Xiaohongshu', color: 'text-rose-700 bg-rose-50 border-rose-300' },
 ];
+
+function formatCount(n) {
+  const v = Number(n) || 0;
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1).replace(/\.0$/, '')}Tr`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1).replace(/\.0$/, '')}k`;
+  return String(v);
+}
+
+function channelAvatarSrc(channel) {
+  const pageId = channel?.facebook_page_id;
+  if (pageId) return getMediaUrl(`/api/v1/facebook/pages/${pageId}/picture`);
+  const src = channel?.facebook_picture_url || channel?.tiktok_avatar_url || channel?.picture_url || '';
+  if (!src) return '';
+  if (/^https?:\/\//i.test(src)) return src;
+  return getMediaUrl(src);
+}
+
+function ChannelAvatar({ channel, size = 'md' }) {
+  const src = channelAvatarSrc(channel);
+  const [broken, setBroken] = useState(false);
+  useEffect(() => { setBroken(false); }, [src]);
+  const dim = size === 'lg' ? 'w-12 h-12 rounded-2xl' : 'w-10 h-10 rounded-xl';
+  const initials = String(channel?.name || '?').trim().slice(0, 2).toUpperCase();
+  if (src && !broken) {
+    return (
+      <img
+        src={src}
+        alt=""
+        referrerPolicy="no-referrer"
+        onError={() => setBroken(true)}
+        className={`${dim} object-cover shrink-0 bg-slate-200 shadow-xs ring-1 ring-black/5`}
+      />
+    );
+  }
+  const tone =
+    channel?.color === 'purple' ? 'bg-purple-600' :
+    channel?.color === 'emerald' ? 'bg-emerald-600' :
+    channel?.color === 'rose' ? 'bg-rose-600' :
+    channel?.color === 'amber' ? 'bg-amber-600' :
+    channel?.color === 'indigo' ? 'bg-indigo-600' : 'bg-blue-600';
+  return (
+    <div className={`${dim} ${tone} flex items-center justify-center font-black text-[11px] text-white shadow-xs shrink-0`}>
+      {initials}
+    </div>
+  );
+}
+
+function channelSubtitle(channel) {
+  if (!channel) return '';
+  const category = channel.facebook_category || channel.description || '';
+  const handle = String(channel.handle || channel.facebook_username || channel.tiktok_username || '').replace(/^@/, '');
+  const looksLikeId = /^\d{8,}$/.test(handle);
+  if (handle && !looksLikeId) return `@${handle}`;
+  if (String(channel.platform || '').toLowerCase() === 'tiktok') return 'TikTok Direct Post';
+  return category || 'Facebook Reels';
+}
 
 const COLOR_THEMES = [
   { id: 'blue', name: 'Xanh Lam', bg: 'bg-blue-500', ring: 'ring-blue-500' },
@@ -90,6 +150,7 @@ export function ChannelManager() {
     handle: '',
     tagsInput: '',
     description: '',
+    notes: '',
     color: 'blue',
   });
 
@@ -162,7 +223,7 @@ export function ChannelManager() {
   const activeChannel = channels.find((c) => c.channel_id === selectedChannelId);
 
   useEffect(() => {
-    if (!selectedChannelId || activeChannel?.platform !== 'facebook') return undefined;
+    if (!selectedChannelId || !['facebook', 'tiktok'].includes(activeChannel?.platform)) return undefined;
     const timer = window.setInterval(() => loadChannelVideos(selectedChannelId), 5000);
     return () => window.clearInterval(timer);
   }, [selectedChannelId, activeChannel?.platform, loadChannelVideos]);
@@ -179,6 +240,7 @@ export function ChannelManager() {
       handle: '',
       tagsInput: '',
       description: '',
+      notes: '',
       color: 'blue',
     });
     setShowChannelModal(true);
@@ -193,6 +255,7 @@ export function ChannelManager() {
       handle: chan.handle || '',
       tagsInput: (chan.tags || []).join(', '),
       description: chan.description || '',
+      notes: chan.notes || '',
       color: chan.color || 'blue',
     });
     setShowChannelModal(true);
@@ -213,6 +276,7 @@ export function ChannelManager() {
       handle: channelForm.handle.trim(),
       tags: tags,
       description: channelForm.description.trim(),
+      notes: (channelForm.notes || '').trim(),
       color: channelForm.color,
     };
 
@@ -361,6 +425,16 @@ export function ChannelManager() {
     }
   };
 
+  const handlePublishTikTok = async (vid) => {
+    try {
+      const result = await publishTikTokVideo(vid.id);
+      setToast({ type: 'success', title: 'Đã xếp hàng', message: result.message });
+      await loadChannelVideos(selectedChannelId);
+    } catch (err) {
+      setToast({ type: 'error', title: 'Đăng TikTok thất bại', message: err.message });
+    }
+  };
+
 
   const handleDeleteVideoConfirm = async () => {
     if (!deleteVideoTarget) return;
@@ -435,6 +509,16 @@ export function ChannelManager() {
         onChanged={handleFacebookChanged}
       />
 
+      <TikTokPublishingPanel
+        activeChannel={activeChannel}
+        onChanged={handleFacebookChanged}
+      />
+
+      <ChannelGroupsPanel
+        channels={channels}
+        onToast={setToast}
+      />
+
       {/* Main Grid: Channels Sidebar (Left) + Content Manager (Right) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left Column: Channels List */}
@@ -485,21 +569,13 @@ export function ChannelManager() {
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex items-center gap-2.5 min-w-0">
-                          <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-black text-xs text-white shadow-xs ${
-                            chan.color === 'purple' ? 'bg-purple-600' :
-                            chan.color === 'emerald' ? 'bg-emerald-600' :
-                            chan.color === 'rose' ? 'bg-rose-600' :
-                            chan.color === 'amber' ? 'bg-amber-600' :
-                            chan.color === 'indigo' ? 'bg-indigo-600' : 'bg-blue-600'
-                          }`}>
-                            {chan.name.slice(0, 2).toUpperCase()}
-                          </div>
+                          <ChannelAvatar channel={chan} />
                           <div className="min-w-0">
-                            <h4 className="text-xs font-bold text-slate-900 truncate flex items-center gap-1.5">
+                            <h4 className="text-xs font-bold text-slate-900 leading-snug line-clamp-2">
                               {chan.name}
                             </h4>
-                            <p className="text-[11px] text-slate-500 font-medium truncate">
-                              {chan.handle ? `@${chan.handle}` : plat.name}
+                            <p className="text-[11px] text-slate-500 font-medium truncate mt-0.5">
+                              {channelSubtitle(chan)}
                             </p>
                           </div>
                         </div>
@@ -526,24 +602,26 @@ export function ChannelManager() {
                         </div>
                       </div>
 
-                      {/* Tags list */}
-                      {chan.tags && chan.tags.length > 0 && (
-                        <div className="flex items-center gap-1 flex-wrap mt-2.5">
-                          {chan.tags.slice(0, 3).map((tag, idx) => (
-                            <span
-                              key={idx}
-                              className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-white text-slate-600 border border-slate-200/80 shadow-2xs"
-                            >
-                              #{tag}
-                            </span>
-                          ))}
-                          {chan.tags.length > 3 && (
-                            <span className="text-[9px] text-slate-400 font-bold">
-                              +{chan.tags.length - 3}
-                            </span>
-                          )}
-                        </div>
-                      )}
+                      <div className="flex items-center gap-1 flex-wrap mt-2.5">
+                        {(chan.facebook_fan_count > 0 || chan.facebook_followers_count > 0) ? (
+                          <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-white text-slate-600 border border-slate-200/80 shadow-2xs">
+                            {formatCount(chan.facebook_followers_count || chan.facebook_fan_count)} theo dõi
+                          </span>
+                        ) : null}
+                        {chan.facebook_auto_publish ? (
+                          <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            Tự đăng
+                          </span>
+                        ) : null}
+                        {(chan.tags || []).filter((t) => !['facebook', 'reels'].includes(String(t).toLowerCase())).slice(0, 2).map((tag, idx) => (
+                          <span
+                            key={idx}
+                            className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-white text-slate-600 border border-slate-200/80 shadow-2xs"
+                          >
+                            #{tag}
+                          </span>
+                        ))}
+                      </div>
 
                       {/* Footer Stats */}
                       <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500 mt-3 pt-2.5 border-t border-slate-200/50">
@@ -573,26 +651,44 @@ export function ChannelManager() {
             <div className="bg-white rounded-3xl border border-slate-200/90 p-5 md:p-6 shadow-xs space-y-5">
               {/* Channel Header & Summary */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-100">
-                <div className="flex items-center gap-3">
-                  <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-black text-sm text-white shadow-sm ${
-                    activeChannel.color === 'purple' ? 'bg-purple-600' :
-                    activeChannel.color === 'emerald' ? 'bg-emerald-600' :
-                    activeChannel.color === 'rose' ? 'bg-rose-600' :
-                    activeChannel.color === 'amber' ? 'bg-amber-600' :
-                    activeChannel.color === 'indigo' ? 'bg-indigo-600' : 'bg-blue-600'
-                  }`}>
-                    {activeChannel.name.slice(0, 2).toUpperCase()}
-                  </div>
-                  <div>
-                    <h3 className="text-base md:text-lg font-extrabold text-slate-900 flex items-center gap-2">
-                      {activeChannel.name}
-                      <span className="text-xs font-semibold text-slate-500">
-                        {activeChannel.handle ? `@${activeChannel.handle}` : ''}
-                      </span>
+                <div className="flex items-center gap-3 min-w-0">
+                  <ChannelAvatar channel={activeChannel} size="lg" />
+                  <div className="min-w-0">
+                    <h3 className="text-base md:text-lg font-extrabold text-slate-900 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                      <span className="truncate">{activeChannel.name}</span>
+                      {activeChannel.facebook_link ? (
+                        <a
+                          href={activeChannel.facebook_link}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-blue-600 hover:text-blue-700"
+                          title="Mở Fanpage"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </a>
+                      ) : null}
                     </h3>
-                    <p className="text-xs text-slate-500 font-medium mt-0.5">
-                      {activeChannel.description || 'Chưa có mô tả kênh.'}
+                    <p className="text-xs text-slate-500 font-medium mt-0.5 truncate">
+                      {[
+                        channelSubtitle(activeChannel),
+                        activeChannel.facebook_category,
+                        (activeChannel.facebook_followers_count || activeChannel.facebook_fan_count)
+                          ? `${formatCount(activeChannel.facebook_followers_count || activeChannel.facebook_fan_count)} theo dõi`
+                          : '',
+                      ].filter((x, i, arr) => x && arr.indexOf(x) === i).join(' · ') || 'Facebook Reels'}
                     </p>
+                    {activeChannel.facebook_about ? (
+                      <p className="text-[11px] text-slate-400 mt-1 line-clamp-2">
+                        {activeChannel.facebook_about}
+                      </p>
+                    ) : activeChannel.description && activeChannel.description !== activeChannel.facebook_category ? (
+                      <p className="text-[11px] text-slate-400 mt-1 line-clamp-2">
+                        {activeChannel.description}
+                      </p>
+                    ) : null}
+                    {activeChannel.notes ? (
+                      <p className="text-[11px] text-amber-800 mt-1 line-clamp-2">Note: {activeChannel.notes}</p>
+                    ) : null}
                   </div>
                 </div>
 
@@ -721,6 +817,9 @@ export function ChannelManager() {
                                 <span>•</span>
                                 <span>Tạo lúc: {vid.created_at?.slice(0, 16).replace('T', ' ')}</span>
                               </p>
+                              {vid.notes ? (
+                                <p className="text-[11px] text-amber-800 mt-1 line-clamp-2">Note video: {vid.notes}</p>
+                              ) : null}
                             </div>
                           </div>
 
@@ -737,6 +836,19 @@ export function ChannelManager() {
                                   ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                                   : <Send className="w-3.5 h-3.5" />}
                                 {vid.distribution_status === 'PUBLISHED' ? 'Đã đăng' : 'Đăng Reel'}
+                              </button>
+                            )}
+                            {activeChannel.platform === 'tiktok' && (
+                              <button
+                                onClick={() => handlePublishTikTok(vid)}
+                                disabled={['STARTING', 'UPLOADING', 'FINISHING', 'PROCESSING', 'PENDING', 'PUBLISHED'].includes(vid.distribution_status)}
+                                className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition flex items-center gap-1"
+                                title={vid.distribution_error || 'Đăng video này lên TikTok'}
+                              >
+                                {['STARTING', 'UPLOADING', 'FINISHING', 'PROCESSING', 'PENDING'].includes(vid.distribution_status)
+                                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  : <Send className="w-3.5 h-3.5" />}
+                                {vid.distribution_status === 'PUBLISHED' ? 'Đã đăng' : 'Đăng TikTok'}
                               </button>
                             )}
                             <select
@@ -942,6 +1054,17 @@ export function ChannelManager() {
                   onChange={(e) => setChannelForm({ ...channelForm, description: e.target.value })}
                   placeholder="Mô tả chiến lược nội dung, phong cách biên tập..."
                   className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl font-medium text-slate-900 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Note kênh (đăng bài)</label>
+                <textarea
+                  rows={2}
+                  value={channelForm.notes || ''}
+                  onChange={(e) => setChannelForm({ ...channelForm, notes: e.target.value })}
+                  placeholder="Ghi chú nội bộ: page này đăng clip xây dựng / không đăng hài..."
+                  className="w-full px-3.5 py-2 bg-amber-50/50 border border-amber-200 rounded-xl font-medium text-slate-900 focus:outline-none focus:border-amber-400"
                 />
               </div>
 

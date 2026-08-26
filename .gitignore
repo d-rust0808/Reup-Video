@@ -17,7 +17,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
 parts/
 sdist/
@@ -86,6 +86,10 @@ data/bgm/*
 !data/bgm/.gitkeep
 data/channels/*
 !data/channels/.gitkeep
+data/secrets/*
+!data/secrets/.gitkeep
+data/agy_workspace/*
+!data/agy_workspace/.keep
 
 # Module runtime temp and output directories
 app/modules/tmp/

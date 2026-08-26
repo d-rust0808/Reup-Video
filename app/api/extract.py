@@ -9,6 +9,7 @@ import shutil
 import uuid
 import json
 import logging
+import asyncio
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
@@ -36,7 +37,7 @@ class ExtractRequest(BaseModel):
 class ChannelExtractRequest(BaseModel):
     url: str = ""
     urls: Optional[List[str]] = None
-    max_videos: int = Field(default=8, ge=1, le=40)
+    max_videos: int = Field(default=8, ge=1, le=500)
     auto_reup: bool = False
     reup: Optional[Dict[str, Any]] = None
 
@@ -155,9 +156,9 @@ def _ensure_content_channel(profile: dict) -> Optional[str]:
                     nickname[:100],
                     platform,
                     handle[:120],
-                    json.dumps(["clone", "reup"], ensure_ascii=False),
+                    json.dumps([], ensure_ascii=False),
                     (profile.get("signature") or profile.get("url") or "")[:500],
-                    "pink" if platform == "douyin" else "amber",
+                    "pink" if platform == "douyin" else ("rose" if platform == "youtube" else "amber"),
                     "[]",
                     now,
                     now,
@@ -168,6 +169,34 @@ def _ensure_content_channel(profile: dict) -> Optional[str]:
     except Exception as e:
         logger.warning(f"auto-create channel skipped: {e}")
         return None
+
+
+def _disk_library_item(video_id: str, platform: str = "", title: str = "") -> Optional[dict]:
+    raw_dir = settings.RAW_INPUT_DIR
+    id_path = os.path.join(raw_dir, f"{video_id}.mp4")
+    try:
+        if not (os.path.isfile(id_path) and os.path.getsize(id_path) >= 80_000):
+            return None
+    except OSError:
+        return None
+    meta: Dict[str, Any] = {}
+    jpath = os.path.join(raw_dir, f"{video_id}.json")
+    if os.path.isfile(jpath):
+        try:
+            with open(jpath, "r", encoding="utf-8") as f:
+                meta = json.load(f) or {}
+        except Exception:
+            meta = {}
+    return {
+        "video_id": video_id,
+        "platform": meta.get("platform") or platform or "",
+        "title": meta.get("title") or title or video_id,
+        "author": meta.get("author"),
+        "file_path": os.path.abspath(id_path),
+        "direct_stream_url": f"/api/v1/videos/stream/{video_id}",
+        "cover_url": meta.get("cover_url"),
+        "duration": meta.get("duration"),
+    }
 
 
 def _items_from_metadatas(metadatas: List[VideoMetadata]) -> List[dict]:
@@ -233,7 +262,7 @@ async def extract_urls(req: ExtractRequest, request: Request):
         metadatas: List[VideoMetadata] = await scraper_mgr.download_batch(
             extracted_urls,
             output_dir=settings.RAW_INPUT_DIR,
-            ignore_errors=True
+            ignore_errors=len(extracted_urls) > 1,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -244,7 +273,7 @@ async def extract_urls(req: ExtractRequest, request: Request):
 
 @router.post("/extract/channel", response_model=dict)
 async def extract_channel(req: ChannelExtractRequest, request: Request):
-    """Clone a Douyin/Kuaishou creator: resolve profile, download videos, optionally queue reup."""
+    """Clone a Douyin/Kuaishou/YouTube creator: resolve profile, download videos, optionally queue reup."""
     chunks = [req.url or ""]
     if req.urls:
         chunks.extend(req.urls)
@@ -268,31 +297,94 @@ async def extract_channel(req: ChannelExtractRequest, request: Request):
     hint = collected.get("hint") or ""
 
     channel_id = _ensure_content_channel(profile) if profile else None
+    if profile.get("nickname") or video_ids:
+        try:
+            from app.services.content_catalog import upsert_source_catalog
+
+            upsert_source_catalog(
+                settings.DB_PATH,
+                profile=profile,
+                platform=platform,
+                url=collected.get("channel_url") or blob.splitlines()[0].strip(),
+                video_ids=video_ids,
+                catalog=collected.get("catalog") or [],
+            )
+        except Exception as catalog_err:
+            logger.warning("content catalog upsert skipped: %s", catalog_err)
 
     scraper_mgr = getattr(request.app.state, "scraper_manager", None)
     if scraper_mgr is None:
         scraper_mgr = ScraperManager(output_dir=settings.RAW_INPUT_DIR)
 
-    download_urls = [video_page_url(vid, platform) for vid in video_ids]
-    metadatas: List[VideoMetadata] = []
-    if download_urls:
-        try:
-            metadatas = await scraper_mgr.download_batch(
-                download_urls,
-                output_dir=settings.RAW_INPUT_DIR,
-                ignore_errors=True,
-            )
-        except Exception as e:
-            logger.warning(f"channel download_batch failed: {e}")
-            metadatas = []
+    catalog = collected.get("catalog") or []
+    titles = {str(row.get("video_id")): str(row.get("title") or "") for row in catalog if row.get("video_id")}
 
-    items = _items_from_metadatas(metadatas)
+    already: List[dict] = []
+    pending_ids: List[str] = []
+    for vid in video_ids:
+        existing = _disk_library_item(vid, platform, titles.get(vid, ""))
+        if existing:
+            already.append(existing)
+        else:
+            pending_ids.append(vid)
+
+    download_urls = [video_page_url(vid, platform) for vid in pending_ids]
+    metadatas: List[VideoMetadata] = []
+    background = False
+    concurrency = 2 if platform == "youtube" else 4
+
+    async def _run_download() -> List[VideoMetadata]:
+        if not download_urls:
+            return []
+        return await scraper_mgr.download_batch(
+            download_urls,
+            output_dir=settings.RAW_INPUT_DIR,
+            ignore_errors=True,
+            concurrency=concurrency,
+        )
+
+    if download_urls:
+        # A full YouTube channel (100+ clips) must not block the HTTP request.
+        if platform == "youtube" and len(download_urls) > 8 and not req.auto_reup:
+            background = True
+
+            async def _bg() -> None:
+                try:
+                    await _run_download()
+                    logger.info(
+                        "Background channel download finished: %s pending=%s",
+                        platform,
+                        len(download_urls),
+                    )
+                except Exception:
+                    logger.exception("Background channel download failed")
+
+            tasks = getattr(request.app.state, "background_downloads", None)
+            if tasks is None:
+                tasks = set()
+                request.app.state.background_downloads = tasks
+            task = asyncio.create_task(_bg(), name=f"channel-dl-{platform}-{len(download_urls)}")
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
+        else:
+            try:
+                metadatas = await _run_download()
+            except Exception as e:
+                logger.warning(f"channel download_batch failed: {e}")
+                metadatas = []
+
+    items = already + _items_from_metadatas(metadatas)
     playable = []
+    seen_play = set()
     for item in items:
+        vid = item.get("video_id")
+        if vid in seen_play:
+            continue
         path = item.get("file_path") or ""
         try:
             if path and os.path.isfile(path) and os.path.getsize(path) >= 80_000:
                 playable.append(item)
+                seen_play.add(vid)
         except OSError:
             continue
 
@@ -325,10 +417,18 @@ async def extract_channel(req: ChannelExtractRequest, request: Request):
     message = ""
     if jobs:
         message = f"Đã tải {len(playable)} video và xếp {len(jobs)} job reup vào hàng chờ."
+    elif background:
+        have = len(playable)
+        message = (
+            f"Đã nhận {len(video_ids)} video từ kênh «{profile.get('nickname') or platform}». "
+            f"Đang tải {len(pending_ids)} file vào thư viện (chạy nền, {concurrency} luồng). "
+            + (f"Đã có sẵn {have} clip. " if have else "")
+            + "Danh sách sẽ đầy dần — không cần bấm lại."
+        )
     elif playable:
         message = f"Đã tải {len(playable)} video từ kênh. Bật «Reup luôn» để xếp hàng xử lý."
     elif video_ids:
-        message = "Đã thấy ID video nhưng chưa tải được file. Thử dán link ngắn v.douyin.com."
+        message = "Đã thấy ID video nhưng chưa tải được file. Thử dán link watch đầy đủ (YouTube) hoặc link ngắn v.douyin.com."
     else:
         message = hint or "Chưa lấy được danh sách video của kênh."
 
@@ -338,6 +438,9 @@ async def extract_channel(req: ChannelExtractRequest, request: Request):
         "channel_url": collected.get("channel_url"),
         "platform": platform,
         "video_ids": video_ids,
+        "catalog": catalog,
+        "pending_ids": pending_ids if background else [],
+        "pending_count": len(pending_ids) if background else 0,
         "items": playable or items,
         "count": len(playable or items),
         "jobs": jobs,
@@ -366,7 +469,13 @@ async def list_library():
     for name in names:
         stem = name[:-4]
         m = re.search(r"(?:^|_)(\d{8,})", stem)
-        canonical = m.group(1) if m else stem
+        yt_named = re.match(r"youtube_([A-Za-z0-9_-]{11})_", stem)
+        if m:
+            canonical = m.group(1)
+        elif yt_named:
+            canonical = yt_named.group(1)
+        else:
+            canonical = stem
         fpath_canon = os.path.join(raw_dir, f"{canonical}.mp4")
         fpath = fpath_canon if os.path.isfile(fpath_canon) else os.path.join(raw_dir, name)
         if canonical in seen:
@@ -424,7 +533,13 @@ async def delete_library_video(video_id: str, request: Request = None):
     for name in os.listdir(raw_dir) if os.path.isdir(raw_dir) else []:
         stem, ext = os.path.splitext(name)
         canonical_match = re.search(r"(?:^|_)(\d{8,})", stem)
-        canonical = canonical_match.group(1) if canonical_match else stem.split(".")[0]
+        yt_named = re.match(r"youtube_([A-Za-z0-9_-]{11})_", stem)
+        if canonical_match:
+            canonical = canonical_match.group(1)
+        elif yt_named:
+            canonical = yt_named.group(1)
+        else:
+            canonical = stem.split(".")[0]
         if canonical != safe_id and stem != safe_id and not stem.startswith(f"{safe_id}."):
             continue
         path = os.path.abspath(os.path.join(raw_dir, name))

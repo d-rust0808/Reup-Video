@@ -6,6 +6,7 @@ import { VideoWorkbench } from './components/VideoWorkbench';
 import { BatchQueue } from './components/BatchQueue';
 import { OutputGallery } from './components/OutputGallery';
 import { ChannelManager } from './components/ChannelManager';
+import { ContentManager } from './components/ContentManager';
 import { fetchJobs, fetchOutputs, fetchLibrary } from './services/api';
 import { WebSocketClient } from './services/websocket';
 import { loadSession, saveSession, hydrateSession } from './services/session';
@@ -18,7 +19,7 @@ function mergeMedia(a = [], b = []) {
   return Array.from(map.values());
 }
 
-const AVAILABLE_TABS = new Set(['extract', 'workbench', 'queue', 'gallery', 'channels']);
+const AVAILABLE_TABS = new Set(['extract', 'workbench', 'queue', 'gallery', 'content', 'channels']);
 
 function normalizeActiveTab(tab) {
   return AVAILABLE_TABS.has(tab) ? tab : 'extract';
@@ -45,6 +46,16 @@ export default function App() {
       extractedMediaList,
     });
   }, [activeTab, collapsed, selectedMedia, extractedMediaList]);
+
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 1199px)');
+    const collapseIfNarrow = () => {
+      if (mq.matches) setCollapsed(true);
+    };
+    collapseIfNarrow();
+    mq.addEventListener('change', collapseIfNarrow);
+    return () => mq.removeEventListener('change', collapseIfNarrow);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -118,6 +129,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!wsUpdate) return;
+    const status = String(wsUpdate.status || wsUpdate.stage || '').toUpperCase();
+    if (status === 'COMPLETED') {
+      window.dispatchEvent(new Event('reup:channels-changed'));
+      updateCounts();
+    }
+  }, [wsUpdate, updateCounts]);
+
+  useEffect(() => {
     const handleKeyDown = (e) => {
       if (!(e.ctrlKey || e.metaKey)) return;
       if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
@@ -135,6 +155,9 @@ export default function App() {
         e.preventDefault();
         setActiveTab('gallery');
       } else if (e.key === '5') {
+        e.preventDefault();
+        setActiveTab('content');
+      } else if (e.key === '6') {
         e.preventDefault();
         setActiveTab('channels');
       } else if (e.key.toLowerCase() === 'b') {
@@ -166,8 +189,10 @@ export default function App() {
         return 'Hàng Chờ Xử Lý Realtime';
       case 'gallery':
         return 'Thư Viện Video Thành Phẩm';
+      case 'content':
+        return 'Quản Lý Nội Dung Nguồn';
       case 'channels':
-        return 'Kênh & Quản Lý Nội Dung';
+        return 'Fanpage & Đăng Bài';
       default:
         return 'Reup Studio';
     }
@@ -195,7 +220,7 @@ export default function App() {
           outputCount={outputCount}
         />
 
-        <main className="p-6 md:p-8 max-w-7xl w-full mx-auto space-y-6">
+        <main className="p-4 sm:p-6 xl:p-8 max-w-7xl w-full mx-auto space-y-6 min-w-0">
           <div className={activeTab === 'extract' ? '' : 'hidden'}>
             <UrlExtractor
               initialMedia={extractedMediaList}
@@ -218,6 +243,10 @@ export default function App() {
 
           <div className={activeTab === 'gallery' ? '' : 'hidden'}>
             <OutputGallery />
+          </div>
+
+          <div className={activeTab === 'content' ? '' : 'hidden'}>
+            <ContentManager onSelectForWorkbench={handleSelectForWorkbench} />
           </div>
 
           <div className={activeTab === 'channels' ? '' : 'hidden'}>

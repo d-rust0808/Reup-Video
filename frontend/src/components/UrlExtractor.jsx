@@ -143,7 +143,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
       setError(
         mode === 'video'
           ? 'Vui lòng nhập đường link hoặc văn bản chia sẻ của 1 video.'
-          : 'Dán URL kênh Douyin/Kuaishou, hoặc dán nhiều link video (mỗi dòng một link).'
+          : 'Dán URL kênh Douyin/Kuaishou/YouTube, playlist YouTube, hoặc dán nhiều link video (mỗi dòng một link).'
       );
       return;
     }
@@ -180,6 +180,11 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             bgm_path: opts.bgm_path || opts.bgm_id,
             bgm_volume: opts.bgm_volume ?? 0.85,
             channel_id: opts.channel_id,
+            channel_ids: opts.channel_ids || (opts.channel_id ? [opts.channel_id] : []),
+            group_ids: opts.group_ids || [],
+            video_note: opts.video_note || '',
+            post_intent: opts.post_intent || '',
+            agy_write_post: opts.agy_write_post !== false,
             wm_method: opts.wm_method,
           },
         });
@@ -187,24 +192,50 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
         setChannelProfile(result.profile || null);
         setChannelMessage(result.message || '');
         setQueuedJobs(result.jobs || []);
-        if (items.length) {
+        const mergeItems = (incoming) => {
+          if (!incoming?.length) return;
           setExtractedList((prev) => {
             const map = new Map();
-            [...items, ...prev].forEach((item) => {
+            [...incoming, ...prev].forEach((item) => {
               if (item?.video_id && !map.has(item.video_id)) map.set(item.video_id, item);
             });
-            const next = Array.from(map.values());
-            onMediaExtracted?.(next);
-            return next;
+            return Array.from(map.values());
           });
-        }
-        if (!items.length && result.hint) {
+        };
+        mergeItems(items);
+        if (!items.length && result.hint && !result.pending_count) {
           setError(result.hint);
         }
         if ((result.jobs || []).length) {
           onJobsQueued?.(result.jobs);
         }
         refreshRecent();
+        const pendingIds = result.pending_ids || [];
+        if (pendingIds.length) {
+          const left = new Set(pendingIds);
+          const started = Date.now();
+          const poll = async () => {
+            try {
+              const lib = await fetchLibrary();
+              const got = (lib.items || []).filter((it) => left.has(it.video_id));
+              got.forEach((it) => left.delete(it.video_id));
+              mergeItems(got);
+              refreshRecent();
+              const done = pendingIds.length - left.size;
+              setChannelMessage(
+                left.size
+                  ? `Đang tải kênh: ${done}/${pendingIds.length} video đã vào thư viện...`
+                  : `Đã tải đủ ${pendingIds.length} video từ kênh vào thư viện.`
+              );
+            } catch {
+              /* keep polling */
+            }
+            if (left.size && Date.now() - started < 3 * 60 * 60 * 1000) {
+              window.setTimeout(poll, 5000);
+            }
+          };
+          window.setTimeout(poll, 4000);
+        }
         return;
       }
 
@@ -216,7 +247,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
       const items = result.items || [];
       if (items.length === 0) {
         setError(
-          'Không tìm thấy hoặc không tải được video từ đường link này. Hệ thống hiện hỗ trợ bóc tách Douyin, Kuaishou, Xiaohongshu hoặc bạn có thể bấm "Tải File Từ Máy" để nạp video trực tiếp.'
+          'Không tìm thấy hoặc không tải được video từ đường link này. Hệ thống hiện hỗ trợ bóc tách Douyin, Kuaishou, Xiaohongshu, YouTube hoặc bạn có thể bấm "Tải File Từ Máy" để nạp video trực tiếp.'
         );
         return;
       }
@@ -226,7 +257,6 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
           if (item?.video_id && !map.has(item.video_id)) map.set(item.video_id, item);
         });
         const next = Array.from(map.values());
-        onMediaExtracted?.(next);
         return next;
       });
 
@@ -259,7 +289,6 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
       };
       setExtractedList((prev) => {
         const next = [newMedia, ...prev.filter((x) => x.video_id !== newMedia.video_id)];
-        onMediaExtracted?.(next);
         return next;
       });
       refreshRecent();
@@ -308,6 +337,9 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             speed_ratio: opts.speed_ratio || 1.03,
             pitch_shift: opts.pitch_shift !== false,
             crop_percent: (Number(opts.crop_percent) || 2) / 100,
+            subtitle_bottom_crop: (Number(opts.subtitle_bottom_crop) || 0) / 100,
+            caption_cover: opts.caption_cover || 'off',
+            caption_cover_image: opts.caption_cover_image || '',
             film_grain: opts.film_grain ?? 3,
             modify_md5: opts.modify_md5 !== false,
             enable_vocal_mute: enableVocalMute,
@@ -323,7 +355,12 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             tts_engine: opts.tts_engine || 'vieneu',
             target_lang: 'vi',
             channel_id: opts.channel_id,
-            post_title: item.title,
+            channel_ids: opts.channel_ids || (opts.channel_id ? [opts.channel_id] : []),
+            group_ids: opts.group_ids || [],
+            video_note: opts.video_note || '',
+            post_title: opts.post_title || item.title,
+            post_intent: opts.post_intent || '',
+            agy_write_post: opts.agy_write_post !== false,
             target_platforms: opts.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
             bgm_path: opts.bgm_path || opts.bgm_id,
             bgm_volume: opts.bgm_volume ?? 0.85,
@@ -377,6 +414,14 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             Xiaohongshu (小红书)
           </span>
         );
+      case 'youtube':
+      case 'yt':
+      case 'youtube_shorts':
+        return (
+          <span className="px-2.5 py-1 text-xs font-extrabold rounded-lg bg-rose-50 text-rose-700 border border-rose-200">
+            YouTube
+          </span>
+        );
       case 'upload':
         return (
           <span className="px-2.5 py-1 text-xs font-extrabold rounded-lg bg-purple-50 text-purple-700 border border-purple-200">
@@ -407,7 +452,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
               Xoá Sạch Logo, Text Cũ & Biến Đổi Bản Quyền Video AI
             </h2>
             <p className="text-sm text-blue-50 font-medium leading-relaxed">
-              Bóc tách tự động link Douyin, Kuaishou, Xiaohongshu hoặc tải video từ máy tính với công nghệ AI Inpainting FFC LaMa và OpenCV Navier-Stokes.
+              Bóc tách tự động link Douyin, Kuaishou, Xiaohongshu, YouTube hoặc tải video từ máy tính với công nghệ AI Inpainting FFC LaMa và OpenCV Navier-Stokes.
             </p>
 
             <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -533,7 +578,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
                 onChange={(e) => setInputUrl(e.target.value)}
                 rows={5}
                 className="w-full bg-slate-50 border border-slate-300 focus:border-blue-500 focus:bg-white rounded-2xl pl-12 pr-4 py-3.5 text-sm text-slate-900 placeholder-slate-400 focus:ring-3 focus:ring-blue-500/10 outline-none font-mono transition shadow-inner resize-y min-h-[120px]"
-                placeholder={'Dán URL kênh + (nếu cần) vài link video, mỗi dòng một link:\nhttps://www.douyin.com/user/MS4wLjAB...\nhttps://www.douyin.com/jingxuan?modal_id=7671...\nhttps://v.douyin.com/xxxx/'}
+                placeholder={'Dán URL kênh / playlist + (nếu cần) vài link video, mỗi dòng một link:\nhttps://www.youtube.com/playlist?list=...\nhttps://www.youtube.com/@kenh/videos\nhttps://www.douyin.com/user/MS4wLjAB...\nhttps://v.douyin.com/xxxx/'}
               />
             ) : (
               <input
@@ -542,7 +587,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
                 value={inputUrl}
                 onChange={(e) => setInputUrl(e.target.value)}
                 className="w-full bg-slate-50 border border-slate-300 focus:border-blue-500 focus:bg-white rounded-2xl pl-12 pr-4 py-3.5 text-sm text-slate-900 placeholder-slate-400 focus:ring-3 focus:ring-blue-500/10 outline-none font-mono transition shadow-inner"
-                placeholder="Dán 1 link video tại đây (ví dụ: https://v.douyin.com/xyz123/ hoặc đoạn chia sẻ)..."
+                placeholder="Dán 1 link video tại đây (Douyin, Kuaishou, Xiaohongshu, YouTube watch/shorts)..."
               />
             )}
           </div>
@@ -571,6 +616,10 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
                   <option value={8}>8 video</option>
                   <option value={12}>12 video</option>
                   <option value={20}>20 video</option>
+                  <option value={50}>50 video</option>
+                  <option value={100}>100 video</option>
+                  <option value={200}>200 video</option>
+                  <option value={500}>Toàn bộ kênh</option>
                 </select>
               </label>
               <label className="flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer">
@@ -613,6 +662,9 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
               </span>
               <span className="px-2.5 py-1 text-xs font-extrabold rounded-lg bg-red-50 text-red-700 border border-red-200 flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span> Xiaohongshu
+              </span>
+              <span className="px-2.5 py-1 text-xs font-extrabold rounded-lg bg-rose-50 text-rose-700 border border-rose-200 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-rose-600"></span> YouTube
               </span>
             </div>
 
@@ -678,7 +730,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
           <div className="min-w-0 flex-1 space-y-1">
             <div className="flex flex-wrap items-center gap-2">
               <h3 className="text-base font-black text-slate-900 truncate">
-                {channelProfile.nickname || 'Kênh Douyin'}
+                {channelProfile.nickname || (channelProfile.platform === 'youtube' ? 'Kênh YouTube' : 'Kênh Douyin')}
               </h3>
               {getPlatformBadge(channelProfile.platform || 'douyin')}
             </div>

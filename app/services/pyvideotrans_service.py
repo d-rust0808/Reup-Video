@@ -10,10 +10,12 @@ Target Path: app/services/pyvideotrans_service.py
 import os
 import re
 import sys
+import json
+import hashlib
 import logging
 import subprocess
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Callable, Dict, Any, Optional, List
 
 from app.modules.videotrans.runner import PyVideoTransRunner
 
@@ -61,6 +63,24 @@ def _translation_matches_target(text: Optional[str], target_lang: str) -> bool:
     if lang == "vi" and _contains_cjk(text or ""):
         return False
     return True
+
+
+def _is_ai_unavailable_error(reason: Optional[str]) -> bool:
+    """True when a configured LLM cannot be used (auth/billing), so fallbacks may run."""
+    text = (reason or "").lower()
+    if not text:
+        return False
+    return any(
+        token in text
+        for token in (
+            "http 401",
+            "http 402",
+            "http 403",
+            "payment required",
+            "không còn quota",
+            "từ chối xác thực",
+        )
+    )
 
 
 _DETACHED_CJK_PARTICLES = {
@@ -141,6 +161,76 @@ def subtitle_matches_target_language(srt_path: Optional[str], target_lang: str =
     except (OSError, UnicodeError):
         return False
     return bool(text_lines) and all(_translation_matches_target(line, target_lang) for line in text_lines)
+
+
+def _cues_to_srt(segments: List[Dict[str, Any]], out_srt: str) -> str:
+    """Write cue dicts to an SRT file, skipping empty texts."""
+    from app.services.tts_service import format_srt_timestamp
+
+    blocks: List[str] = []
+    index = 1
+    for segment in segments:
+        text = str(segment.get("text") or "").strip()
+        if not text:
+            continue
+        start = float(segment.get("start_time") or 0.0)
+        end = max(start + 0.2, float(segment.get("end_time") or 0.0))
+        blocks.append(
+            f"{index}\n{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}\n{text}\n"
+        )
+        index += 1
+    os.makedirs(os.path.dirname(os.path.abspath(out_srt)) or ".", exist_ok=True)
+    with open(out_srt, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(blocks) + ("\n" if blocks else ""))
+    return out_srt
+
+
+def _google_translate_segments(
+    segments: List[Dict[str, Any]],
+    target_lang: str,
+    on_status: Optional[Callable[[str], None]] = None,
+) -> tuple[List[Dict[str, Any]], int]:
+    """Translate merged ASR cues with Google. Drop leftover source-language lines instead of failing all."""
+    from deep_translator import GoogleTranslator
+    from app.services.activity import emit_status
+
+    if not segments:
+        return [], 0
+    translator = GoogleTranslator(source="auto", target=target_lang or "vi")
+    emit_status(on_status, f"🌐 Google Translate: {len(segments)} câu...")
+    texts = [str(segment.get("text") or "").strip() for segment in segments]
+    translated: List[Optional[str]] = [None] * len(texts)
+    chunk_size = 8
+    for start in range(0, len(texts), chunk_size):
+        chunk = texts[start:start + chunk_size]
+        try:
+            blob = translator.translate("\n".join(chunk))
+            parts = [part.strip() for part in str(blob or "").split("\n") if part.strip()]
+            if len(parts) != len(chunk):
+                raise ValueError("translated line count mismatch")
+            for offset, part in enumerate(parts):
+                translated[start + offset] = part
+        except Exception:
+            for offset, source in enumerate(chunk):
+                try:
+                    translated[start + offset] = translator.translate(source)
+                except Exception:
+                    translated[start + offset] = None
+        emit_status(
+            on_status,
+            f"🌐 Google Translate {min(start + chunk_size, len(texts))}/{len(texts)} câu...",
+        )
+
+    kept: List[Dict[str, Any]] = []
+    skipped = 0
+    for segment, text in zip(segments, translated):
+        if _translation_matches_target(text, target_lang):
+            cue = dict(segment)
+            cue["text"] = str(text).strip()
+            kept.append(cue)
+        else:
+            skipped += 1
+    return kept, skipped
 
 
 class PyVideoTransError(Exception):
@@ -240,6 +330,89 @@ class PyVideoTransService:
         folder = os.path.join(download_root, f"models--Systran--faster-whisper-{name}")
         return os.path.isdir(folder)
 
+    def _stt_cache_dir(self) -> str:
+        try:
+            from app.config import settings
+            root = settings.CACHE_DIR
+            if not os.path.isabs(root):
+                root = os.path.join(str(settings.BASE_DIR), root)
+            path = os.path.join(os.path.abspath(root), "stt")
+        except Exception:
+            path = os.path.abspath(os.path.join(PROJECT_ROOT, "data", "cache", "stt"))
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _stt_cache_key(
+        self,
+        video_or_audio_path: str,
+        detect_lang: Optional[str],
+        model_name: str,
+        max_seconds: Optional[float],
+    ) -> str:
+        try:
+            st = os.stat(video_or_audio_path)
+            stamp = f"{int(st.st_mtime)}:{st.st_size}"
+        except OSError:
+            stamp = "missing"
+        payload = "|".join(
+            [
+                os.path.abspath(video_or_audio_path),
+                stamp,
+                str(detect_lang or "auto"),
+                str(model_name or "base"),
+                str(max_seconds or ""),
+            ]
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+    def _stt_cache_load(self, key: str, dest_srt: str) -> Optional[Dict[str, Any]]:
+        cache_dir = self._stt_cache_dir()
+        srt_src = os.path.join(cache_dir, f"{key}.srt")
+        meta_src = os.path.join(cache_dir, f"{key}.json")
+        if not (os.path.isfile(srt_src) and os.path.getsize(srt_src) > 32):
+            return None
+        try:
+            os.makedirs(os.path.dirname(dest_srt), exist_ok=True)
+            with open(srt_src, "r", encoding="utf-8") as src, open(dest_srt, "w", encoding="utf-8") as dst:
+                dst.write(src.read())
+            meta: Dict[str, Any] = {}
+            if os.path.isfile(meta_src):
+                meta = json.loads(Path(meta_src).read_text(encoding="utf-8"))
+            cue_count = int(meta.get("cue_count") or 0)
+            if cue_count <= 0:
+                cue_count = len(re.findall(r"^\d+\s*$", Path(dest_srt).read_text(encoding="utf-8"), re.M))
+            return {
+                "status": "success",
+                "srt_path": dest_srt,
+                "detected_language": meta.get("detected_language"),
+                "model": meta.get("model") or "cache",
+                "cue_count": cue_count,
+                "cached": True,
+            }
+        except Exception as exc:
+            logger.warning(f"STT cache load failed: {exc}")
+            return None
+
+    def _stt_cache_store(self, key: str, srt_path: str, info: Dict[str, Any]) -> None:
+        cache_dir = self._stt_cache_dir()
+        try:
+            dest = os.path.join(cache_dir, f"{key}.srt")
+            with open(srt_path, "r", encoding="utf-8") as src, open(dest, "w", encoding="utf-8") as dst:
+                dst.write(src.read())
+            Path(os.path.join(cache_dir, f"{key}.json")).write_text(
+                json.dumps(info, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning(f"STT cache store failed: {exc}")
+
+    def _media_duration_sec(self, path: str) -> float:
+        try:
+            from app.services.tts_service import get_audio_duration
+            return float(get_audio_duration(path) or 0.0)
+        except Exception:
+            return 0.0
+
     def _extract_stt_wav(self, video_or_audio_path: str, target_dir: str, max_seconds: Optional[float] = None) -> str:
         """Extract 16 kHz mono WAV so Whisper does not decode the full video."""
         from app.services.audio_service import find_ffmpeg_binary
@@ -323,8 +496,11 @@ class PyVideoTransService:
         recogn_type: int = 0,
         detect_lang: str = "auto",
         max_seconds: Optional[float] = None,
+        on_status: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         """Performs Speech-to-Text (STT) transcription with cached faster-whisper."""
+        from app.services.activity import emit_status
+
         if not os.path.exists(video_or_audio_path):
             raise FileNotFoundError(f"Input file not found: {video_or_audio_path}")
 
@@ -342,15 +518,43 @@ class PyVideoTransService:
             if name not in model_candidates:
                 model_candidates.append(name)
 
+        base_stem = os.path.splitext(os.path.basename(video_or_audio_path))[0]
+        srt_path = os.path.join(target_dir, f"{base_stem}.srt")
+        cache_key = self._stt_cache_key(video_or_audio_path, w_lang, requested, max_seconds)
+        cached = self._stt_cache_load(cache_key, srt_path)
+        if cached:
+            emit_status(
+                on_status,
+                f"🎧 Dùng lại Whisper đã nhận trước đó ({cached.get('cue_count') or 0} câu) — bỏ qua nhận dạng lại.",
+            )
+            return cached
+
+        emit_status(on_status, "🎧 Đang tách audio WAV cho Whisper...")
         audio_for_stt = self._extract_stt_wav(video_or_audio_path, target_dir, max_seconds=max_seconds)
         tmp_wav = audio_for_stt if audio_for_stt != video_or_audio_path else None
+        audio_dur = self._media_duration_sec(audio_for_stt)
 
         try:
             from app.services.performance import gpu_task_slot
             with gpu_task_slot(enabled=device == "cuda"):
+                emit_status(
+                    on_status,
+                    f"🎧 Đang nạp model Whisper '{requested}' ({device}/{compute_type})...",
+                )
                 fw_model, used_name = self._load_whisper_model(model_candidates, device, compute_type)
                 logger.info(f"STT using faster-whisper '{used_name}' device={device} lang={w_lang or 'auto'}")
-                segments, info = fw_model.transcribe(
+                if audio_dur >= 120 and device == "cpu":
+                    eta = "3–10 phút trên CPU vì audio dài"
+                elif audio_dur >= 120:
+                    eta = "1–3 phút"
+                else:
+                    eta = "30–90s"
+                dur_note = f", audio {int(audio_dur)}s" if audio_dur > 0 else ""
+                emit_status(
+                    on_status,
+                    f"🎧 Whisper '{used_name}' đang nhận dạng lời thoại (lang={w_lang or 'auto'}{dur_note}) — {eta}...",
+                )
+                segments_iter, info = fw_model.transcribe(
                     audio_for_stt,
                     language=w_lang,
                     vad_filter=True,
@@ -359,10 +563,25 @@ class PyVideoTransService:
                     condition_on_previous_text=False,
                     word_timestamps=True,
                 )
-                # faster-whisper yields lazily; materialize while the GPU slot is held.
-                segments = list(segments)
-            base_stem = os.path.splitext(os.path.basename(video_or_audio_path))[0]
-            srt_path = os.path.join(target_dir, f"{base_stem}.srt")
+                # faster-whisper yields lazily; drain here so cancel/progress can run between cues.
+                segments = []
+                last_emit_end = -30.0
+                for seg in segments_iter:
+                    segments.append(seg)
+                    end = float(getattr(seg, "end", 0.0) or 0.0)
+                    if end - last_emit_end >= 20 or len(segments) == 1:
+                        last_emit_end = end
+                        if audio_dur > 0:
+                            pct = max(0, min(100, int(end * 100 / audio_dur)))
+                            emit_status(
+                                on_status,
+                                f"🎧 Whisper đã nhận {len(segments)} câu (~{end:.0f}/{audio_dur:.0f}s, {pct}%)...",
+                            )
+                        else:
+                            emit_status(
+                                on_status,
+                                f"🎧 Whisper đã nhận {len(segments)} câu (~{end:.0f}s audio)...",
+                            )
             words = []
             seg_list = []
             for seg in segments:
@@ -388,6 +607,15 @@ class PyVideoTransService:
             detected = getattr(info, "language", None)
             if count > 0 and os.path.exists(srt_path) and os.path.getsize(srt_path) > 0:
                 logger.info(f"STT wrote {count} cues ({detected}) -> {srt_path}")
+                self._stt_cache_store(
+                    cache_key,
+                    srt_path,
+                    {
+                        "detected_language": detected,
+                        "model": used_name,
+                        "cue_count": count,
+                    },
+                )
                 return {
                     "status": "success",
                     "srt_path": srt_path,
@@ -416,6 +644,209 @@ class PyVideoTransService:
                 except OSError:
                     pass
 
+    def _subtitle_translator_engine(self) -> str:
+        from app.config import settings
+
+        raw = (
+            os.getenv("SUBTITLE_TRANSLATOR")
+            or getattr(settings, "SUBTITLE_TRANSLATOR", "")
+            or "google"
+        )
+        engine = str(raw).strip().lower()
+        if engine in ("ai", "llm", "api"):
+            return "deepseek"
+        if engine in ("agy", "antigravity", "gemini"):
+            return "agy"
+        if engine in ("google", "cli", "deepseek"):
+            return engine
+        return "agy"
+
+    def _translate_with_agy(
+        self,
+        subtitle_file_path: str,
+        target_lang: str,
+        target_dir: str,
+        title: str = "",
+        on_status: Optional[Callable[[str], None]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        from app.services import agy_cli_service
+        from app.services.tts_service import parse_srt_segments
+
+        if not agy_cli_service.is_available():
+            return None
+        cues = _merge_fragmented_cues(parse_srt_segments(subtitle_file_path))
+        texts = [str(cue.get("text") or "").strip() for cue in cues]
+        if not any(texts):
+            return None
+        translated = agy_cli_service.translate_cues(
+            texts,
+            target_lang=target_lang,
+            title=title,
+            on_status=on_status,
+        )
+        if len(translated) != len(cues):
+            return None
+        kept: List[Dict[str, Any]] = []
+        skipped = 0
+        for cue, text in zip(cues, translated):
+            if _translation_matches_target(text, target_lang):
+                item = dict(cue)
+                item["text"] = text.strip()
+                kept.append(item)
+            else:
+                skipped += 1
+        min_keep = max(1, int(len(cues) * 0.5)) if cues else 1
+        if not (kept and len(kept) >= min_keep):
+            return None
+        base_stem = os.path.splitext(os.path.basename(subtitle_file_path))[0]
+        out_srt = os.path.join(target_dir, f"{base_stem}_{target_lang}.srt")
+        _cues_to_srt(kept, out_srt)
+        warning = ""
+        if skipped:
+            warning = f"Google CLI dịch được {len(kept)}/{len(cues)} câu; đã bỏ {skipped} câu còn tiếng gốc."
+        return {
+            "status": "success",
+            "srt_path": out_srt,
+            "provider": "agy",
+            "warning": warning or None,
+        }
+
+    def _translate_with_google(
+        self,
+        subtitle_file_path: str,
+        target_lang: str,
+        target_dir: str,
+        on_status: Optional[Callable[[str], None]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        from app.services.activity import emit_status
+        from app.services.tts_service import parse_srt_segments
+
+        source_cues = _merge_fragmented_cues(parse_srt_segments(subtitle_file_path))
+        kept, skipped = _google_translate_segments(source_cues, target_lang, on_status=on_status)
+        min_keep = max(1, int(len(source_cues) * 0.35)) if source_cues else 1
+        if not (kept and len(kept) >= min_keep):
+            emit_status(on_status, "⚠️ Google Translate không đủ câu tiếng Việt.")
+            return None
+        base_stem = os.path.splitext(os.path.basename(subtitle_file_path))[0]
+        out_srt = os.path.join(target_dir, f"{base_stem}_{target_lang}.srt")
+        _cues_to_srt(kept, out_srt)
+        warning = ""
+        if skipped:
+            warning = f"Google dịch được {len(kept)}/{len(source_cues)} câu; đã bỏ {skipped} câu còn tiếng gốc."
+            emit_status(on_status, f"⚠️ {warning}")
+        else:
+            emit_status(on_status, f"✅ Google Translate xong {len(kept)} câu.")
+        return {
+            "status": "success",
+            "srt_path": out_srt,
+            "provider": "google",
+            "warning": warning or None,
+        }
+
+    def _translate_with_cli(
+        self,
+        subtitle_file_path: str,
+        target_lang: str,
+        target_dir: str,
+        translate_provider: int,
+        output_dir: Optional[str],
+        on_status: Optional[Callable[[str], None]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        from app.services.activity import emit_status
+
+        # Channel 0 = Google Translate built into pyVideoTrans CLI.
+        google_channel = 0
+        emit_status(on_status, "🌐 Đang dịch bằng pyVideoTrans Google CLI...")
+        args = [
+            "--task", "sts",
+            "--name", os.path.abspath(subtitle_file_path),
+            "--target_language_code", target_lang,
+            "--translate_type", str(google_channel if translate_provider in (None, 0) else translate_provider),
+        ]
+        if output_dir:
+            args.extend(["--output-dir", os.path.abspath(output_dir)])
+        res = self.run_cli_command(args, timeout=90)
+        srt_path = self._find_srt_file(subtitle_file_path, target_dir)
+        if not srt_path or not os.path.isfile(srt_path):
+            return None
+        if subtitle_matches_target_language(srt_path, target_lang):
+            res["srt_path"] = srt_path
+            res["provider"] = "cli-google"
+            emit_status(on_status, "✅ Google CLI dịch phụ đề xong.")
+            return res
+
+        from app.services.tts_service import parse_srt_segments
+
+        cues = parse_srt_segments(srt_path)
+        kept = [cue for cue in cues if _translation_matches_target(cue.get("text"), target_lang)]
+        skipped = max(0, len(cues) - len(kept))
+        min_keep = max(1, int(len(cues) * 0.35)) if cues else 1
+        if kept and len(kept) >= min_keep:
+            _cues_to_srt(kept, srt_path)
+            warning = f"Google CLI dịch được {len(kept)}/{len(cues)} câu; đã bỏ {skipped} câu còn tiếng gốc."
+            emit_status(on_status, f"⚠️ {warning}")
+            res["srt_path"] = srt_path
+            res["provider"] = "cli-google"
+            res["warning"] = warning
+            return res
+        return None
+
+    def _translate_with_deepseek(
+        self,
+        subtitle_file_path: str,
+        target_lang: str,
+        target_dir: str,
+        style: str,
+        title: str,
+        on_status: Optional[Callable[[str], None]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        from app.config import settings
+        from app.services.activity import emit_status
+        from app.services.ai_scriptwriter_service import ai_scriptwriter_service
+        from app.services.tts_service import parse_srt_segments, format_srt_timestamp
+
+        if not ai_scriptwriter_service.is_available():
+            return None
+        segs = _merge_fragmented_cues(parse_srt_segments(subtitle_file_path))
+        if not (segs and any((s.get("text") or "").strip() for s in segs)):
+            return None
+        emit_status(
+            on_status,
+            f"🌐 Đang gửi {len(segs)} câu sang DeepSeek ({settings.DEEPSEEK_MODEL})...",
+        )
+        localized = ai_scriptwriter_service.localize_script(
+            segs,
+            target_lang=target_lang,
+            genre=style or "dub",
+            title=title or "",
+        )
+        if not (localized and len(localized) == len(segs)):
+            return None
+        final_texts = [(item.get("translated_text") or "").strip() for item in localized]
+        base_stem = os.path.splitext(os.path.basename(subtitle_file_path))[0]
+        out_srt = os.path.join(target_dir, f"{base_stem}_{target_lang}.srt")
+        lines = []
+        for i, (seg, vi) in enumerate(zip(segs, final_texts), start=1):
+            text = (vi or "").strip()
+            if not _translation_matches_target(text, target_lang):
+                return None
+            lines.append(
+                f"{i}\n{format_srt_timestamp(seg['start_time'])} --> {format_srt_timestamp(seg['end_time'])}\n{text}\n"
+            )
+        if not lines:
+            return None
+        with open(out_srt, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        if not subtitle_matches_target_language(out_srt, target_lang):
+            return None
+        logger.info(f"DeepSeek localized {len(lines)} screenplay cues -> {out_srt}")
+        return {
+            "status": "success",
+            "srt_path": out_srt,
+            "provider": "deepseek",
+            "localized": True,
+        }
+
     def translate_subtitles(
         self,
         subtitle_file_path: str,
@@ -425,197 +856,68 @@ class PyVideoTransService:
         style: str = "dub",
         title: str = "",
         duration: float = 0.0,
+        on_status: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
-        """Translates subtitle file (SRT/VTT) into target language using DeepSeek, Grok, or fallbacks."""
+        """Translate subtitles. Default is local `agy` (Gemini 3.7 Flash), then Google CLI, then library."""
+        from app.services.activity import emit_status
+
         if not os.path.exists(subtitle_file_path):
             raise FileNotFoundError(f"Subtitle file not found: {subtitle_file_path}")
 
         target_dir = os.path.abspath(output_dir) if output_dir else os.path.dirname(os.path.abspath(subtitle_file_path))
         os.makedirs(target_dir, exist_ok=True)
-        ai_provider_available = False
-        ai_failure_reason = ""
+        engine = self._subtitle_translator_engine()
+        emit_status(on_status, f"🌐 Dịch kịch bản bằng {engine}...")
 
-        # 1. DeepSeek AI screenplay localization in one context-aware request.
+        if engine == "deepseek":
+            try:
+                result = self._translate_with_deepseek(
+                    subtitle_file_path, target_lang, target_dir, style, title, on_status
+                )
+                if result:
+                    return result
+            except Exception as e:
+                logger.warning(f"DeepSeek subtitle translation failed: {e}")
+                emit_status(on_status, f"⚠️ DeepSeek lỗi: {e}. Chuyển Google CLI...")
+            emit_status(on_status, "⚠️ DeepSeek không ra kịch bản Việt hợp lệ. Chuyển Google CLI...")
+
+        if engine == "agy":
+            try:
+                result = self._translate_with_agy(
+                    subtitle_file_path, target_lang, target_dir, title, on_status
+                )
+                if result:
+                    return result
+            except Exception as e:
+                logger.warning(f"Antigravity CLI translation failed: {e}")
+                emit_status(on_status, f"⚠️ agy timeout/lỗi: {e}. Chuyển Google Translate (nhanh)...")
+
         try:
-            from app.services.ai_scriptwriter_service import ai_scriptwriter_service
-            from app.services.tts_service import parse_srt_segments, format_srt_timestamp
-            if ai_scriptwriter_service.is_available():
-                ai_provider_available = True
-                segs = _merge_fragmented_cues(parse_srt_segments(subtitle_file_path))
-                if segs and any((s.get("text") or "").strip() for s in segs):
-                    localized = ai_scriptwriter_service.localize_script(
-                        segs,
-                        target_lang=target_lang,
-                        genre=style or "dub",
-                        title=title or "",
-                    )
-                    if localized and len(localized) == len(segs):
-                        final_texts = [
-                            (item.get("translated_text") or "").strip()
-                            for item in localized
-                        ]
-                        base_stem = os.path.splitext(os.path.basename(subtitle_file_path))[0]
-                        out_srt = os.path.join(target_dir, f"{base_stem}_{target_lang}.srt")
-                        lines = []
-                        for i, (seg, vi) in enumerate(zip(segs, final_texts), start=1):
-                            text = (vi or "").strip()
-                            if not _translation_matches_target(text, target_lang):
-                                lines = []
-                                break
-                            lines.append(
-                                f"{i}\n{format_srt_timestamp(seg['start_time'])} --> {format_srt_timestamp(seg['end_time'])}\n{text}\n"
-                            )
-                        with open(out_srt, "w", encoding="utf-8") as f:
-                            f.write("\n".join(lines) + ("\n" if lines else ""))
-                        if subtitle_matches_target_language(out_srt, target_lang):
-                            logger.info(f"DeepSeek localized {len(lines)} screenplay cues -> {out_srt}")
-                            return {
-                                "status": "success",
-                                "srt_path": out_srt,
-                                "provider": "deepseek",
-                                "localized": True,
-                            }
-                ai_failure_reason = ai_scriptwriter_service.last_error
-        except Exception as e:
-            logger.warning(f"DeepSeek subtitle translation failed: {e}. Falling back to next provider.")
-
-        # 2. Grok localization (natural Vietnamese, pacing-aware)
-        try:
-            from app.services.xai_media_service import translate_cues, is_available as grok_ok
-            from app.services.tts_service import parse_srt_segments, format_srt_timestamp
-            if grok_ok():
-                ai_provider_available = True
-                segs = _merge_fragmented_cues(parse_srt_segments(subtitle_file_path))
-                src_texts = [(s.get("text") or "").strip() for s in segs]
-                if src_texts and all(src_texts):
-                    grok_out = translate_cues(
-                        src_texts,
-                        target_lang=target_lang,
-                        style=style or "dub",
-                        title=title or "",
-                    )
-                    if grok_out and len(grok_out) == len(segs):
-                        base_stem = os.path.splitext(os.path.basename(subtitle_file_path))[0]
-                        out_srt = os.path.join(target_dir, f"{base_stem}_{target_lang}.srt")
-                        lines = []
-                        for i, (seg, vi) in enumerate(zip(segs, grok_out), start=1):
-                            text = (vi or "").strip()
-                            if not _translation_matches_target(text, target_lang):
-                                lines = []
-                                break
-                            lines.append(
-                                f"{i}\n{format_srt_timestamp(seg['start_time'])} --> {format_srt_timestamp(seg['end_time'])}\n{text}\n"
-                            )
-                        with open(out_srt, "w", encoding="utf-8") as f:
-                            f.write("\n".join(lines) + ("\n" if lines else ""))
-                        if subtitle_matches_target_language(out_srt, target_lang):
-                            logger.info(f"Grok translated {len(lines)} cues -> {out_srt}")
-                            return {"status": "success", "srt_path": out_srt, "provider": "grok"}
-        except Exception as e:
-            logger.warning(f"Grok subtitle translation failed: {e}. Falling back to Google.")
-
-        # A configured AI returning invalid output is safer to surface as a clear
-        # failure than to silently burn a fragmented word-by-word machine translation.
-        if ai_provider_available:
-            warning = ai_failure_reason or (
-                "AI không tạo được kịch bản Việt hợp lệ; đã bỏ qua Vietsub để tránh xuất bản dịch vô nghĩa."
+            result = self._translate_with_google(
+                subtitle_file_path, target_lang, target_dir, on_status
             )
-            logger.error(warning)
-            return {"status": "failed", "srt_path": None, "warning": warning}
-
-        # 3. Native Deep Translator (with strict error filtering)
-        try:
-            from deep_translator import GoogleTranslator
-            translator = GoogleTranslator(source="auto", target=target_lang)
-            base_stem = os.path.splitext(os.path.basename(subtitle_file_path))[0]
-            out_srt = os.path.join(target_dir, f"{base_stem}_{target_lang}.srt")
-            with open(subtitle_file_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-
-            text_indices = []
-            text_payload = []
-            for i, line in enumerate(lines):
-                stripped = line.strip()
-                if not stripped or stripped.isdigit() or "-->" in stripped:
-                    continue
-                text_indices.append(i)
-                text_payload.append(stripped)
-
-            translated_map = {}
-            CHUNK = 12
-            for start in range(0, len(text_payload), CHUNK):
-                chunk = text_payload[start:start + CHUNK]
-                blob = "\n".join(chunk)
-                try:
-                    translated_blob = translator.translate(blob)
-                    if _is_invalid_translation(translated_blob):
-                        translated_blob = None
-                    parts = [p.strip() for p in str(translated_blob or "").split("\n") if p.strip()]
-                    if parts and len(parts) == len(chunk) and not any(_is_invalid_translation(p) for p in parts):
-                        for j, part in enumerate(parts):
-                            translated_map[start + j] = part
-                    else:
-                        # Fallback to per-line
-                        for j, src in enumerate(chunk):
-                            try:
-                                single_t = translator.translate(src)
-                                if _translation_matches_target(single_t, target_lang):
-                                    translated_map[start + j] = single_t
-                                else:
-                                    translated_map[start + j] = None
-                            except Exception:
-                                translated_map[start + j] = None
-                except Exception:
-                    for j, src in enumerate(chunk):
-                        try:
-                            single_t = translator.translate(src)
-                            if _translation_matches_target(single_t, target_lang):
-                                translated_map[start + j] = single_t
-                            else:
-                                translated_map[start + j] = None
-                        except Exception:
-                            translated_map[start + j] = None
-
-            out_lines = list(lines)
-            for local_i, line_idx in enumerate(text_indices):
-                vi = translated_map.get(local_i)
-                if isinstance(vi, str) and _translation_matches_target(vi, target_lang):
-                    out_lines[line_idx] = vi + "\n"
-
-            if len(translated_map) != len(text_payload) or any(
-                not _translation_matches_target(translated_map.get(i), target_lang)
-                for i in range(len(text_payload))
-            ):
-                raise PyVideoTransError("Google left one or more subtitle cues untranslated")
-
-            with open(out_srt, "w", encoding="utf-8") as f:
-                f.writelines(out_lines)
-            if subtitle_matches_target_language(out_srt, target_lang):
-                return {"status": "success", "srt_path": out_srt}
+            if result:
+                return result
         except Exception as e:
-            logger.warning(f"Native deep_translator failed: {e}. Falling back to CLI...")
+            logger.warning(f"Native deep_translator failed: {e}")
+            emit_status(on_status, f"⚠️ Google Translate lỗi: {e}")
 
-        args = [
-            "--task", "sts",
-            "--name", os.path.abspath(subtitle_file_path),
-            "--target_language_code", target_lang,
-            "--translate_type", str(translate_provider)
-        ]
-        if output_dir:
-            args.extend(["--output-dir", os.path.abspath(output_dir)])
+        try:
+            result = self._translate_with_cli(
+                subtitle_file_path, target_lang, target_dir, 0, output_dir, on_status
+            )
+            if result:
+                return result
+        except Exception as e:
+            logger.warning(f"CLI subtitle translation failed: {e}")
+            emit_status(on_status, f"⚠️ pyVideoTrans CLI lỗi: {e}")
 
-        res = self.run_cli_command(args)
-        srt_path = self._find_srt_file(subtitle_file_path, target_dir)
-        if not subtitle_matches_target_language(srt_path, target_lang):
-            logger.error("All subtitle translators failed target-language validation")
-            return {
-                "status": "failed",
-                "srt_path": None,
-                "warning": f"Subtitle output is not fully translated to {target_lang}",
-            }
-        res["srt_path"] = srt_path
-
-        return res
+        logger.error("All subtitle translators failed target-language validation")
+        return {
+            "status": "failed",
+            "srt_path": None,
+            "warning": f"Subtitle output is not fully translated to {target_lang}",
+        }
 
     def text_to_speech(
         self,

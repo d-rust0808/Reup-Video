@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from app.models.job import JobAborted, JobStatus, WatermarkConfig, ReupConfig
 from app.core.database import get_db_connection, init_db, DEFAULT_DB_PATH
+from app.services.activity import heartbeat
 from app.services.reup_service import process_reup_video
 
 logger = logging.getLogger(__name__)
@@ -79,11 +80,47 @@ def _retry_progress_for_job(job: Optional[Dict[str, Any]]) -> float:
     return 0.65 if _can_resume_completed_stage2(job, stage2_path) else 0.05
 
 
+_NO_DELOGO_ALGOS = frozenset({"crop", "none", "off", "disabled"})
+
+
+def _text_cover_allowed(algorithm: str) -> bool:
+    """Crop/off modes must never attach ffmpeg delogo — it smears buildings and faces."""
+    return (algorithm or "auto").strip().lower() not in _NO_DELOGO_ALGOS
+
+
+def _apply_skip_inpaint(fold_algo: str, reup_config: ReupConfig) -> str:
+    """Keep the picture intact: no Telea/LaMa and no residual delogo covers."""
+    reup_config.text_cover_vf = ""
+    if fold_algo == "crop":
+        from app.services.caption_cover import resolve_caption_cover_image
+
+        cover = str(getattr(reup_config, "caption_cover", "off") or "off").lower()
+        cover_img = resolve_caption_cover_image(
+            getattr(reup_config, "caption_cover_image", None),
+            getattr(reup_config, "caption_cover_url", None),
+        )
+        if cover == "image" and cover_img:
+            reup_config.caption_cover_image = cover_img
+            reup_config.force_bottom_crop = False
+            reup_config.subtitle_bottom_crop = max(
+                float(getattr(reup_config, "subtitle_bottom_crop", 0.0) or 0.0),
+                0.18,
+            )
+            return "Phủ dải đáy bằng ảnh tuỳ chỉnh — giữ khung 9:16, không cắt trống"
+        reup_config.subtitle_bottom_crop = max(
+            float(getattr(reup_config, "subtitle_bottom_crop", 0.0) or 0.0),
+            0.18,
+        )
+        reup_config.force_bottom_crop = True
+        return "Chỉ cắt đáy phụ đề — cắt hẳn dải chữ gốc, không delogo"
+    return "Đã tắt xoá chữ/logo — giữ nguyên hình, chỉ crop viền/FX"
+
+
 def _fast_auto_cover_filters(video_path: str) -> List[str]:
     """Detect stable overlay regions from five samples instead of every frame."""
     from app.services.subtitle_detector import persistent_text_cover_filters
 
-    return persistent_text_cover_filters(video_path, max_boxes=4, min_hits=3)
+    return persistent_text_cover_filters(video_path, max_boxes=4, min_hits=2)
 
 
 class BatchQueueManager:
@@ -111,6 +148,7 @@ class BatchQueueManager:
         self._workers: List[asyncio.Task] = []
         self._callbacks: List[Callable] = []
         self._shutdown = threading.Event()
+        self._job_lock = threading.RLock()
         
         # Initialize SQLite database schema
         init_db(self.db_path)
@@ -118,6 +156,16 @@ class BatchQueueManager:
     def _get_conn(self) -> sqlite3.Connection:
         """Returns thread-safe connection to SQLite database."""
         return get_db_connection(self.db_path)
+
+    def _reset_job_run_logs(self, job_id: str) -> None:
+        """Drop logs from a previous attempt so crop/delogo lines cannot linger in the console."""
+        with self._job_lock:
+            with self._get_conn() as conn:
+                conn.execute(
+                    "UPDATE jobs SET logs = '[]', message = '', updated_at = ? WHERE job_id = ?",
+                    (_utc_now_iso(), job_id),
+                )
+                conn.commit()
 
     def register_callback(self, callback: Callable) -> None:
         """Registers a progress callback function (WebSocket subscriber or logger)."""
@@ -194,10 +242,31 @@ class BatchQueueManager:
         unwind a CPU-bound stage, since cancelling the awaiting asyncio task does not
         interrupt the thread running it.
         """
+        last_bucket = 0
+
         def _cb(p: float) -> None:
+            nonlocal last_bucket
             if self._abort_requested(job_id):
                 raise JobAborted(job_id)
-            self.update_job_progress(job_id, p, stage=stage)
+            try:
+                val = float(p)
+            except (TypeError, ValueError):
+                return
+            frac = -1.0
+            if str(stage).upper() == "WATERMARK_REMOVAL":
+                frac = max(0.0, min(1.0, (val - 0.50) / 0.15))
+            bucket = int(round(frac * 10)) if frac >= 0 else -1
+            if bucket >= 1 and bucket > last_bucket:
+                last_bucket = bucket
+                self.append_job_log(
+                    job_id,
+                    f"🧹 Khử chữ/logo: đã xử lý ~{bucket * 10}% số khung hình (máy vẫn đang chạy)",
+                    level="INFO",
+                    stage=stage,
+                    progress=val,
+                )
+            else:
+                self.update_job_progress(job_id, val, stage=stage)
 
         return _cb
 
@@ -214,7 +283,16 @@ class BatchQueueManager:
             ratio = safe_completed / safe_total
             progress = 0.85 + (0.07 * ratio)
             bucket = min(10, int(ratio * 10))
-            if safe_completed > 0 and bucket > last_logged_bucket:
+            if safe_completed == 0 and last_logged_bucket < 0:
+                last_logged_bucket = 0
+                self.append_job_log(
+                    job_id,
+                    f"🎙️ Bắt đầu TTS: {safe_total} đoạn thuyết minh",
+                    level="INFO",
+                    stage="REUP_TRANSFORM",
+                    progress=progress,
+                )
+            elif safe_completed > 0 and bucket > last_logged_bucket:
                 last_logged_bucket = bucket
                 self.append_job_log(
                     job_id,
@@ -233,10 +311,19 @@ class BatchQueueManager:
         def _cb(progress: float, message: str) -> None:
             if self._abort_requested(job_id):
                 raise JobAborted(job_id)
+            text = str(message or "")
+            if text.startswith("❌"):
+                level = "ERROR"
+            elif text.startswith("⚠️"):
+                level = "WARN"
+            elif text.startswith("✅") or text.startswith("🎉"):
+                level = "SUCCESS"
+            else:
+                level = "INFO"
             self.append_job_log(
                 job_id,
-                message,
-                level="INFO",
+                text,
+                level=level,
                 stage="REUP_TRANSFORM",
                 progress=progress,
             )
@@ -258,8 +345,10 @@ class BatchQueueManager:
                 now_iso = _utc_now_iso()
                 for jid in job_ids:
                     conn.execute(
-                        "UPDATE jobs SET status = 'PENDING', updated_at = ? WHERE job_id = ?",
-                        (now_iso, jid)
+                        """UPDATE jobs
+                           SET status = 'PENDING', logs = '[]', message = ?, updated_at = ?
+                           WHERE job_id = ?""",
+                        ("Khởi động lại job sau khi restart Studio...", now_iso, jid),
                     )
                 conn.commit()
 
@@ -439,48 +528,49 @@ class BatchQueueManager:
             "message": str(message)
         }
 
-        with self._get_conn() as conn:
-            cursor = conn.execute("SELECT logs FROM jobs WHERE job_id = ?", (job_id,))
-            row = cursor.fetchone()
-            if not row:
-                return
+        with self._job_lock:
+            with self._get_conn() as conn:
+                cursor = conn.execute("SELECT logs, status FROM jobs WHERE job_id = ?", (job_id,))
+                row = cursor.fetchone()
+                if not row:
+                    return
 
-            logs_list = []
-            try:
-                if row["logs"]:
-                    parsed = json.loads(row["logs"])
-                    if isinstance(parsed, list):
-                        logs_list = parsed
-            except Exception:
                 logs_list = []
-
-            logs_list.append(log_entry)
-            if len(logs_list) > 500:
-                logs_list = logs_list[-500:]
-
-            updates = ["logs = ?", "message = ?", "updated_at = ?"]
-            vals: List[Any] = [json.dumps(logs_list, ensure_ascii=False), str(message), _utc_now_iso()]
-
-            if stage:
-                updates.append("status = ?")
-                vals.append(str(stage).strip().upper())
-
-            if progress is not None:
                 try:
-                    prog_float = float(progress)
-                    if not (math.isnan(prog_float) or math.isinf(prog_float)):
-                        pct = prog_float * 100.0 if prog_float <= 1.0 else prog_float
-                        pct = max(0.0, min(100.0, pct))
-                        # Progress shown over WebSocket and progress loaded after a
-                        # page refresh must come from the same monotonic value.
-                        updates.append("progress_percent = MAX(COALESCE(progress_percent, 0), ?)")
-                        vals.append(pct)
+                    if row["logs"]:
+                        parsed = json.loads(row["logs"])
+                        if isinstance(parsed, list):
+                            logs_list = parsed
                 except Exception:
-                    pass
+                    logs_list = []
 
-            vals.append(job_id)
-            conn.execute(f"UPDATE jobs SET {', '.join(updates)} WHERE job_id = ?", vals)
-            conn.commit()
+                logs_list.append(log_entry)
+                if len(logs_list) > 800:
+                    logs_list = logs_list[-800:]
+
+                updates = ["logs = ?", "message = ?", "updated_at = ?"]
+                vals: List[Any] = [json.dumps(logs_list, ensure_ascii=False), str(message), _utc_now_iso()]
+
+                current_status = str(row["status"] or "").upper()
+                stage_upper = str(stage).strip().upper() if stage else ""
+                if stage_upper and current_status != "CANCELLED":
+                    updates.append("status = ?")
+                    vals.append(stage_upper)
+
+                if progress is not None:
+                    try:
+                        prog_float = float(progress)
+                        if not (math.isnan(prog_float) or math.isinf(prog_float)):
+                            pct = prog_float * 100.0 if prog_float <= 1.0 else prog_float
+                            pct = max(0.0, min(100.0, pct))
+                            updates.append("progress_percent = MAX(COALESCE(progress_percent, 0), ?)")
+                            vals.append(pct)
+                    except Exception:
+                        pass
+
+                vals.append(job_id)
+                conn.execute(f"UPDATE jobs SET {', '.join(updates)} WHERE job_id = ?", vals)
+                conn.commit()
 
         updated_job = self.get_job(job_id)
         if updated_job:
@@ -531,6 +621,11 @@ class BatchQueueManager:
         vals.append(job_id)
 
         with self._get_conn() as conn:
+            # Cancel must stick: a late Whisper/FFmpeg callback cannot resurrect the job.
+            if status_upper not in ("PENDING", "QUEUED", "CANCELLED"):
+                row = conn.execute("SELECT status FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+                if row and str(row["status"] or "").upper() == "CANCELLED":
+                    return
             conn.execute(f"UPDATE jobs SET {', '.join(updates)} WHERE job_id = ?", vals)
             conn.commit()
 
@@ -659,10 +754,10 @@ class BatchQueueManager:
     def cancel_job(self, job_id: str) -> bool:
         """Cancels a pending or active job and cleans up partial output files."""
         job = self.get_job(job_id)
-        if not job or job["status"] in ("COMPLETED", "FAILED", "CANCELLED"):
+        if not job or str(job.get("status") or "").upper() in ("COMPLETED", "FAILED", "CANCELLED"):
             return False
 
-        self.update_job_status(job_id, "CANCELLED")
+        self.update_job_status(job_id, "CANCELLED", message="Job cancelled by user request")
         out_path = job.get("output_path") or job.get("output_file_path")
         if out_path and os.path.exists(out_path):
             try:
@@ -831,6 +926,7 @@ class BatchQueueManager:
             return job
 
         try:
+            self._reset_job_run_logs(job_id)
             # ------------------------------------------------------------------
             # Stage 1: DOWNLOADING (Input Validation & Acquisition)
             # ------------------------------------------------------------------
@@ -878,12 +974,18 @@ class BatchQueueManager:
                     dl_dir = settings.RAW_INPUT_DIR if hasattr(settings, "RAW_INPUT_DIR") else "data/input/raw"
                     downloader = VideoDownloader(output_dir=dl_dir)
                     manager = ScraperManager(output_dir=dl_dir)
+                    def _download_status(msg: str) -> None:
+                        self.append_job_log(
+                            job_id, msg, level="INFO", stage="DOWNLOADING", progress=0.12
+                        )
                     try:
-                        meta = _run_coro_sync(manager.extract(source_url))
-                        dl_res = _run_coro_sync(downloader.download(meta))
+                        with heartbeat(_download_status, "Đang tải video từ URL", interval=8.0):
+                            meta = _run_coro_sync(manager.extract(source_url))
+                            dl_res = _run_coro_sync(downloader.download(meta))
                     except Exception as meta_err:
                         logger.warning(f"Platform extraction warning for {source_url}: {meta_err}. Falling back to direct download.")
-                        dl_res = _run_coro_sync(downloader.download(source_url))
+                        with heartbeat(_download_status, "Đang tải trực tiếp từ URL", interval=8.0):
+                            dl_res = _run_coro_sync(downloader.download(source_url))
                     if isinstance(dl_res, str) and os.path.exists(dl_res):
                         current_video_path = dl_res
                     elif isinstance(dl_res, dict):
@@ -962,13 +1064,24 @@ class BatchQueueManager:
                             pass
 
             algo_name = wm_config.algorithm or "auto"
-            self.append_job_log(
-                job_id,
-                f"🧹 [Giai đoạn 2] Bắt đầu khử Logo & Phụ Đề (Thuật toán: {algo_name.upper()}, Bán kính: {wm_config.radius}px)...",
-                level="INFO",
-                stage="WATERMARK_REMOVAL",
-                progress=0.35
-            )
+            fold_algo = (algo_name or "auto").lower()
+            fold_skip = not _text_cover_allowed(fold_algo)
+            if fold_skip:
+                self.append_job_log(
+                    job_id,
+                    "✂️ [Giai đoạn 2] Chỉ cắt đáy / giữ nguyên hình — không AI, không delogo, không nhoè.",
+                    level="INFO",
+                    stage="WATERMARK_REMOVAL",
+                    progress=0.35,
+                )
+            else:
+                self.append_job_log(
+                    job_id,
+                    f"🧹 [Giai đoạn 2] Bắt đầu khử Logo & Phụ Đề (Thuật toán: {algo_name.upper()}, Bán kính: {wm_config.radius}px)...",
+                    level="INFO",
+                    stage="WATERMARK_REMOVAL",
+                    progress=0.35
+                )
 
             raw_reup = job.get("reup_config")
             reup_config: ReupConfig
@@ -1006,30 +1119,18 @@ class BatchQueueManager:
                     reup_config.enable_tts = True
 
             stage2_res_path = None
-            fold_algo = (algo_name or "auto").lower()
-            fold_skip = fold_algo in ("crop", "none", "off", "disabled")
             if fold_skip:
-                if fold_algo == "crop":
-                    reup_config.subtitle_bottom_crop = max(
-                        float(getattr(reup_config, "subtitle_bottom_crop", 0.0) or 0.0),
-                        0.06,
-                    )
-                    try:
-                        from app.services.subtitle_detector import persistent_text_cover_filters
-                        covers = persistent_text_cover_filters(current_video_path)
-                        if covers:
-                            reup_config.text_cover_vf = ",".join(covers)
-                            self.append_job_log(
-                                job_id,
-                                f"🧽 Che {len(covers)} vùng chữ (delogo)",
-                                level="INFO",
-                                stage="WATERMARK_REMOVAL",
-                            )
-                    except Exception as e:
-                        logger.warning(f"mid-text cover detect failed: {e}")
+                # Never reuse a smeared inpaint file from an older attempt.
+                for stale_path in (stage2_out_path, stage2_out_path + ".complete"):
+                    if os.path.exists(stale_path):
+                        try:
+                            os.remove(stale_path)
+                        except OSError:
+                            pass
+                skip_msg = _apply_skip_inpaint(fold_algo, reup_config)
                 self.append_job_log(
                     job_id,
-                    "⚡ Bỏ qua inpaint — chỉ crop/delogo",
+                    f"⚡ {skip_msg}",
                     level="INFO",
                     stage="WATERMARK_REMOVAL",
                     progress=0.60,
@@ -1046,12 +1147,13 @@ class BatchQueueManager:
                         progress=0.65,
                     )
                 else:
-                    covers = _fast_auto_cover_filters(current_video_path)
-                    if covers:
-                        reup_config.text_cover_vf = ",".join(covers)
+                    # Never attach ffmpeg delogo here — it smears buildings, trees, faces.
+                    reup_config.text_cover_vf = ""
+                    cover = str(getattr(reup_config, "caption_cover", "off") or "off")
+                    if cover not in ("off", "none", ""):
                         self.append_job_log(
                             job_id,
-                            f"⚡ Phát hiện {len(covers)} vùng chữ/logo ổn định; xử lý cùng một lần render",
+                            "🧽 Phủ dải màu lên chữ gốc (không delogo, không nhoè hình)",
                             level="SUCCESS",
                             stage="WATERMARK_REMOVAL",
                             progress=0.65,
@@ -1059,8 +1161,8 @@ class BatchQueueManager:
                     else:
                         self.append_job_log(
                             job_id,
-                            "✨ Không thấy vùng chữ/logo ổn định — bỏ qua inpaint từng frame",
-                            level="SUCCESS",
+                            "⚡ Bỏ qua delogo (tránh nhoè). Chọn phủ màu hoặc cắt đáy nếu còn chữ Trung.",
+                            level="INFO",
                             stage="WATERMARK_REMOVAL",
                             progress=0.65,
                         )
@@ -1123,19 +1225,7 @@ class BatchQueueManager:
                             progress=0.65
                         )
                     if fold_algo in ("all", "all_in_one"):
-                        try:
-                            from app.services.subtitle_detector import persistent_text_cover_filters
-                            covers = persistent_text_cover_filters(current_video_path)
-                            if covers:
-                                reup_config.text_cover_vf = ",".join(covers)
-                                self.append_job_log(
-                                    job_id,
-                                    f"🧽 Phủ nốt {len(covers)} vệt chữ còn sót (delogo)",
-                                    level="INFO",
-                                    stage="WATERMARK_REMOVAL",
-                                )
-                        except Exception as e:
-                            logger.warning(f"residual text cover failed: {e}")
+                        reup_config.text_cover_vf = ""
 
             # ------------------------------------------------------------------
             # Stage 3: REUP_TRANSFORM
@@ -1210,6 +1300,9 @@ class BatchQueueManager:
                 except OSError:
                     pass
 
+            if self._abort_requested(job_id):
+                raise JobAborted(job_id)
+
             self.append_job_log(
                 job_id,
                 f"🎞️ Render video biến đổi hoàn tất -> {os.path.basename(final_video_path)}",
@@ -1221,6 +1314,9 @@ class BatchQueueManager:
             # ------------------------------------------------------------------
             # Stage 4: COMPLETED
             # ------------------------------------------------------------------
+            if self._abort_requested(job_id):
+                raise JobAborted(job_id)
+
             now = _utc_now_iso()
             self.append_job_log(
                 job_id,
@@ -1232,7 +1328,11 @@ class BatchQueueManager:
 
             with self._get_conn() as conn:
                 conn.execute(
-                    "UPDATE jobs SET output_file_path = ?, status = 'COMPLETED', progress_percent = 100.0, updated_at = ? WHERE job_id = ?",
+                    """
+                    UPDATE jobs
+                    SET output_file_path = ?, status = 'COMPLETED', progress_percent = 100.0, updated_at = ?
+                    WHERE job_id = ? AND UPPER(COALESCE(status, '')) != 'CANCELLED'
+                    """,
                     (final_video_path, now, job_id)
                 )
                 conn.commit()
@@ -1269,74 +1369,186 @@ class BatchQueueManager:
                     seen_p.add(pth)
                     unique_paths.append(pth)
 
-            def _assign(channel_id: str, video_path: str, suffix: str = "") -> str:
+            generated_posts: List[Dict[str, Any]] = []
+
+            def _assign(
+                channel_id: str,
+                video_path: str,
+                suffix: str = "",
+                require_auto: bool = True,
+                copy: Optional[Dict[str, Any]] = None,
+                group_id: str = "",
+                group_name: str = "",
+            ) -> str:
                 cv_id = f"cvid_{uuid.uuid4().hex[:8]}"
                 raw_tags = getattr(reup_config, "post_tags", None) or params.get("post_tags") or []
-                tags_json = json.dumps(raw_tags if isinstance(raw_tags, list) else [], ensure_ascii=False)
                 p_title = getattr(reup_config, "post_title", None) or params.get("post_title") or f"Video Reup #{job_id[-6:]}"
-                if suffix:
-                    p_title = f"{p_title} · {suffix}"
                 p_caption = getattr(reup_config, "post_caption", None) or params.get("post_caption") or ""
+                if copy:
+                    p_title = str(copy.get("title") or p_title)
+                    p_caption = str(copy.get("caption") or p_caption)
+                    extra_tags = copy.get("hashtags") if isinstance(copy.get("hashtags"), list) else []
+                    merged_tags = list(raw_tags or [])
+                    for tag in extra_tags:
+                        clean = str(tag or "").strip().lstrip("#")
+                        if clean and clean not in merged_tags:
+                            merged_tags.append(clean)
+                    raw_tags = merged_tags
+                if suffix and not copy:
+                    p_title = f"{p_title} · {suffix}"
+                tags_json = json.dumps(raw_tags if isinstance(raw_tags, list) else [], ensure_ascii=False)
                 p_status = (getattr(reup_config, "publish_status", None) or params.get("publish_status") or "READY").upper()
+                video_note = str(getattr(reup_config, "video_note", "") or "").strip()
                 with self._get_conn() as conn:
                     conn.execute("""
                         INSERT INTO channel_videos (
                             id, channel_id, job_id, title, caption, tags,
-                            publish_status, video_path, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            publish_status, video_path, notes, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         cv_id, channel_id, job_id, p_title, p_caption,
-                        tags_json, p_status, video_path, now, now
+                        tags_json, p_status, video_path, video_note, now, now
                     ))
                     conn.commit()
+                try:
+                    from app.api.channels import record_publish_event
+
+                    record_publish_event(
+                        self.db_path,
+                        job_id=job_id,
+                        channel_video_id=cv_id,
+                        channel_id=channel_id,
+                        group_id=group_id,
+                        group_name=group_name,
+                        title=p_title,
+                        caption=p_caption,
+                        notes=video_note,
+                        status="QUEUED" if p_status == "READY" else "ASSIGNED",
+                    )
+                except Exception as log_err:
+                    logger.warning("publish_log skipped for %s: %s", cv_id, log_err)
                 try:
                     from app.services.facebook_distribution import enqueue_channel_video
 
                     enqueue_channel_video(
                         self.db_path,
                         cv_id,
-                        require_auto_publish=True,
+                        require_auto_publish=require_auto,
                     )
                 except Exception as e:
                     logger.warning(f"Facebook auto-publish enqueue skipped for {cv_id}: {e}")
-                return cv_id
-
-            if chan_id:
                 try:
-                    selected_path = unique_paths[0] if unique_paths else final_video_path
-                    with self._get_conn() as conn:
-                        selected_channel = conn.execute(
-                            "SELECT platform FROM channels WHERE channel_id = ?",
-                            (chan_id,),
-                        ).fetchone()
-                    selected_platform = (
-                        str(selected_channel["platform"] or "").lower()
-                        if selected_channel
-                        else ""
-                    )
-                    platform_alias = {
-                        "youtube": "youtube_shorts",
-                        "fb": "facebook",
-                    }
-                    selected_platform = platform_alias.get(selected_platform, selected_platform)
-                    selected_variant = next(
-                        (v for v in variants if v.get("platform") == selected_platform and v.get("path")),
-                        None,
-                    )
-                    if selected_variant:
-                        selected_path = selected_variant["path"]
-                    _assign(chan_id, selected_path)
-                    self.append_job_log(
-                        job_id,
-                        "📢 Đã tự động phân bổ video vào kênh thành công!",
-                        level="SUCCESS",
-                        stage="COMPLETED"
+                    from app.services.tiktok_distribution import enqueue_tiktok_video
+
+                    enqueue_tiktok_video(
+                        self.db_path,
+                        cv_id,
+                        require_auto_publish=require_auto,
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to auto-assign video {job_id} to channel {chan_id}: {e}")
+                    logger.warning(f"TikTok auto-publish enqueue skipped for {cv_id}: {e}")
+                return cv_id
 
-            # Also drop variants onto channels whose platform matches
-            if variants:
+            explicit_ids: List[str] = []
+            group_origin: Dict[str, Dict[str, str]] = {}
+            raw_group_ids = [str(g).strip() for g in (getattr(reup_config, "group_ids", None) or []) if str(g).strip()]
+            if raw_group_ids:
+                try:
+                    from app.api.channels import expand_group_channel_ids
+
+                    group_origin = expand_group_channel_ids(self.db_path, raw_group_ids)
+                    for cid in group_origin:
+                        if cid not in explicit_ids:
+                            explicit_ids.append(cid)
+                except Exception as e:
+                    logger.warning("Expand channel groups failed: %s", e)
+            for cid in list(getattr(reup_config, "channel_ids", None) or []) + ([chan_id] if chan_id else []):
+                text = str(cid or "").strip()
+                if text and text not in explicit_ids:
+                    explicit_ids.append(text)
+
+            def _path_for_channel(channel_id: str) -> str:
+                selected_path = unique_paths[0] if unique_paths else final_video_path
+                with self._get_conn() as conn:
+                    selected_channel = conn.execute(
+                        "SELECT platform FROM channels WHERE channel_id = ?",
+                        (channel_id,),
+                    ).fetchone()
+                selected_platform = (
+                    str(selected_channel["platform"] or "").lower()
+                    if selected_channel
+                    else ""
+                )
+                platform_alias = {
+                    "youtube": "youtube_shorts",
+                    "fb": "facebook",
+                }
+                selected_platform = platform_alias.get(selected_platform, selected_platform)
+                selected_variant = next(
+                    (v for v in variants if v.get("platform") == selected_platform and v.get("path")),
+                    None,
+                )
+                if selected_variant:
+                    return selected_variant["path"]
+                return selected_path
+
+            assigned_ids = set()
+            if explicit_ids:
+                try:
+                    intent = str(getattr(reup_config, "post_intent", "") or "").strip()
+                    want_writer = bool(getattr(reup_config, "agy_write_post", True)) and bool(intent)
+                    if want_writer:
+                        from app.config import settings as app_settings
+                        from app.services.post_writer import find_job_transcript, write_facebook_posts
+
+                        names: List[str] = []
+                        with self._get_conn() as conn:
+                            for cid in explicit_ids:
+                                row = conn.execute(
+                                    "SELECT name FROM channels WHERE channel_id = ?",
+                                    (cid,),
+                                ).fetchone()
+                                names.append((row["name"] if row else "") or cid)
+                        brief = find_job_transcript(
+                            job_id,
+                            getattr(app_settings, "OUTPUT_DIR", "data/outputs"),
+                        )
+                        self.append_job_log(
+                            job_id,
+                            f"✍️ agy đang viết {len(explicit_ids)} bài đăng (SEO, khác nhau từng Page)...",
+                            level="INFO",
+                            stage="COMPLETED",
+                        )
+                        generated_posts = write_facebook_posts(
+                            intent=intent,
+                            brand_title="",
+                            video_brief=brief,
+                            page_names=names,
+                            extra_notes="",
+                        )
+                    for i, cid in enumerate(explicit_ids):
+                        copy = generated_posts[i] if i < len(generated_posts) else None
+                        origin = group_origin.get(cid) or {}
+                        _assign(
+                            cid,
+                            _path_for_channel(cid),
+                            require_auto=False,
+                            copy=copy,
+                            group_id=origin.get("group_id") or "",
+                            group_name=origin.get("group_name") or "",
+                        )
+                        assigned_ids.add(cid)
+                    self.append_job_log(
+                        job_id,
+                        f"📢 Đã đưa video vào {len(explicit_ids)} kênh/Fanpage để đăng.",
+                        level="SUCCESS",
+                        stage="COMPLETED",
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to auto-assign video {job_id} to channels {explicit_ids}: {e}")
+
+            # Also drop variants onto matching channels when the user did not pick Pages.
+            if variants and not explicit_ids:
                 try:
                     with self._get_conn() as conn:
                         rows = conn.execute(
@@ -1358,7 +1570,7 @@ class BatchQueueManager:
                     assigned_extra = 0
                     for v in variants:
                         for cid in plat_to_chans.get(v["platform"], []):
-                            if cid == chan_id:
+                            if cid in assigned_ids or cid == chan_id:
                                 continue
                             _assign(cid, v["path"], v.get("label") or v["platform"])
                             assigned_extra += 1
@@ -1377,6 +1589,11 @@ class BatchQueueManager:
                 self._notify_callbacks(updated_job)
             return updated_job or {}
 
+        except JobAborted:
+            logger.info(f"Job {job_id} cancelled during pipeline")
+            self.update_job_status(job_id, "CANCELLED", message="Job cancelled by user request")
+            self.append_job_log(job_id, "⛔ Đã hủy theo yêu cầu.", level="WARN", stage="CANCELLED")
+            raise
 
         except Exception as e:
             logger.error(f"Pipeline failure for job {job_id}: {e}")

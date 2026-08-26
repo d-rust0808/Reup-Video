@@ -1,3 +1,6 @@
+const fs = require('fs');
+const path = require('path');
+
 const target = (process.env.DESKTOP_PLATFORM || 'mac').toLowerCase();
 const isWindows = target === 'win';
 
@@ -5,24 +8,66 @@ const extraResources = [
   {
     from: '../app',
     to: 'app',
-    filter: ['**/*', '!**/__pycache__/*'],
+    filter: [
+      '**/*',
+      '!**/__pycache__/**',
+      '!**/*.pyc',
+      '!**/tmp/**',
+      '!**/output/**',
+      '!**/modules/models/**',
+      '!**/modules/tmp/**',
+      '!**/modules/output/**',
+      '!**/modules/logs/**',
+    ],
   },
   {
     from: '../data',
     to: 'data',
-    filter: ['**/*', '!**/cache/*', '!**/outputs/*', '!**/*.sqlite*'],
+    filter: [
+      '**/*',
+      '!**/cache/**',
+      '!**/outputs/**',
+      '!**/output/**',
+      '!**/input/**',
+      '!**/temp/**',
+      '!**/previews/**',
+      '!**/frames/**',
+      '!**/*.sqlite*',
+      '!**/gpm_orchestrator.db*',
+    ],
   },
   { from: '../requirements.txt', to: 'requirements.txt' },
   { from: '../clean_data.py', to: 'clean_data.py' },
 ];
 
-// A Python venv is platform-specific. Windows bootstraps its own venv on first run.
-if (!isWindows) {
+if (isWindows) {
+  extraResources.push({
+    from: '.cache/win-python',
+    to: 'python',
+    filter: [
+      '**/*',
+      '!**/*.pyc',
+      '!**/__pycache__/**',
+      '!**/torch/include/**',
+      '!**/torch/testing/**',
+    ],
+  });
+  extraResources.push({
+    from: '.cache/win-ffmpeg',
+    to: 'ffmpeg',
+    filter: ['ffmpeg.exe', 'ffprobe.exe'],
+  });
+} else {
   extraResources.push({
     from: '../venv311',
     to: 'venv311',
     filter: ['**/*', '!**/__pycache__/*', '!**/*.pyc'],
   });
+}
+
+const envFile = path.resolve(__dirname, '..', '.env');
+if (fs.existsSync(envFile)) {
+  extraResources.push({ from: '../.env', to: '.env' });
 }
 
 module.exports = {
@@ -50,7 +95,24 @@ module.exports = {
     ],
   },
   win: {
-    target: ['nsis', 'portable'],
+    target: [
+      { target: 'zip', arch: ['x64'] },
+      { target: 'nsis', arch: ['x64'] },
+      { target: 'portable', arch: ['x64'] },
+    ],
     icon: 'electron/assets/icon.png',
+    artifactName: '${productName}-${version}-win-${arch}.${ext}',
+  },
+  nsis: {
+    oneClick: false,
+    perMachine: false,
+    allowToChangeInstallationDirectory: true,
+    createDesktopShortcut: true,
+    createStartMenuShortcut: true,
+    shortcutName: 'Reup-Video Studio',
+    deleteAppDataOnUninstall: false,
+  },
+  portable: {
+    artifactName: '${productName}-${version}-win-${arch}-portable.${ext}',
   },
 };

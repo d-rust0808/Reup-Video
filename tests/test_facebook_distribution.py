@@ -2,7 +2,17 @@ import json
 from datetime import datetime, timezone
 
 from app.core.database import get_db_connection, init_db
-from app.services.facebook_distribution import enqueue_channel_video
+from app.services.facebook_distribution import absolute_facebook_permalink, enqueue_channel_video
+
+
+def test_relative_reel_permalink_becomes_facebook_url():
+    assert absolute_facebook_permalink("/reel/4587803151487718/") == (
+        "https://www.facebook.com/reel/4587803151487718/"
+    )
+    assert absolute_facebook_permalink("https://facebook.invalid/reel/1") == (
+        "https://facebook.invalid/reel/1"
+    )
+    assert absolute_facebook_permalink("", video_id="abc") == "https://www.facebook.com/reel/abc"
 
 
 def _now():
@@ -195,3 +205,29 @@ def test_synced_pages_are_materialized_as_bound_channels(tmp_path, monkeypatch):
     assert channel["platform"] == "facebook"
     assert binding["destination_id"] == "page_123"
     assert binding["auto_publish"] == 0
+
+
+def test_page_payload_keeps_large_picture_and_profile_fields():
+    from app.api.facebook import _page_payload, enlarge_facebook_picture
+
+    tiny = "https://scontent.xx.fbcdn.net/v/t.jpg?stp=cp0_dst-jpg_s50x50_tt6&oh=1"
+    payload = _page_payload({
+        "id": "99",
+        "name": "Page A",
+        "category": "Blogger",
+        "username": "page.a",
+        "fan_count": 12500,
+        "followers_count": 13000,
+        "about": "Kênh review",
+        "link": "https://facebook.com/page.a",
+        "tasks": ["CREATE_CONTENT"],
+        "picture": {"data": {"url": tiny}},
+        "access_token": "tok",
+    })
+    assert "s200x200" in payload["picture_url"]
+    assert payload["username"] == "page.a"
+    assert payload["fan_count"] == 12500
+    assert payload["about"] == "Kênh review"
+    assert enlarge_facebook_picture(tiny).find("s50x50") == -1
+    from app.api.facebook import page_picture_api_path
+    assert page_picture_api_path("1244") == "/api/v1/facebook/pages/1244/picture"

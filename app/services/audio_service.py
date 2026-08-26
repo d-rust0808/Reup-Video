@@ -23,22 +23,38 @@ logger = logging.getLogger(__name__)
 
 def find_ffmpeg_binary() -> Optional[str]:
     """Locates ffmpeg executable in PATH or standard system installation paths."""
+    env_path = os.environ.get("FFMPEG_PATH")
+    if env_path and os.path.exists(env_path):
+        return env_path
     path = shutil.which("ffmpeg")
-    if not path:
-        for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]:
-            if os.path.exists(candidate) and os.access(candidate, os.X_OK):
-                return candidate
-    return path
+    if path:
+        return path
+    for candidate in [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ]:
+        if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 def find_ffprobe_binary() -> Optional[str]:
     """Locates ffprobe executable in PATH or standard system installation paths."""
+    env_path = os.environ.get("FFPROBE_PATH")
+    if env_path and os.path.exists(env_path):
+        return env_path
     path = shutil.which("ffprobe")
-    if not path:
-        for candidate in ["/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe", "/usr/bin/ffprobe"]:
-            if os.path.exists(candidate) and os.access(candidate, os.X_OK):
-                return candidate
-    return path
+    if path:
+        return path
+    for candidate in [
+        "/opt/homebrew/bin/ffprobe",
+        "/usr/local/bin/ffprobe",
+        "/usr/bin/ffprobe",
+    ]:
+        if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 def check_demucs_available() -> bool:

@@ -15,6 +15,16 @@ from app.scraper.channel import (
 )
 
 
+def test_douyin_profile_url_is_not_capped_at_forty():
+    import inspect
+
+    from app.scraper.channel import ChannelCloneService
+
+    source = inspect.getsource(ChannelCloneService.collect)
+    assert "extract_sec_user_id(raw)" in source
+    assert "cap = 500" in source
+
+
 def test_extract_sec_user_id_from_profile():
     url = "https://www.douyin.com/user/MS4wLjABAAAAlCWf7AEWzaYV3orgY8V4S8k8A6PNya_V_6SAadaB_6V0qJ9eQMeAfeReayknaeaG"
     sec = extract_sec_user_id(url)
@@ -59,3 +69,82 @@ def test_empty_is_not_channel():
     assert is_channel_url("") is False
     assert extract_sec_user_id("") is None
     assert extract_video_ids("") == []
+
+
+def test_catalog_entries_from_awemes_skips_junk():
+    from app.scraper.douyin_list import catalog_entries_from_awemes
+
+    rows = catalog_entries_from_awemes(
+        [
+            {"aweme_id": "7675543491506976430", "desc": "开饭起飞"},
+            {"aweme_id": "7675543491506976430", "desc": "dup"},
+            {"id": "12", "desc": "too short"},
+            {"aweme_id": "abc", "desc": "not digits"},
+            None,
+            {"aweme_id": "7658077670655177563", "title": "绝世逃荒"},
+        ]
+    )
+    assert [r["video_id"] for r in rows] == ["7675543491506976430", "7658077670655177563"]
+    assert rows[0]["title"] == "开饭起飞"
+    assert rows[0]["url"].endswith("/video/7675543491506976430")
+    assert rows[1]["title"] == "绝世逃荒"
+
+
+def test_douyin_collect_uses_browser_catalog(monkeypatch):
+    import asyncio
+
+    from app.scraper.channel import ChannelCloneService
+
+    async def fake_profile(self, sec):
+        return {
+            "sec_user_id": sec,
+            "uid": "",
+            "nickname": "开饭说漫",
+            "unique_id": "96885436754",
+            "signature": "",
+            "aweme_count": 149,
+            "follower_count": 136000,
+            "avatar": "",
+            "url": f"https://www.douyin.com/user/{sec}",
+            "platform": "douyin",
+        }
+
+    async def fake_list(self, sec, max_videos, uid=""):
+        assert max_videos >= 40
+        return {
+            "video_ids": ["7675543491506976430", "7658077670655177563"],
+            "catalog": [
+                {
+                    "video_id": "7675543491506976430",
+                    "title": "胆子真是肥嘟嘟",
+                    "url": "https://www.douyin.com/video/7675543491506976430",
+                },
+                {
+                    "video_id": "7658077670655177563",
+                    "title": "绝世逃荒",
+                    "url": "https://www.douyin.com/video/7658077670655177563",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(ChannelCloneService, "resolve_profile", fake_profile)
+    monkeypatch.setattr(ChannelCloneService, "list_douyin_videos", fake_list)
+
+    url = "https://www.douyin.com/user/MS4wLjABAAAAUCheO6MMkKFzs1MrJSMOIRz3chPjF4fhjK74-PzN3Hqj3znbUs5uyzKJ8AFINMX2"
+    result = asyncio.run(ChannelCloneService().collect(url, max_videos=500))
+    assert result["platform"] == "douyin"
+    assert result["profile"]["nickname"] == "开饭说漫"
+    assert result["video_ids"] == ["7675543491506976430", "7658077670655177563"]
+    assert result["catalog"][0]["title"] == "胆子真是肥嘟嘟"
+    assert result["hint"] == ""
+
+
+def test_youtube_playlist_is_channel_and_watch_is_not():
+    watch = "https://www.youtube.com/watch?v=cwCFU4oa11Q"
+    playlist = "https://www.youtube.com/playlist?list=PL0fu92VVHU6QLihrj4A3XyuC5GoH-B2Ai"
+    watch_list = watch + "&list=PL0fu92VVHU6QLihrj4A3XyuC5GoH-B2Ai"
+    assert is_channel_url(playlist) is True
+    assert is_channel_url("https://www.youtube.com/@builder") is True
+    assert is_channel_url(watch) is False
+    assert is_channel_url(watch_list) is True
+    assert video_page_url("cwCFU4oa11Q", "youtube").endswith("watch?v=cwCFU4oa11Q")

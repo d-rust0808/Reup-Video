@@ -25,6 +25,7 @@ from app.services.queue_manager import BatchQueueManager
 from app.scraper.manager import ScraperManager
 from app.services.sample_media import seed_sample_videos
 from app.services.facebook_distribution import FacebookDistributionWorker
+from app.services.tiktok_distribution import TikTokDistributionWorker
 
 logger = logging.getLogger("app.main")
 
@@ -54,6 +55,7 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing application storage directories...")
     queue_mgr = None
     facebook_worker = None
+    tiktok_worker = None
     try:
         settings.ensure_directories()
         _seed_sample_media()
@@ -74,16 +76,22 @@ async def lifespan(app: FastAPI):
 
         facebook_worker = FacebookDistributionWorker(settings.DB_PATH)
         await facebook_worker.start()
+        tiktok_worker = TikTokDistributionWorker(settings.DB_PATH)
+        await tiktok_worker.start()
 
         # Store singletons on app.state
         app.state.queue_manager = queue_mgr
         app.state.ws_manager = ws_manager
         app.state.scraper_manager = scraper_mgr
         app.state.facebook_distribution_worker = facebook_worker
+        app.state.tiktok_distribution_worker = tiktok_worker
 
         yield
     finally:
         try:
+            if tiktok_worker is not None:
+                logger.info("Stopping TikTok distribution worker...")
+                await tiktok_worker.stop()
             if facebook_worker is not None:
                 logger.info("Stopping Facebook distribution worker...")
                 await facebook_worker.stop()
@@ -122,7 +130,7 @@ app.include_router(api_router, prefix="/api/v1")
 FRONTEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend"))
 FRONTEND_DIST = os.path.join(FRONTEND_ROOT, "dist")
 FRONTEND_PUBLIC = os.path.join(FRONTEND_ROOT, "public")
-VITE_ORIGIN = os.environ.get("VITE_ORIGIN", "http://127.0.0.1:5273")
+VITE_ORIGIN = os.environ.get("VITE_ORIGIN", "http://127.0.0.1:6001")
 
 if os.path.exists(FRONTEND_DIST):
     assets_dir = os.path.join(FRONTEND_DIST, "assets")
@@ -165,7 +173,7 @@ def _frontend_file(rel_path: str):
 
 
 async def _proxy_vite(path: str, request: Request) -> Optional[Response]:
-    """Serve the live Vite UI so preview on :8000 is the real Studio, not a stub."""
+    """Serve the live Vite UI so preview on :6000 is the real Studio, not a stub."""
     import httpx
 
     url = f"{VITE_ORIGIN}/{path.lstrip('/')}"
@@ -239,7 +247,7 @@ async def websocket_jobs_endpoint(websocket: WebSocket):
         logger.warning(f"WebSocket client disconnected with exception: {e}")
         ws_mgr.disconnect(websocket)
 
-# Root + SPA / Vite gateway (live preview often hits :8000, not :8080)
+# Root + SPA / Vite gateway (live preview often hits :6000)
 @app.get("/", response_class=HTMLResponse)
 async def read_dashboard(request: Request):
     return await _serve_frontend("", request)

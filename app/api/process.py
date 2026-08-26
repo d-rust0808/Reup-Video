@@ -73,7 +73,12 @@ class ReupPayload(BaseModel):
 
     # Channel distribution
     channel_id: Optional[str] = None
+    channel_ids: Optional[List[str]] = None
+    group_ids: Optional[List[str]] = None
+    video_note: Optional[str] = None
     post_title: Optional[str] = None
+    post_intent: Optional[str] = None
+    agy_write_post: Optional[bool] = True
     post_caption: Optional[str] = None
     post_tags: Optional[List[str]] = None
     publish_status: Optional[str] = "READY"
@@ -85,6 +90,9 @@ class ReupPayload(BaseModel):
     bgm_volume: Optional[float] = 0.85
     target_platforms: Optional[List[str]] = None
     subtitle_bottom_crop: Optional[float] = 0.0
+    caption_cover: Optional[str] = "off"
+    caption_cover_image: Optional[str] = ""
+    caption_cover_url: Optional[str] = ""
     vocal_mute_strategy: Optional[str] = "demucs"
     original_vocal_volume: Optional[float] = 0.10
     trim_start_sec: Optional[float] = 0.0
@@ -127,7 +135,12 @@ class ProcessJobRequest(BaseModel):
 
     # Channel distribution
     channel_id: Optional[str] = None
+    channel_ids: Optional[List[str]] = None
+    group_ids: Optional[List[str]] = None
+    video_note: Optional[str] = None
     post_title: Optional[str] = None
+    post_intent: Optional[str] = None
+    agy_write_post: Optional[bool] = True
     post_caption: Optional[str] = None
     post_tags: Optional[List[str]] = None
     publish_status: Optional[str] = "READY"
@@ -139,6 +152,9 @@ class ProcessJobRequest(BaseModel):
     bgm_volume: Optional[float] = 0.85
     target_platforms: Optional[List[str]] = None
     subtitle_bottom_crop: Optional[float] = 0.0
+    caption_cover: Optional[str] = "off"
+    caption_cover_image: Optional[str] = ""
+    caption_cover_url: Optional[str] = ""
     vocal_mute_strategy: Optional[str] = "demucs"
     original_vocal_volume: Optional[float] = 0.10
     trim_start_sec: Optional[float] = 0.0
@@ -321,9 +337,44 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         reup_grain = req.film_grain
 
     reup_chan_id = req.reup.channel_id if req.reup and req.reup.channel_id else req.channel_id
+    reup_chan_ids: List[str] = []
+    raw_chan_ids = None
+    if req.reup and getattr(req.reup, "channel_ids", None):
+        raw_chan_ids = req.reup.channel_ids
+    elif getattr(req, "channel_ids", None):
+        raw_chan_ids = req.channel_ids
+    if raw_chan_ids:
+        reup_chan_ids = [str(cid) for cid in raw_chan_ids if str(cid).strip()]
+    if reup_chan_id and str(reup_chan_id) not in reup_chan_ids:
+        reup_chan_ids.insert(0, str(reup_chan_id))
+    if not reup_chan_id and reup_chan_ids:
+        reup_chan_id = reup_chan_ids[0]
+    reup_group_ids: List[str] = []
+    raw_group_ids = None
+    if req.reup and getattr(req.reup, "group_ids", None):
+        raw_group_ids = req.reup.group_ids
+    elif getattr(req, "group_ids", None):
+        raw_group_ids = req.group_ids
+    if raw_group_ids:
+        reup_group_ids = [str(gid) for gid in raw_group_ids if str(gid).strip()]
+    reup_video_note = ""
+    if req.reup and getattr(req.reup, "video_note", None):
+        reup_video_note = str(req.reup.video_note or "")
+    elif getattr(req, "video_note", None):
+        reup_video_note = str(req.video_note or "")
     reup_post_title = req.reup.post_title if req.reup and req.reup.post_title else req.post_title
+    reup_post_intent = ""
+    if req.reup and getattr(req.reup, "post_intent", None):
+        reup_post_intent = str(req.reup.post_intent or "")
+    elif getattr(req, "post_intent", None):
+        reup_post_intent = str(req.post_intent or "")
+    reup_agy_write = True
+    if req.reup and getattr(req.reup, "agy_write_post", None) is not None:
+        reup_agy_write = bool(req.reup.agy_write_post)
+    elif getattr(req, "agy_write_post", None) is not None:
+        reup_agy_write = bool(req.agy_write_post)
     reup_post_caption = req.reup.post_caption if req.reup and req.reup.post_caption else req.post_caption
-    if not (reup_post_caption or "").strip():
+    if not (reup_post_caption or "").strip() and not reup_post_intent.strip():
         from app.services.caption import build_caption
         reup_post_caption = build_caption(reup_post_title, platform)
     reup_post_tags = (req.reup.post_tags if req.reup and req.reup.post_tags is not None else req.post_tags) or []
@@ -367,6 +418,21 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         pitch_shift=reup_pitch if reup_pitch is not None else True,
         crop_percent=reup_crop,
         subtitle_bottom_crop=reup_bottom_crop,
+        caption_cover=(
+            (req.reup.caption_cover if req.reup and getattr(req.reup, "caption_cover", None) else None)
+            or getattr(req, "caption_cover", None)
+            or "off"
+        ),
+        caption_cover_image=(
+            (req.reup.caption_cover_image if req.reup and getattr(req.reup, "caption_cover_image", None) else None)
+            or getattr(req, "caption_cover_image", None)
+            or ""
+        ),
+        caption_cover_url=(
+            (req.reup.caption_cover_url if req.reup and getattr(req.reup, "caption_cover_url", None) else None)
+            or getattr(req, "caption_cover_url", None)
+            or ""
+        ),
         trim_start_sec=reup_trim_start,
         trim_end_sec=reup_trim_end,
         vocal_mute_strategy=reup_vocal_strategy,
@@ -391,7 +457,12 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         source_lang=reup_source_lang or "auto",
         film_grain=reup_grain if reup_grain is not None else 3.0,
         channel_id=reup_chan_id,
+        channel_ids=reup_chan_ids,
+        group_ids=reup_group_ids,
+        video_note=reup_video_note,
         post_title=reup_post_title,
+        post_intent=reup_post_intent,
+        agy_write_post=reup_agy_write,
         post_caption=reup_post_caption,
         post_tags=reup_post_tags,
         publish_status=reup_pub_status,

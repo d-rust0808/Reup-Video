@@ -1,6 +1,7 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useState, useCallback } from 'react';
 import { Crop } from 'lucide-react';
 import { getMediaUrl } from '../services/api';
+import { fitKeepIntoCanvas, formatPixelAspect, stageBoxStyle } from '../lib/previewCanvas';
 
 function getContentBox(video, canvas) {
   const rect = canvas.getBoundingClientRect();
@@ -38,17 +39,124 @@ function overlaySrc(ov) {
   return '';
 }
 
-function OverlayPreviewLayer({ videoRef, overlays }) {
+const COVER_SWATCH = {
+  black_soft: { bg: 'rgba(0,0,0,0.62)', fg: '#fff' },
+  white_soft: { bg: 'rgba(255,255,255,0.70)', fg: '#111' },
+  black_solid: { bg: '#111', fg: '#fff' },
+  white_solid: { bg: '#f4f4f4', fg: '#111' },
+};
+
+function computeKeepRect(preview = {}) {
+  const p = Math.max(0, Math.min(0.2, (Number(preview.cropPercent) || 0) / 100));
+  const cropMode = preview.wmMethod === 'crop';
+  const isImageCover = preview.captionCover === 'image';
+  const coverOn = isImageCover || (!cropMode && Boolean(preview.captionCover && preview.captionCover !== 'off'));
+  const rawBottom = Math.max(0, Math.min(0.45, (Number(preview.bottomCrop) || 0) / 100));
+  const cutBottom = coverOn ? 0 : rawBottom;
+  const top = p * (1 - cutBottom);
+  const bottom = cutBottom + p * (1 - cutBottom);
+  const left = p;
+  const right = p;
+  let coverH = 0;
+  if (coverOn) {
+    coverH = rawBottom > 0 ? rawBottom : 0.18;
+    coverH = Math.max(0.10, Math.min(0.36, coverH));
+  }
+  return {
+    left,
+    top,
+    right,
+    bottom,
+    keepW: Math.max(0.2, 1 - left - right),
+    keepH: Math.max(0.2, 1 - top - bottom),
+    coverOn,
+    coverH,
+  };
+}
+
+function PreviewTransport({ videoRef }) {
+  const [playing, setPlaying] = useState(false);
+  const [t, setT] = useState(0);
+  const [d, setD] = useState(0);
+
+  useEffect(() => {
+    const video = videoRef?.current;
+    if (!video) return undefined;
+    const onTime = () => setT(video.currentTime || 0);
+    const onMeta = () => setD(video.duration || 0);
+    const onPlay = () => setPlaying(true);
+    const onPause = () => setPlaying(false);
+    video.addEventListener('timeupdate', onTime);
+    video.addEventListener('loadedmetadata', onMeta);
+    video.addEventListener('play', onPlay);
+    video.addEventListener('pause', onPause);
+    onTime();
+    onMeta();
+    setPlaying(!video.paused);
+    return () => {
+      video.removeEventListener('timeupdate', onTime);
+      video.removeEventListener('loadedmetadata', onMeta);
+      video.removeEventListener('play', onPlay);
+      video.removeEventListener('pause', onPause);
+    };
+  }, [videoRef]);
+
+  const toggle = () => {
+    const video = videoRef?.current;
+    if (!video) return;
+    if (video.paused) video.play().catch(() => {});
+    else video.pause();
+  };
+
+  const fmt = (sec) => {
+    const n = Math.max(0, Math.floor(sec || 0));
+    return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')}`;
+  };
+
+  return (
+    <div className="flex items-center gap-2 px-3 py-2 bg-slate-950/90 text-white">
+      <button
+        type="button"
+        onClick={toggle}
+        className="shrink-0 w-8 h-8 rounded-lg bg-white/15 hover:bg-white/25 text-xs font-black"
+      >
+        {playing ? '❚❚' : '▶'}
+      </button>
+      <input
+        type="range"
+        min="0"
+        max={d > 0 ? d : 0}
+        step="0.05"
+        value={Math.min(t, d || 0)}
+        onChange={(e) => {
+          const video = videoRef?.current;
+          if (!video) return;
+          video.currentTime = Number(e.target.value);
+        }}
+        className="flex-1 accent-blue-400"
+      />
+      <span className="text-[10px] font-mono text-white/80 w-16 text-right">
+        {fmt(t)}/{fmt(d)}
+      </span>
+    </div>
+  );
+}
+
+function OverlayPreviewLayer({ videoRef, overlays, contained = false }) {
   const wrapRef = useRef(null);
   const [box, setBox] = useState({ offsetX: 0, offsetY: 0, contentW: 0, contentH: 0 });
 
   const measure = useCallback(() => {
-    const video = videoRef?.current;
     const wrap = wrapRef.current;
-    if (!video || !wrap) return;
+    if (!wrap) return;
     const rect = wrap.getBoundingClientRect();
-    const vw = video.videoWidth || 0;
-    const vh = video.videoHeight || 0;
+    if (contained) {
+      setBox({ offsetX: 0, offsetY: 0, contentW: rect.width, contentH: rect.height });
+      return;
+    }
+    const video = videoRef?.current;
+    const vw = video?.videoWidth || 0;
+    const vh = video?.videoHeight || 0;
     if (!vw || !vh || rect.width <= 0 || rect.height <= 0) {
       setBox({ offsetX: 0, offsetY: 0, contentW: rect.width, contentH: rect.height });
       return;
@@ -62,18 +170,22 @@ function OverlayPreviewLayer({ videoRef, overlays }) {
       contentW,
       contentH,
     });
-  }, [videoRef]);
+  }, [videoRef, contained]);
 
   useEffect(() => {
     const video = videoRef?.current;
     measure();
     window.addEventListener('resize', measure);
     video?.addEventListener('loadedmetadata', measure);
+    const wrap = wrapRef.current;
+    const ro = typeof ResizeObserver === 'function' && wrap ? new ResizeObserver(measure) : null;
+    if (wrap) ro?.observe(wrap);
     return () => {
       window.removeEventListener('resize', measure);
       video?.removeEventListener('loadedmetadata', measure);
+      ro?.disconnect();
     };
-  }, [measure, videoRef, overlays]);
+  }, [measure, videoRef, overlays, contained]);
 
   if (!overlays || overlays.length === 0) return null;
 
@@ -81,18 +193,22 @@ function OverlayPreviewLayer({ videoRef, overlays }) {
     <div ref={wrapRef} className="absolute inset-0 pointer-events-none z-[9]">
       {overlays.map((ov) => {
         const isFrame = ov.kind === 'frame';
+        const isBanner = ov.kind === 'banner' || ov.kind === 'caption';
         const src = overlaySrc(ov);
         if (!src) return null;
-        const left = isFrame ? box.offsetX : box.offsetX + ov.x * box.contentW;
-        const top = isFrame ? box.offsetY : box.offsetY + ov.y * box.contentH;
-        const width = isFrame ? box.contentW : ov.w * box.contentW;
-        const height = isFrame ? box.contentH : undefined;
+        const bandH = Math.max(0.10, Math.min(0.36, Number(ov.band_h || ov.h || 0.22)));
+        const left = (isFrame || isBanner) ? box.offsetX : box.offsetX + ov.x * box.contentW;
+        const width = (isFrame || isBanner) ? box.contentW : ov.w * box.contentW;
+        const height = isFrame ? box.contentH : (isBanner ? bandH * box.contentH : undefined);
+        const top = isFrame
+          ? box.offsetY
+          : (isBanner ? box.offsetY + (1 - bandH) * box.contentH : box.offsetY + ov.y * box.contentH);
         return (
           <img
             key={ov.id || src}
             src={src}
             alt=""
-            className={isFrame ? 'absolute object-cover' : 'absolute object-contain'}
+            className={isFrame || isBanner ? 'absolute object-cover' : 'absolute object-contain'}
             style={{
               left,
               top,
@@ -108,11 +224,65 @@ function OverlayPreviewLayer({ videoRef, overlays }) {
   );
 }
 
-export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true }) {
+export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true, preview = null, onCanvasAspect }) {
   const canvasRef = useRef(null);
+  const stageRef = useRef(null);
   const [roi, setRoi] = useState(null); // { x, y, w, h } normalized to VIDEO content (0 to 1)
+  const [viewMode, setViewMode] = useState('after');
+  const [box, setBox] = useState({ offsetX: 0, offsetY: 0, contentW: 0, contentH: 0, videoW: 0, videoH: 0 });
+  const [srcSize, setSrcSize] = useState({ w: 0, h: 0 });
   const isDraggingRef = useRef(false);
   const startPosRef = useRef({ x: 0, y: 0 });
+  const keep = computeKeepRect(preview || {});
+  const showAfter = simple && viewMode === 'after';
+  const canvasAspect = preview?.canvasAspect || null;
+  const coverKey = preview?.captionCover === 'white_black' ? 'white_solid' : preview?.captionCover;
+  const coverStyle = COVER_SWATCH[coverKey] || null;
+  const cropPercent = Number(preview?.cropPercent) || 0;
+  const bottomCrop = Number(preview?.bottomCrop) || 0;
+  const captionCover = preview?.captionCover || 'off';
+  const wmMethod = preview?.wmMethod;
+
+  const measureStage = useCallback(() => {
+    const video = videoRef.current;
+    const stage = stageRef.current;
+    if (!video || !stage) return;
+    const rect = stage.getBoundingClientRect();
+    const vw = video.videoWidth || 0;
+    const vh = video.videoHeight || 0;
+    if (vw && vh) setSrcSize((prev) => (prev.w === vw && prev.h === vh ? prev : { w: vw, h: vh }));
+    if (!vw || !vh || rect.width <= 0 || rect.height <= 0) return;
+    const keepNow = computeKeepRect({
+      cropPercent,
+      bottomCrop,
+      captionCover,
+      wmMethod,
+    });
+    const useCanvas = showAfter && (canvasAspect === '16:9' || canvasAspect === '9:16');
+    if (useCanvas) {
+      const fit = fitKeepIntoCanvas(keepNow, vw, vh, rect.width, rect.height);
+      setBox({
+        offsetX: fit.padX,
+        offsetY: fit.padY,
+        contentW: fit.fittedW,
+        contentH: fit.fittedH,
+        videoW: fit.videoW,
+        videoH: fit.videoH,
+      });
+      return;
+    }
+    const scale = Math.min(rect.width / vw, rect.height / vh);
+    const contentW = vw * scale;
+    const contentH = vh * scale;
+    setBox({
+      offsetX: (rect.width - contentW) / 2,
+      offsetY: (rect.height - contentH) / 2,
+      contentW,
+      contentH,
+      videoW: contentW,
+      videoH: contentH,
+    });
+  }, [videoRef, showAfter, canvasAspect, cropPercent, bottomCrop, captionCover, wmMethod]);
 
   const drawCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -179,18 +349,30 @@ export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true 
     const video = videoRef.current;
     if (!video) return;
 
-    video.addEventListener('loadedmetadata', syncCanvasSize);
-    window.addEventListener('resize', syncCanvasSize);
+    const onMeta = () => {
+      syncCanvasSize();
+      measureStage();
+    };
+    video.addEventListener('loadedmetadata', onMeta);
+    window.addEventListener('resize', onMeta);
+    const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(onMeta) : null;
+    if (stageRef.current) ro?.observe(stageRef.current);
+    onMeta();
 
     return () => {
-      video.removeEventListener('loadedmetadata', syncCanvasSize);
-      window.removeEventListener('resize', syncCanvasSize);
+      video.removeEventListener('loadedmetadata', onMeta);
+      window.removeEventListener('resize', onMeta);
+      ro?.disconnect();
     };
-  }, [syncCanvasSize, videoRef]);
+  }, [syncCanvasSize, measureStage, videoRef]);
 
   useEffect(() => {
     drawCanvas();
   }, [roi, drawCanvas]);
+
+  useLayoutEffect(() => {
+    measureStage();
+  }, [measureStage]);
 
   const handleMouseDown = (e) => {
     const canvas = canvasRef.current;
@@ -254,18 +436,257 @@ export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true 
     onRoiChange?.(presetRoi);
   };
 
+  const b = Number(preview?.brightness) || 0;
+  const c = Number(preview?.contrast) || 1;
+  const sat = Number(preview?.saturation) || 1;
+  const afterFilter = showAfter
+    ? `brightness(${1 + b}) contrast(${c}) saturate(${sat})`
+    : undefined;
+  const afterFlip = showAfter && preview?.hflip ? 'scaleX(-1)' : undefined;
+  const afterLayout = Boolean(showAfter && canvasAspect && box.contentW > 0 && box.videoW > 0);
+  const keepPx = afterLayout
+    ? {
+        left: box.offsetX,
+        top: box.offsetY,
+        width: box.contentW,
+        height: box.contentH,
+      }
+    : {
+        left: box.offsetX + keep.left * box.contentW,
+        top: box.offsetY + keep.top * box.contentH,
+        width: keep.keepW * box.contentW,
+        height: keep.keepH * box.contentH,
+      };
+  const coverPxH = keep.coverH * keepPx.height;
+  const srcLabel = formatPixelAspect(srcSize.w, srcSize.h);
+  const stageStyle = stageBoxStyle(showAfter, canvasAspect, srcSize.w, srcSize.h);
+
   return (
     <div className="w-full space-y-4">
-      {/* Video Container with Overlay */}
-      <div className="relative w-full aspect-video bg-slate-900 rounded-3xl overflow-hidden shadow-md border border-slate-200">
-        <video
-          ref={videoRef}
-          onLoadedMetadata={syncCanvasSize}
-          className="w-full h-full object-contain block"
-          controls
-          crossOrigin="anonymous"
-        />
-        <OverlayPreviewLayer videoRef={videoRef} overlays={overlays} />
+      {simple && (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="inline-flex rounded-xl border border-slate-200 bg-slate-50 p-0.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setViewMode('before')}
+                className={`px-3 py-1.5 text-[11px] font-bold rounded-lg ${
+                  viewMode === 'before' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500'
+                }`}
+              >
+                Gốc
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('after')}
+                className={`px-3 py-1.5 text-[11px] font-bold rounded-lg ${
+                  viewMode === 'after' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-500'
+                }`}
+              >
+                Sau crop / config
+              </button>
+            </div>
+            {showAfter && preview?.hasVertical && preview?.hasHorizontal && (
+              <div className="inline-flex rounded-xl border border-blue-200 bg-blue-50 p-0.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => onCanvasAspect?.('9:16')}
+                  className={`px-2.5 py-1.5 text-[11px] font-black rounded-lg ${
+                    canvasAspect === '9:16' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-500'
+                  }`}
+                >
+                  9:16
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onCanvasAspect?.('16:9')}
+                  className={`px-2.5 py-1.5 text-[11px] font-black rounded-lg ${
+                    canvasAspect === '16:9' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-500'
+                  }`}
+                >
+                  16:9
+                </button>
+              </div>
+            )}
+          </div>
+          <p className="text-[11px] text-slate-500 font-medium min-w-0 sm:truncate">
+            {showAfter
+              ? `Khung xuất ${canvasAspect || srcLabel || 'nguồn'} sau cắt mép, cắt đáy, lật, màu và phủ chữ.`
+              : 'Video gốc. Vùng xám = phần sẽ bị cắt.'}
+          </p>
+        </div>
+      )}
+
+      <div
+        ref={stageRef}
+        className="relative bg-slate-950 rounded-3xl overflow-hidden shadow-md border border-slate-200"
+        style={stageStyle}
+      >
+        <div
+          className={`absolute overflow-hidden ${afterLayout ? '' : 'inset-0'}`}
+          style={afterLayout
+            ? {
+                left: box.offsetX,
+                top: box.offsetY,
+                width: box.contentW,
+                height: box.contentH,
+              }
+            : undefined}
+        >
+          <video
+            ref={videoRef}
+            onLoadedMetadata={() => {
+              syncCanvasSize();
+              measureStage();
+            }}
+            className={afterLayout
+              ? 'absolute max-w-none origin-center'
+              : 'w-full h-full object-contain block origin-center'}
+            controls={!showAfter}
+            crossOrigin="anonymous"
+            style={afterLayout
+              ? {
+                  left: -keep.left * box.videoW,
+                  top: -keep.top * box.videoH,
+                  width: box.videoW,
+                  height: box.videoH,
+                  objectFit: 'fill',
+                  filter: afterFilter,
+                  transform: afterFlip,
+                }
+              : {
+                  filter: afterFilter,
+                  transform: afterFlip,
+                }}
+          />
+          <OverlayPreviewLayer videoRef={videoRef} overlays={overlays} contained={afterLayout} />
+        </div>
+
+        {simple && box.contentW > 0 && !afterLayout && (
+          <>
+            <div
+              className="absolute pointer-events-none z-[8] bg-slate-950/55"
+              style={{ left: 0, top: 0, right: 0, height: keepPx.top }}
+            />
+            <div
+              className="absolute pointer-events-none z-[8] bg-slate-950/55"
+              style={{
+                left: 0,
+                top: keepPx.top + keepPx.height,
+                right: 0,
+                bottom: 0,
+              }}
+            />
+            <div
+              className="absolute pointer-events-none z-[8] bg-slate-950/55"
+              style={{
+                left: 0,
+                top: keepPx.top,
+                width: keepPx.left,
+                height: keepPx.height,
+              }}
+            />
+            <div
+              className="absolute pointer-events-none z-[8] bg-slate-950/55"
+              style={{
+                left: keepPx.left + keepPx.width,
+                top: keepPx.top,
+                right: 0,
+                height: keepPx.height,
+              }}
+            />
+          </>
+        )}
+
+        {simple && box.contentW > 0 && (
+          <div
+            className="absolute z-[9] border-2 border-dashed border-sky-300/90"
+            style={{
+              left: keepPx.left,
+              top: keepPx.top,
+              width: keepPx.width,
+              height: keepPx.height,
+              pointerEvents: showAfter ? 'auto' : 'none',
+            }}
+            onClick={() => {
+              if (!showAfter) return;
+              const video = videoRef.current;
+              if (!video) return;
+              if (video.paused) video.play().catch(() => {});
+              else video.pause();
+            }}
+          >
+            {!afterLayout && (
+              <span className="absolute left-2 top-2 rounded bg-sky-600 px-1.5 py-0.5 text-[10px] font-black text-white pointer-events-none">
+                Khung sau crop
+              </span>
+            )}
+          </div>
+        )}
+
+        {showAfter && (
+          <div className="absolute top-2 left-2 z-30 flex flex-wrap items-center gap-1 pointer-events-none max-w-[calc(100%-1rem)]">
+            {canvasAspect ? (
+              <span className="rounded-md bg-blue-600 px-1.5 py-0.5 text-[10px] font-black text-white shadow">
+                {canvasAspect}
+              </span>
+            ) : null}
+            {srcLabel ? (
+              <span className="rounded-md bg-black/65 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                {canvasAspect && srcLabel !== canvasAspect
+                  ? `Gốc ${srcLabel} → fit ${canvasAspect}`
+                  : `Gốc ${srcLabel}`}
+              </span>
+            ) : null}
+          </div>
+        )}
+
+        {simple && keep.coverOn && box.contentW > 0 && (coverStyle || preview?.captionCoverUrl) && (
+          <>
+            <div
+              className="absolute pointer-events-none z-[11] overflow-hidden"
+              style={{
+                left: keepPx.left,
+                width: keepPx.width,
+                height: Math.max(28, coverPxH),
+                top: keepPx.top + keepPx.height - Math.max(28, coverPxH),
+                background: preview?.captionCoverUrl ? '#111' : coverStyle?.bg,
+              }}
+            >
+              {preview?.captionCoverUrl ? (
+                <img
+                  src={preview.captionCoverUrl}
+                  alt=""
+                  className="absolute inset-0 w-full h-full object-cover"
+                />
+              ) : null}
+              {!preview?.captionCoverUrl && (
+                <span
+                  className="absolute inset-x-2 bottom-2 text-center text-[10px] font-extrabold leading-tight"
+                  style={{ color: coverStyle?.fg || '#fff' }}
+                >
+                  Vietsub mẫu
+                </span>
+              )}
+            </div>
+            {preview?.captionCoverUrl && showAfter && (
+              <div
+                className="absolute pointer-events-none z-[12] flex justify-center"
+                style={{
+                  left: keepPx.left,
+                  width: keepPx.width,
+                  top: keepPx.top + keepPx.height - Math.max(28, coverPxH) - 34,
+                  height: 28,
+                }}
+              >
+                <span className="rounded-md bg-black/70 px-2 py-1 text-[10px] font-bold text-white leading-none">
+                  Vietsub mẫu
+                </span>
+              </div>
+            )}
+          </>
+        )}
+
         <canvas
           ref={canvasRef}
           onMouseDown={simple ? undefined : handleMouseDown}
@@ -274,11 +695,26 @@ export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true 
           onMouseLeave={simple ? undefined : handleMouseUp}
           className={`absolute top-0 left-0 w-full h-full z-10 ${simple ? 'pointer-events-none' : 'cursor-crosshair'}`}
         />
+        {showAfter && (
+          <div className="absolute left-0 right-0 bottom-0 z-20">
+            <PreviewTransport videoRef={videoRef} />
+          </div>
+        )}
       </div>
 
       {simple ? (
         <p className="text-[11px] text-slate-500 font-medium px-1">
-          Xem trước clip. Chữ/logo máy tự quét khi bấm Reup — không cần khoanh vùng.
+          {showAfter
+            ? `Khung ${canvasAspect || srcLabel || 'nguồn'} · crop mép ${Number(preview?.cropPercent || 0).toFixed(1)}%`
+              + (keep.coverOn
+                ? ` · phủ ${(keep.coverH * 100).toFixed(0)}% đáy`
+                : ` · cắt đáy ${Number(preview?.bottomCrop || 0).toFixed(0)}%`)
+              + (preview?.hflip ? ' · lật ngang' : '')
+              + (Number(preview?.speedRatio) && Math.abs(Number(preview.speedRatio) - 1) > 0.009
+                ? ` · tốc độ ${Number(preview.speedRatio).toFixed(2)}x`
+                : '')
+              + '.'
+            : 'Video gốc. Kéo slider crop / phủ chữ để xem khung sẽ ra.'}
         </p>
       ) : (
       <div className="clean-card p-4 rounded-2xl shadow-xs space-y-2.5 text-xs">

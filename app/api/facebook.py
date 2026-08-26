@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app.config import settings
@@ -28,6 +30,112 @@ REQUIRED_SCOPES = {"pages_show_list", "pages_read_engagement", "pages_manage_pos
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _avatar_dir() -> str:
+    path = os.path.join(str(settings.CHANNELS_DIR), "facebook", "avatars")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def avatar_file_path(page_id: str) -> str:
+    return os.path.join(_avatar_dir(), f"{page_id}.jpg")
+
+
+def cached_avatar_path(page_id: str) -> str:
+    path = avatar_file_path(str(page_id or ""))
+    return path if path and os.path.isfile(path) and os.path.getsize(path) > 32 else ""
+
+
+def page_picture_api_path(page_id: str) -> str:
+    pid = str(page_id or "").strip()
+    return f"/api/v1/facebook/pages/{pid}/picture" if pid else ""
+
+
+def _ensure_page_avatar(page_id: str) -> str:
+    """Download the Fanpage avatar through Graph (CDN URLs hang in the UI)."""
+    pid = str(page_id or "").strip()
+    if not pid:
+        return ""
+    existing = cached_avatar_path(pid)
+    if existing:
+        return existing
+    with get_db_connection(settings.DB_PATH) as conn:
+        row = conn.execute(
+            """
+            SELECT fp.page_token_ref, fc.graph_version
+            FROM facebook_pages fp
+            JOIN facebook_connections fc ON fc.id = fp.connection_id
+            WHERE fp.page_id = ?
+            """,
+            (pid,),
+        ).fetchone()
+    if not row:
+        return ""
+    token = get_secret(row["page_token_ref"])
+    if not token:
+        return ""
+    client = FacebookClient(row["graph_version"] or "v24.0", timeout=12.0)
+    try:
+        try:
+            profile = client.get_page_profile(pid, token)
+        except Exception:
+            profile = {}
+        blob = client.download_page_picture(pid, token)
+        dest = avatar_file_path(pid)
+        tmp = dest + ".tmp"
+        with open(tmp, "wb") as handle:
+            handle.write(blob)
+        os.replace(tmp, dest)
+        if profile:
+            payload = _page_payload({**profile, "id": pid, "access_token": "x", "tasks": ["CREATE_CONTENT"]})
+            now = _now()
+            with get_db_connection(settings.DB_PATH) as conn:
+                conn.execute(
+                    """
+                    UPDATE facebook_pages
+                    SET name = COALESCE(NULLIF(?, ''), name),
+                        category = COALESCE(NULLIF(?, ''), category),
+                        about = COALESCE(NULLIF(?, ''), about),
+                        username = COALESCE(NULLIF(?, ''), username),
+                        link = COALESCE(NULLIF(?, ''), link),
+                        fan_count = CASE WHEN ? > 0 THEN ? ELSE fan_count END,
+                        followers_count = CASE WHEN ? > 0 THEN ? ELSE followers_count END,
+                        updated_at = ?
+                    WHERE page_id = ?
+                    """,
+                    (
+                        payload["name"],
+                        payload["category"],
+                        payload["about"],
+                        payload["username"],
+                        payload["link"],
+                        payload["fan_count"], payload["fan_count"],
+                        payload["followers_count"], payload["followers_count"],
+                        now,
+                        pid,
+                    ),
+                )
+                conn.execute(
+                    """
+                    UPDATE channels
+                    SET name = COALESCE(NULLIF(?, ''), name),
+                        handle = COALESCE(NULLIF(?, ''), handle),
+                        description = COALESCE(NULLIF(?, ''), description),
+                        updated_at = ?
+                    WHERE channel_id IN (
+                        SELECT channel_id FROM channel_destinations
+                        WHERE provider = 'facebook' AND destination_id = ?
+                    )
+                    """,
+                    (payload["name"], payload["username"], payload["about"] or payload["category"], now, pid),
+                )
+                conn.commit()
+        return dest if os.path.isfile(dest) else ""
+    except Exception:
+        return cached_avatar_path(pid)
+    finally:
+        client.close()
 
 
 def _graph_version(value: str) -> str:
@@ -61,20 +169,50 @@ class FacebookBindRequest(BaseModel):
     auto_publish: bool = True
 
 
+def enlarge_facebook_picture(url: str) -> str:
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    return (
+        text.replace("_s50x50", "_s200x200")
+        .replace("s50x50", "s200x200")
+        .replace("p50x50", "p200x200")
+    )
+
+
+def _picture_url(page: Dict[str, Any]) -> str:
+    picture = page.get("picture") or page.get("picture_url") or ""
+    if isinstance(picture, str):
+        return enlarge_facebook_picture(picture)
+    if not isinstance(picture, dict):
+        return ""
+    data = picture.get("data") if isinstance(picture.get("data"), dict) else picture
+    return enlarge_facebook_picture(str(data.get("url") or ""))
+
+
 def _page_payload(page: Dict[str, Any]) -> Dict[str, Any]:
     tasks = [str(item) for item in (page.get("tasks") or [])]
-    picture = page.get("picture") or {}
-    picture_data = picture.get("data") if isinstance(picture, dict) else {}
+    try:
+        fan_count = int(page.get("fan_count") or 0)
+    except (TypeError, ValueError):
+        fan_count = 0
+    try:
+        followers_count = int(page.get("followers_count") or 0)
+    except (TypeError, ValueError):
+        followers_count = 0
     return {
-        "page_id": str(page.get("id") or ""),
+        "page_id": str(page.get("id") or page.get("page_id") or ""),
         "name": str(page.get("name") or ""),
         "category": str(page.get("category") or ""),
         "tasks": tasks,
-        "picture_url": str(
-            picture_data.get("url") if isinstance(picture_data, dict) else ""
-        ),
+        "picture_url": _picture_url(page),
         "can_publish": "CREATE_CONTENT" in {task.upper() for task in tasks},
         "access_token": str(page.get("access_token") or ""),
+        "username": str(page.get("username") or "").lstrip("@"),
+        "link": str(page.get("link") or ""),
+        "about": str(page.get("about") or ""),
+        "fan_count": fan_count,
+        "followers_count": followers_count,
     }
 
 
@@ -94,7 +232,18 @@ def _materialize_page_channels(conn, pages: List[Dict[str, Any]]) -> int:
             """,
             (page_id,),
         ).fetchone()
+        name = str(page.get("name") or f"Facebook Page {page_id}")
+        handle = str(page.get("username") or "").lstrip("@")
+        description = str(page.get("about") or page.get("category") or "Facebook Fanpage")
         if existing:
+            conn.execute(
+                """
+                UPDATE channels
+                SET name = ?, handle = ?, description = ?, updated_at = ?
+                WHERE channel_id = ?
+                """,
+                (name, handle, description, now, existing["channel_id"]),
+            )
             continue
         channel_id = f"chan_fb_{page_id}"
         cursor = conn.execute(
@@ -106,10 +255,10 @@ def _materialize_page_channels(conn, pages: List[Dict[str, Any]]) -> int:
             """,
             (
                 channel_id,
-                str(page.get("name") or f"Facebook Page {page_id}"),
-                page_id,
+                name,
+                handle,
                 json.dumps(["facebook", "reels"], ensure_ascii=False),
-                str(page.get("category") or "Facebook Fanpage"),
+                description,
                 now,
                 now,
             ),
@@ -145,8 +294,9 @@ def _store_pages(pages: List[Dict[str, Any]]) -> int:
                 """
                 INSERT INTO facebook_pages (
                     page_id, connection_id, name, category, tasks, picture_url,
-                    page_token_ref, can_publish, last_synced_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    page_token_ref, can_publish, last_synced_at, updated_at,
+                    fan_count, followers_count, about, username, link
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(page_id) DO UPDATE SET
                     connection_id = excluded.connection_id,
                     name = excluded.name,
@@ -156,7 +306,12 @@ def _store_pages(pages: List[Dict[str, Any]]) -> int:
                     page_token_ref = excluded.page_token_ref,
                     can_publish = excluded.can_publish,
                     last_synced_at = excluded.last_synced_at,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    fan_count = excluded.fan_count,
+                    followers_count = excluded.followers_count,
+                    about = excluded.about,
+                    username = excluded.username,
+                    link = excluded.link
                 """,
                 (
                     page["page_id"],
@@ -169,6 +324,11 @@ def _store_pages(pages: List[Dict[str, Any]]) -> int:
                     int(page["can_publish"]),
                     now,
                     now,
+                    int(page.get("fan_count") or 0),
+                    int(page.get("followers_count") or 0),
+                    str(page.get("about") or ""),
+                    str(page.get("username") or ""),
+                    str(page.get("link") or ""),
                 ),
             )
         _materialize_page_channels(conn, normalized)
@@ -366,6 +526,18 @@ async def list_facebook_pages():
         data.pop("page_token_ref", None)
         pages.append(data)
     return {"pages": pages, "total": len(pages)}
+
+
+@router.get("/pages/{page_id}/picture")
+async def facebook_page_picture(page_id: str):
+    path = cached_avatar_path(page_id) or _ensure_page_avatar(page_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="Chưa có ảnh Fanpage")
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @router.put("/channels/{channel_id}/binding")

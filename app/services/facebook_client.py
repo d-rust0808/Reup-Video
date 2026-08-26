@@ -117,7 +117,11 @@ class FacebookClient:
     def list_pages(self, user_token: str) -> List[Dict[str, Any]]:
         url: Optional[str] = f"{self.base_url}/me/accounts"
         params: Optional[Dict[str, str]] = {
-            "fields": "id,name,access_token,category,tasks,picture{url}",
+            "fields": (
+                "id,name,access_token,category,tasks,username,link,"
+                "fan_count,followers_count,about,"
+                "picture.type(large){url,width,height}"
+            ),
             "limit": "100",
         }
         pages: List[Dict[str, Any]] = []
@@ -130,6 +134,32 @@ class FacebookClient:
             url = next_url or None
             params = None
         return pages
+
+    def get_page_profile(self, page_id: str, page_token: str) -> Dict[str, Any]:
+        response = self.client.get(
+            f"{self.base_url}/{page_id}",
+            params={
+                "fields": (
+                    "name,category,username,link,about,"
+                    "fan_count,followers_count,picture.type(large){url,width,height}"
+                )
+            },
+            headers=self._auth(page_token),
+        )
+        return self._decode(response)
+
+    def download_page_picture(self, page_id: str, page_token: str) -> bytes:
+        response = self.client.get(
+            f"{self.base_url}/{page_id}/picture",
+            params={"type": "large"},
+            headers=self._auth(page_token),
+        )
+        if not response.is_success or not response.content:
+            raise FacebookAPIError("Không tải được ảnh Fanpage")
+        content_type = str(response.headers.get("content-type") or "")
+        if "image" not in content_type and response.content[:3] != b"\xff\xd8\xff":
+            raise FacebookAPIError("Facebook không trả về ảnh đại diện")
+        return response.content
 
     def start_reel(self, page_id: str, page_token: str) -> Dict[str, str]:
         response = self.client.post(

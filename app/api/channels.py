@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.core.database import get_db_connection
+from app.services.facebook_distribution import absolute_facebook_permalink
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -36,6 +37,7 @@ class ChannelCreateRequest(BaseModel):
     handle: Optional[str] = Field(default="", description="ID/Handle kênh (@username)")
     tags: Optional[List[str]] = Field(default_factory=list, description="Danh sách nhãn/tag gắn cho kênh")
     description: Optional[str] = Field(default="", description="Mô tả nội dung kênh")
+    notes: Optional[str] = Field(default="", description="Ghi chú nội bộ khi đăng kênh")
     color: Optional[str] = Field(default="blue", description="Màu nhận diện kênh (blue, purple, emerald, rose, amber, cyan)")
     overlays: Optional[List[dict]] = None
 
@@ -46,6 +48,7 @@ class ChannelUpdateRequest(BaseModel):
     handle: Optional[str] = None
     tags: Optional[List[str]] = None
     description: Optional[str] = None
+    notes: Optional[str] = None
     color: Optional[str] = None
     status: Optional[str] = None  # ACTIVE, ARCHIVED, PAUSED
     overlays: Optional[List[dict]] = None
@@ -86,6 +89,20 @@ async def list_channels():
             SELECT c.*, cd.destination_id AS facebook_page_id,
                    cd.auto_publish AS facebook_auto_publish,
                    fp.name AS facebook_page_name,
+                   fp.picture_url AS facebook_picture_url,
+                   fp.category AS facebook_category,
+                   fp.can_publish AS facebook_can_publish,
+                   fp.fan_count AS facebook_fan_count,
+                   fp.followers_count AS facebook_followers_count,
+                   fp.about AS facebook_about,
+                   fp.username AS facebook_username,
+                   fp.link AS facebook_link,
+                   td.destination_id AS tiktok_open_id,
+                   td.auto_publish AS tiktok_auto_publish,
+                   ta.username AS tiktok_username,
+                   ta.nickname AS tiktok_nickname,
+                   ta.avatar_url AS tiktok_avatar_url,
+                   ta.can_publish AS tiktok_can_publish,
                    COUNT(cv.id) as video_count,
                    SUM(CASE WHEN cv.publish_status = 'PUBLISHED' THEN 1 ELSE 0 END) as published_count,
                    SUM(CASE WHEN cv.publish_status = 'READY' THEN 1 ELSE 0 END) as ready_count
@@ -94,11 +111,16 @@ async def list_channels():
             LEFT JOIN channel_destinations cd
               ON cd.channel_id = c.channel_id AND cd.provider = 'facebook'
             LEFT JOIN facebook_pages fp ON fp.page_id = cd.destination_id
+            LEFT JOIN channel_destinations td
+              ON td.channel_id = c.channel_id AND td.provider = 'tiktok'
+            LEFT JOIN tiktok_accounts ta ON ta.open_id = td.destination_id
             GROUP BY c.channel_id
             ORDER BY c.created_at DESC
         """)
         rows = cursor.fetchall()
         
+        from app.api.facebook import enlarge_facebook_picture, page_picture_api_path
+
         channels = []
         for r in rows:
             d = dict(r)
@@ -112,6 +134,21 @@ async def list_channels():
                 d["overlays"] = []
             d["id"] = d.get("channel_id")
             d["facebook_auto_publish"] = bool(d.get("facebook_auto_publish"))
+            d["facebook_can_publish"] = bool(d.get("facebook_can_publish"))
+            d["tiktok_auto_publish"] = bool(d.get("tiktok_auto_publish"))
+            d["tiktok_can_publish"] = bool(d.get("tiktok_can_publish"))
+            page_id = str(d.get("facebook_page_id") or "").strip()
+            if page_id:
+                d["facebook_picture_url"] = page_picture_api_path(page_id)
+            else:
+                d["facebook_picture_url"] = enlarge_facebook_picture(d.get("facebook_picture_url") or "")
+            d["picture_url"] = d["facebook_picture_url"]
+            if not d["picture_url"] and d.get("tiktok_avatar_url"):
+                d["picture_url"] = d.get("tiktok_avatar_url") or ""
+            if not (d.get("handle") or "").strip() and d.get("facebook_username"):
+                d["handle"] = str(d.get("facebook_username") or "")
+            if not (d.get("handle") or "").strip() and d.get("tiktok_username"):
+                d["handle"] = str(d.get("tiktok_username") or "")
             channels.append(d)
             
         return {"channels": channels, "total": len(channels)}
@@ -130,11 +167,12 @@ async def create_channel(req: ChannelCreateRequest):
     with get_db_connection(settings.DB_PATH) as conn:
         conn.execute("""
             INSERT INTO channels (
-                channel_id, name, platform, handle, tags, description, color, overlays, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+                channel_id, name, platform, handle, tags, description, notes, color, overlays, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
         """, (
             channel_id, req.name.strip(), req.platform.lower().strip(),
             (req.handle or "").strip(), tags_json, (req.description or "").strip(),
+            (req.notes or "").strip(),
             req.color or "blue", overlays_json, now, now
         ))
         conn.commit()
@@ -177,6 +215,9 @@ async def update_channel(channel_id: str, req: ChannelUpdateRequest):
         if req.description is not None:
             updates.append("description = ?")
             vals.append(req.description.strip())
+        if req.notes is not None:
+            updates.append("notes = ?")
+            vals.append(req.notes.strip())
         if req.color is not None:
             updates.append("color = ?")
             vals.append(req.color)
@@ -203,6 +244,7 @@ async def delete_channel(channel_id: str):
     Deletes a channel and all its video assignments.
     """
     with get_db_connection(settings.DB_PATH) as conn:
+        conn.execute("DELETE FROM channel_group_members WHERE channel_id = ?", (channel_id,))
         conn.execute(
             "DELETE FROM distribution_jobs WHERE channel_video_id IN (SELECT id FROM channel_videos WHERE channel_id = ?)",
             (channel_id,),
@@ -425,6 +467,10 @@ async def list_channel_videos(
             
             if tag and tag not in d["tags"]:
                 continue
+            d["facebook_permalink"] = absolute_facebook_permalink(
+                d.get("facebook_permalink") or "",
+                video_id=str(d.get("remote_media_id") or ""),
+            )
             videos.append(d)
 
         return {"channel_id": channel_id, "videos": videos, "total": len(videos)}
@@ -537,3 +583,230 @@ async def remove_video_from_channel(video_id: str):
         conn.commit()
 
     return {"id": video_id, "message": "Đã xóa video khỏi kênh"}
+
+
+class ChannelGroupRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    notes: Optional[str] = ""
+    color: Optional[str] = "blue"
+    channel_ids: Optional[List[str]] = None
+
+
+class ChannelGroupUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    notes: Optional[str] = None
+    color: Optional[str] = None
+    channel_ids: Optional[List[str]] = None
+
+
+def _load_group(conn, group_id: str) -> Optional[Dict[str, Any]]:
+    row = conn.execute("SELECT * FROM channel_groups WHERE group_id = ?", (group_id,)).fetchone()
+    if not row:
+        return None
+    data = dict(row)
+    members = [
+        r[0]
+        for r in conn.execute(
+            "SELECT channel_id FROM channel_group_members WHERE group_id = ? ORDER BY channel_id",
+            (group_id,),
+        ).fetchall()
+    ]
+    data["channel_ids"] = members
+    data["member_count"] = len(members)
+    return data
+
+
+def _replace_group_members(conn, group_id: str, channel_ids: Optional[List[str]]) -> None:
+    conn.execute("DELETE FROM channel_group_members WHERE group_id = ?", (group_id,))
+    seen = set()
+    for raw in channel_ids or []:
+        cid = str(raw or "").strip()
+        if not cid or cid in seen:
+            continue
+        exists = conn.execute("SELECT 1 FROM channels WHERE channel_id = ?", (cid,)).fetchone()
+        if not exists:
+            continue
+        seen.add(cid)
+        conn.execute(
+            "INSERT INTO channel_group_members (group_id, channel_id) VALUES (?, ?)",
+            (group_id, cid),
+        )
+
+
+def expand_group_channel_ids(db_path: str, group_ids: List[str]) -> Dict[str, Dict[str, str]]:
+    """channel_id -> {group_id, group_name} for the first group that contains it."""
+    mapping: Dict[str, Dict[str, str]] = {}
+    if not group_ids:
+        return mapping
+    with get_db_connection(db_path) as conn:
+        for gid in group_ids:
+            group = conn.execute(
+                "SELECT group_id, name FROM channel_groups WHERE group_id = ?",
+                (str(gid),),
+            ).fetchone()
+            if not group:
+                continue
+            rows = conn.execute(
+                "SELECT channel_id FROM channel_group_members WHERE group_id = ?",
+                (group["group_id"],),
+            ).fetchall()
+            for row in rows:
+                cid = row["channel_id"]
+                if cid not in mapping:
+                    mapping[cid] = {
+                        "group_id": group["group_id"],
+                        "group_name": group["name"],
+                    }
+    return mapping
+
+
+def record_publish_event(
+    db_path: str,
+    *,
+    job_id: str = "",
+    channel_video_id: str = "",
+    channel_id: str = "",
+    group_id: str = "",
+    group_name: str = "",
+    title: str = "",
+    caption: str = "",
+    notes: str = "",
+    status: str = "ASSIGNED",
+    permalink: str = "",
+) -> str:
+    event_id = f"plog_{uuid.uuid4().hex[:12]}"
+    now = _utc_now_iso()
+    channel_name = ""
+    page_id = ""
+    page_name = ""
+    with get_db_connection(db_path) as conn:
+        if channel_id:
+            ch = conn.execute(
+                "SELECT name FROM channels WHERE channel_id = ?",
+                (channel_id,),
+            ).fetchone()
+            if ch:
+                channel_name = ch["name"] or ""
+            dest = conn.execute(
+                """
+                SELECT cd.destination_id, fp.name
+                FROM channel_destinations cd
+                LEFT JOIN facebook_pages fp ON fp.page_id = cd.destination_id
+                WHERE cd.channel_id = ? AND cd.provider = 'facebook'
+                """,
+                (channel_id,),
+            ).fetchone()
+            if dest:
+                page_id = dest["destination_id"] or ""
+                page_name = dest["name"] or channel_name
+        conn.execute(
+            """
+            INSERT INTO publish_log (
+                id, job_id, channel_video_id, channel_id, channel_name,
+                group_id, group_name, page_id, page_name, title, caption, notes,
+                status, permalink, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id, job_id, channel_video_id, channel_id, channel_name,
+                group_id, group_name, page_id, page_name, title or "", caption or "",
+                notes or "", status, permalink or "", now, now,
+            ),
+        )
+        conn.commit()
+    return event_id
+
+
+@router.get("/channel-groups")
+async def list_channel_groups():
+    with get_db_connection(settings.DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT * FROM channel_groups ORDER BY created_at DESC"
+        ).fetchall()
+        groups = []
+        for row in rows:
+            item = _load_group(conn, row["group_id"])
+            if item:
+                groups.append(item)
+    return {"groups": groups, "total": len(groups)}
+
+
+@router.post("/channel-groups", status_code=status.HTTP_201_CREATED)
+async def create_channel_group(req: ChannelGroupRequest):
+    group_id = f"grp_{uuid.uuid4().hex[:8]}"
+    now = _utc_now_iso()
+    with get_db_connection(settings.DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO channel_groups (group_id, name, notes, color, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (group_id, req.name.strip(), (req.notes or "").strip(), req.color or "blue", now, now),
+        )
+        _replace_group_members(conn, group_id, req.channel_ids or [])
+        conn.commit()
+        group = _load_group(conn, group_id)
+    return {"group": group, "message": "Đã tạo nhóm Fanpage"}
+
+
+@router.put("/channel-groups/{group_id}")
+async def update_channel_group(group_id: str, req: ChannelGroupUpdateRequest):
+    with get_db_connection(settings.DB_PATH) as conn:
+        if not conn.execute("SELECT 1 FROM channel_groups WHERE group_id = ?", (group_id,)).fetchone():
+            raise HTTPException(status_code=404, detail="Nhóm không tồn tại")
+        updates = []
+        vals: List[Any] = []
+        if req.name is not None:
+            updates.append("name = ?")
+            vals.append(req.name.strip())
+        if req.notes is not None:
+            updates.append("notes = ?")
+            vals.append(req.notes.strip())
+        if req.color is not None:
+            updates.append("color = ?")
+            vals.append(req.color)
+        if updates:
+            updates.append("updated_at = ?")
+            vals.append(_utc_now_iso())
+            vals.append(group_id)
+            conn.execute(f"UPDATE channel_groups SET {', '.join(updates)} WHERE group_id = ?", vals)
+        if req.channel_ids is not None:
+            _replace_group_members(conn, group_id, req.channel_ids)
+            conn.execute(
+                "UPDATE channel_groups SET updated_at = ? WHERE group_id = ?",
+                (_utc_now_iso(), group_id),
+            )
+        conn.commit()
+        group = _load_group(conn, group_id)
+    return {"group": group, "message": "Đã lưu nhóm"}
+
+
+@router.delete("/channel-groups/{group_id}")
+async def delete_channel_group(group_id: str):
+    with get_db_connection(settings.DB_PATH) as conn:
+        conn.execute("DELETE FROM channel_group_members WHERE group_id = ?", (group_id,))
+        conn.execute("DELETE FROM channel_groups WHERE group_id = ?", (group_id,))
+        conn.commit()
+    return {"group_id": group_id, "message": "Đã xóa nhóm"}
+
+
+@router.get("/publish-log")
+async def list_publish_log(limit: int = Query(80, ge=1, le=300), job_id: str = "", channel_id: str = ""):
+    sql = "SELECT * FROM publish_log WHERE 1=1"
+    params: List[Any] = []
+    if job_id:
+        sql += " AND job_id = ?"
+        params.append(job_id)
+    if channel_id:
+        sql += " AND channel_id = ?"
+        params.append(channel_id)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    with get_db_connection(settings.DB_PATH) as conn:
+        rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+    for row in rows:
+        row["permalink"] = absolute_facebook_permalink(
+            row.get("permalink") or "",
+            page_id=str(row.get("page_id") or ""),
+        )
+    return {"events": rows, "total": len(rows)}

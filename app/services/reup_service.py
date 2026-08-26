@@ -22,12 +22,20 @@ logger = logging.getLogger(__name__)
 
 def find_ffmpeg_binary() -> Optional[str]:
     """Locates ffmpeg executable in PATH or standard system installation paths."""
+    env_path = os.environ.get("FFMPEG_PATH")
+    if env_path and os.path.exists(env_path):
+        return env_path
     path = shutil.which("ffmpeg")
-    if not path:
-        for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]:
-            if os.path.exists(candidate) and os.access(candidate, os.X_OK):
-                return candidate
-    return path
+    if path:
+        return path
+    for candidate in [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ]:
+        if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 _LIBASS_CACHE: Optional[bool] = None
@@ -181,17 +189,31 @@ def build_reup_filtergraph(
     Returns:
         (filter_complex_str, includes_audio_stream, video_filters_str, audio_filters_str)
     """
+    from app.services.caption_cover import (
+        caption_cover_drawbox,
+        cover_band_height,
+        drop_delogo_nodes,
+        normalize_caption_cover,
+        should_crop_bottom,
+        subtitle_force_style,
+    )
+
     vf_nodes = []
     extra_cover = (getattr(cfg, "text_cover_vf", None) or "").strip()
     if extra_cover:
-        # delogo on the original frame BEFORE hflip/crop so pixel coords stay valid
-        vf_nodes.extend([p for p in extra_cover.split(",") if p.strip()])
+        vf_nodes.extend(drop_delogo_nodes(extra_cover))
 
     if cfg.hflip:
         vf_nodes.append("hflip")
 
+    cover = normalize_caption_cover(getattr(cfg, "caption_cover", "off"))
     bottom = float(getattr(cfg, "subtitle_bottom_crop", 0.0) or 0.0)
-    if bottom > 0:
+    force_crop = bool(getattr(cfg, "force_bottom_crop", False))
+    cover_h = cover_band_height(bottom, cover)
+    # Image banner keeps 9:16 (no empty letterbox). Color plate paints. Crop cuts pixels.
+    do_bottom_crop = should_crop_bottom(cover, force_crop, bottom)
+    if do_bottom_crop:
+        cover = "off"
         vf_nodes.append(f"crop=iw:trunc(ih*(1-{bottom:.4f})/2)*2:0:0")
 
     if getattr(cfg, "dynamic_motion", False):
@@ -204,14 +226,14 @@ def build_reup_filtergraph(
     # Always force even dimensions after crop so yuv420p / x264 never rejects the encode
     vf_nodes.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
 
+    if cover != "off":
+        bar = caption_cover_drawbox(cover, cover_h)
+        if bar:
+            vf_nodes.append(bar)
+
     # Burn Vietsub on original timestamps BEFORE setpts so SRT does not need rescaling
     if burn_srt_path and os.path.exists(burn_srt_path):
-        # High-contrast, clean subtitle plate: bold white text, black border & semi-transparent dark plate
-        style = (
-            "FontName=DejaVu Sans,FontSize=18,Bold=1,Alignment=2,"
-            "MarginV=12,MarginL=36,MarginR=36,BorderStyle=3,Outline=4,Shadow=0,"
-            "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&HA0000000"
-        )
+        style = subtitle_force_style(cover, cover_h)
         sub_path = _ffmpeg_subtitles_path(burn_srt_path)
         vf_nodes.append(f"subtitles='{sub_path}':force_style='{style}'")
 
@@ -503,9 +525,15 @@ def _probe_video_size(path: str) -> Tuple[int, int]:
 
 def _filtered_video_size(path: str, cfg: ReupConfig) -> Tuple[int, int]:
     """Estimate the stable output dimensions before overlays are appended."""
+    from app.services.caption_cover import should_crop_bottom
+
     width, height = _probe_video_size(path)
     bottom = float(getattr(cfg, "subtitle_bottom_crop", 0.0) or 0.0)
-    if bottom > 0:
+    if should_crop_bottom(
+        getattr(cfg, "caption_cover", "off"),
+        bool(getattr(cfg, "force_bottom_crop", False)),
+        bottom,
+    ):
         height = int(height * (1.0 - bottom))
     if not getattr(cfg, "dynamic_motion", False):
         crop = float(getattr(cfg, "crop_percent", 0.0) or 0.0)
@@ -575,11 +603,8 @@ def burn_vietnamese_hardsub(video_path: str, srt_path: str, output_path: str, sp
         return ok
 
     fontfile = _find_subtitle_font()
-    style = (
-        "FontName=DejaVu Sans,FontSize=18,Bold=1,Alignment=2,"
-        "MarginV=12,MarginL=36,MarginR=36,BorderStyle=3,Outline=4,Shadow=0,"
-        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&HA0000000"
-    )
+    from app.services.caption_cover import subtitle_force_style
+    style = subtitle_force_style("off")
     sub_path = _ffmpeg_subtitles_path(work_srt)
     if fontfile:
         font_esc = _ffmpeg_subtitles_path(fontfile)
@@ -626,31 +651,24 @@ def build_tts_bgm_mix_filter(
     original_vocal_volume: Optional[float] = None,
     original_vocal_speed: float = 1.0,
 ) -> str:
-    """Mix TTS independently from the optional original-language vocal stem."""
-    voice = (
-        "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=2.20,highpass=f=80,lowpass=f=12000,"
-        "acompressor=threshold=-22dB:ratio=2.5:attack=8:release=90:makeup=2.0[voice];"
-    )
-    background = "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.0[bg];"
-    if original_vocal_volume is None:
-        bed = "[bg]anull[bed];"
-    else:
-        gain = max(0.0, min(1.0, float(original_vocal_volume)))
-        vocal_tempo = ",".join(_build_atempo_nodes(float(original_vocal_speed)))
-        vocal_tempo = f",{vocal_tempo}" if vocal_tempo else ""
-        bed = (
-            f"[2:a]aresample=44100,aformat=channel_layouts=stereo{vocal_tempo},volume={gain:.3f}[source_voice];"
-            "[bg][source_voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[bed];"
-        )
+    """Overlay Vietnamese TTS onto an already-processed original bed.
+
+    [0:a] must already contain cleaned original audio (BGM / leftover Chinese /
+    mute). original_vocal_volume is intentionally unused here so source-gain
+    controls cannot touch the Vietnamese voice.
+    """
+    _ = original_vocal_volume, original_vocal_speed
+    # asplit is required: an FFmpeg pad can only be consumed once. Reusing
+    # [voice] for both sidechain and amix dropped the TTS track entirely.
     return (
-        voice
-        + background
-        + bed
-        # Duck the source bed only while Vietnamese speech is present. The TTS
-        # track remains full level and cannot be attenuated by the Chinese gain.
-        + "[bed][voice]sidechaincompress=threshold=0.03:ratio=10:attack=15:release=350:makeup=1[ducked];"
-        + "[ducked][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amixed];"
-        + "[amixed]alimiter=limit=0.95[aout]"
+        "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=2.50,"
+        "highpass=f=80,lowpass=f=12000,"
+        "acompressor=threshold=-18dB:ratio=2.0:attack=5:release=80:makeup=3.0,"
+        "asplit=2[voice_duck][voice_mix];"
+        "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=0.50[bed];"
+        "[bed][voice_duck]sidechaincompress=threshold=0.012:ratio=16:attack=8:release=200:makeup=1[ducked];"
+        "[ducked]alimiter=limit=0.78[safebed];"
+        "[safebed][voice_mix]amix=inputs=2:duration=first:dropout_transition=0:weights=0.55 1.20:normalize=0[aout]"
     )
 
 
@@ -671,11 +689,12 @@ def mix_tts_with_background(
     original_vocal_volume: float = 0.10,
     original_vocal_speed: float = 1.0,
 ) -> bool:
+    """Lay the Vietnamese TTS track on top of already-cleaned original audio.
+
+    Source controls must already be baked into `video_path` audio. The leftover
+    Chinese slider never enters this mix.
     """
-    Mix TTS voiceover with original (possibly vocal-muted) audio.
-    Sidechain-ducks BGM under speech so silent stretches keep music body.
-    Does NOT replace BGM. Pads TTS to video length. Never uses -shortest.
-    """
+    _ = original_vocal_path, original_vocal_volume, original_vocal_speed
     ffmpeg_bin = find_ffmpeg_binary()
     if not ffmpeg_bin or not os.path.exists(video_path) or not os.path.exists(tts_audio_path):
         return False
@@ -698,25 +717,17 @@ def mix_tts_with_background(
     tmp_out = output_path + ".tmp_tts_mix.mp4"
     has_audio = detect_audio_stream(video_path)
     if has_audio:
-        has_original_vocal = bool(original_vocal_path and os.path.exists(original_vocal_path))
-        fc = build_tts_bgm_mix_filter(
-            original_vocal_volume if has_original_vocal else None,
-            original_vocal_speed,
-        )
+        fc = build_tts_bgm_mix_filter()
         cmd = [
             ffmpeg_bin, "-y",
             "-i", video_path,
             "-i", audio_to_use,
-        ]
-        if has_original_vocal:
-            cmd.extend(["-i", str(original_vocal_path)])
-        cmd.extend([
             "-filter_complex", fc,
             "-map", "0:v:0", "-map", "[aout]",
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             tmp_out,
-        ])
+        ]
     else:
         cmd = [
             ffmpeg_bin, "-y",
@@ -736,10 +747,10 @@ def mix_tts_with_background(
         if has_audio:
             # Fallback: keep BGM loud instead of crushing it
             fc2 = (
-                "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.0[bg];"
-                "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=2.20[voice];"
-                "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[amixed];"
-                "[amixed]dynaudnorm=f=120:g=10:p=0.95,alimiter=limit=0.94[aout]"
+                "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=0.45[bed];"
+                "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=3.20,asplit=2[voice_duck][voice_mix];"
+                "[bed][voice_duck]sidechaincompress=threshold=0.015:ratio=12:attack=10:release=220:makeup=1[ducked];"
+                "[ducked][voice_mix]amix=inputs=2:duration=first:dropout_transition=0:weights=0.50 1.20:normalize=0[aout]"
             )
             cmd[cmd.index("-filter_complex") + 1] = fc2
             res2 = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -785,6 +796,12 @@ def process_reup_video(
     Enforces strict input verification and parameter boundary checks.
     """
     # 1. Input Validation
+    def _report(progress: float, message: str) -> None:
+        cb = kwargs.get("stage_progress_callback")
+        if not callable(cb):
+            return
+        cb(float(progress), message)
+
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input file not found: {input_path}")
     if os.path.getsize(input_path) == 0:
@@ -825,7 +842,6 @@ def process_reup_video(
 
     has_audio = detect_audio_stream(input_path)
     demucs_bgm_path: Optional[str] = None
-    demucs_vocal_path: Optional[str] = None
     lib_bgm_path: Optional[str] = None
     raw_bgm = getattr(cfg, "bgm_path", None)
     if raw_bgm:
@@ -862,17 +878,23 @@ def process_reup_video(
         else:
             extracted_a: Optional[str] = None
             bgm_out: Optional[str] = None
-            vocal_out: Optional[str] = None
             try:
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_a:
                     extracted_a = tmp_a.name
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_bgm:
                     bgm_out = tmp_bgm.name
                 if extract_audio_stream(input_path, extracted_a):
+                    from app.services.activity import heartbeat
+                    _report(0.90, "🎧 Đang tách giọng/BGM bằng Demucs — bước này thường mất 1–3 phút...")
                     with tempfile.TemporaryDirectory(prefix="demucs_reup_") as demucs_dir:
-                        vocal_path, separated_bgm_path = extract_vocals_demucs(extracted_a, demucs_dir)
-                        tts_override = kwargs.get("tts_audio_override")
-                        if cfg.vocal_mute_strategy == "demucs_duck" and not tts_override:
+                        with heartbeat(
+                            lambda msg: _report(0.90, msg),
+                            "Demucs đang tách vocal/BGM",
+                            interval=8.0,
+                        ):
+                            vocal_path, separated_bgm_path = extract_vocals_demucs(extracted_a, demucs_dir)
+                        _report(0.91, "✅ Đã tách xong vocal và nhạc nền")
+                        if cfg.vocal_mute_strategy == "demucs_duck":
                             if not mix_separated_stems(
                                 separated_bgm_path,
                                 vocal_path,
@@ -883,11 +905,6 @@ def process_reup_video(
                         else:
                             shutil.copyfile(separated_bgm_path, bgm_out)
                         demucs_bgm_path = bgm_out
-                        if cfg.vocal_mute_strategy == "demucs_duck" and tts_override:
-                            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_vocal:
-                                vocal_out = tmp_vocal.name
-                            shutil.copyfile(vocal_path, vocal_out)
-                            demucs_vocal_path = vocal_out
                 elif cfg.vocal_mute_strategy == "demucs":
                     raise RuntimeError("Failed to extract audio stream for Demucs vocal separation")
             except Exception as e:
@@ -905,14 +922,10 @@ def process_reup_video(
                         os.remove(bgm_out)
                     except OSError:
                         pass
-                if vocal_out and vocal_out != demucs_vocal_path and os.path.exists(vocal_out):
-                    try:
-                        os.remove(vocal_out)
-                    except OSError:
-                        pass
 
     try:
-        # A Demucs BGM stem is already voice-free; only apply visual and timing FX to it.
+        # Original-audio cleanup (Demucs/BGM/leftover Chinese) is already baked
+        # into this stem. Later TTS overlay must not re-apply those gains.
         graph_cfg = cfg.model_copy(update={"enable_vocal_mute": False}) if demucs_bgm_path else cfg
         audio_speech_intervals = None if cfg.enable_vocal_mute else speech_intervals
         filter_complex, includes_audio, vf_str, af_str = build_reup_filtergraph(
@@ -921,13 +934,39 @@ def process_reup_video(
             burn_srt_path=srt_override if libass_hardsub else None,
             speech_intervals=audio_speech_intervals,
         )
-        from app.services.overlay_service import append_overlay_filter, normalize_overlays, overlay_input_args
-        overlay_items = normalize_overlays(getattr(cfg, "overlays", None))
+        from app.services.overlay_service import (
+            append_overlay_filter,
+            ensure_caption_cover_banner,
+            normalize_overlays,
+            overlay_input_args,
+        )
+        from app.services.caption_cover import (
+            cover_band_height,
+            normalize_caption_cover,
+            resolve_caption_cover_image,
+        )
+        cover_kind = normalize_caption_cover(getattr(cfg, "caption_cover", "off"))
+        cover_img = resolve_caption_cover_image(
+            getattr(cfg, "caption_cover_image", None),
+            getattr(cfg, "caption_cover_url", None),
+        )
+        band = cover_band_height(
+            float(getattr(cfg, "subtitle_bottom_crop", 0.0) or 0.0),
+            cover_kind,
+        )
+        if cover_kind == "image" and cover_img:
+            overlay_items = ensure_caption_cover_banner(
+                getattr(cfg, "overlays", None), cover_img, band
+            )
+            logger.info("Caption cover banner path=%s band_h=%.2f", cover_img, band)
+            _report(0.93, f"🖼️ Phủ dải đáy bằng ảnh ({int(round(band * 100))}%) — giữ khung 9:16")
+        else:
+            overlay_items = normalize_overlays(getattr(cfg, "overlays", None))
         overlay_paths: List[str] = []
         extra_audio = bool(lib_bgm_path) or bool(demucs_bgm_path and os.path.exists(demucs_bgm_path))
         first_ov = 2 if extra_audio else 1
+        main_size = _filtered_video_size(input_path, cfg)
         if overlay_items:
-            main_size = _filtered_video_size(input_path, cfg)
             filter_complex, overlay_paths = append_overlay_filter(
                 filter_complex, overlay_items, first_overlay_index=first_ov, main_size=main_size
             )
@@ -948,8 +987,11 @@ def process_reup_video(
                 )
             subtitle_track = render_srt_to_apng(
                 timed_srt,
-                *_filtered_video_size(input_path, cfg),
+                main_size[0],
+                main_size[1],
                 os.path.join(subtitle_track_dir, "subtitles.png"),
+                cover_band=band if cover_kind != "off" else 0.0,
+                cover_kind=cover_kind,
             )
             if subtitle_track:
                 subtitle_index = first_ov + len(overlay_paths)
@@ -995,9 +1037,18 @@ def process_reup_video(
                     cmd.extend(["-an"])
                 cmd.append(output_path)
 
-                res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                from app.services.activity import heartbeat
+                encoder_label = encode_args[1] if len(encode_args) > 1 else "h264"
+                _report(0.94, f"🎞️ Đang encode FFmpeg ({encoder_label}) — crop/speed/grain/mix audio...")
+                with heartbeat(
+                    lambda msg: _report(0.94, msg),
+                    f"FFmpeg đang encode ({encoder_label})",
+                    interval=8.0,
+                ):
+                    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
                 if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     ffmpeg_success = True
+                    _report(0.96, "✅ FFmpeg render xong")
                 else:
                     err = (res.stderr or res.stdout or "")
                     logger.error("FFmpeg reup failed (%s): %s", res.returncode, err[-1500:])
@@ -1014,9 +1065,11 @@ def process_reup_video(
                             ]
                             video_arg_index = cmd.index("-c:v")
                             cmd[video_arg_index:video_arg_index + len(encode_args)] = software_args
+                            _report(0.94, "🎞️ Encoder phần cứng lỗi — đang encode lại bằng libx264...")
                             res_sw = subprocess.run(cmd, capture_output=True, text=True, check=False)
                             if res_sw.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                                 ffmpeg_success = True
+                                _report(0.96, "✅ FFmpeg render xong (libx264)")
                     if not ffmpeg_success and "delogo" in fc and "Logo area is outside" in err:
                         logger.warning("Retrying encode without mid-text delogo")
                         cfg.text_cover_vf = ""
@@ -1052,23 +1105,19 @@ def process_reup_video(
     dubbed_vi = False
     tts_audio_override = kwargs.get("tts_audio_override")
     if tts_audio_override and os.path.exists(tts_audio_override) and os.path.getsize(tts_audio_override) > 0:
+        _report(0.97, "🎙️ Đang phủ giọng Việt riêng lên audio gốc đã chỉnh...")
         dubbed_vi = mix_tts_with_background(
             output_path,
             tts_audio_override,
             output_path,
-            original_vocal_path=demucs_vocal_path,
-            original_vocal_volume=cfg.original_vocal_volume,
-            original_vocal_speed=cfg.speed_factor,
         )
-        if not dubbed_vi:
+        if dubbed_vi:
+            _report(0.98, "✅ Đã phủ giọng Việt (lớp riêng, to hơn audio gốc)")
+        else:
             logger.warning("TTS mix with background audio failed; keeping original audio track")
+            _report(0.98, "⚠️ Mix TTS với BGM thất bại — giữ audio gốc")
     elif vietnamese_dubbing and text_for_dubbing:
         dubbed_vi = apply_vietnamese_dubbing(output_path, text_for_dubbing, output_path=output_path)
-    if demucs_vocal_path and os.path.exists(demucs_vocal_path):
-        try:
-            os.remove(demucs_vocal_path)
-        except OSError:
-            pass
 
     # 4b. Add the selected subtitle output after TTS mixing.
     burned_sub = bool(burn_in_graph)
@@ -1281,10 +1330,12 @@ class ReupService:
         def report_stage(progress: float, message: str) -> None:
             if not callable(stage_callback):
                 return
-            try:
-                stage_callback(float(progress), message)
-            except Exception as e:
-                logger.debug("Pipeline progress callback failed: %s", e)
+            stage_callback(float(progress), message)
+
+        def report_busy(progress: float, start_message: str, label: str):
+            from app.services.activity import heartbeat
+            report_stage(progress, start_message)
+            return heartbeat(lambda msg: report_stage(progress, msg), label, interval=8.0)
         # Only use text_cover_vf if explicitly provided by configuration, avoiding unsolicited delogo blurring
         if not output_path:
             base, ext = os.path.splitext(video_path)
@@ -1293,9 +1344,12 @@ class ReupService:
         # Trim video at the start of the pipeline so STT, Vietsub and mixing align 100% with trimmed timestamps
         trim_st = float(getattr(cfg, "trim_start_sec", 0.0) or 0.0)
         trim_en = float(getattr(cfg, "trim_end_sec", 0.0) or 0.0)
+        if trim_st > 0.0 or trim_en > 0.0:
+            report_stage(0.74, f"✂️ Đang cắt video (bỏ {trim_st:.1f}s đầu, {trim_en:.1f}s cuối)...")
         effective_video_path, is_temp_trimmed = trim_video_input(video_path, trim_st, trim_en)
         if is_temp_trimmed:
             video_path = effective_video_path
+            report_stage(0.75, "✅ Đã cắt video xong, bắt đầu nhận lời thoại")
 
         synced_tts_audio: Optional[str] = None
         translated_srt: Optional[str] = None
@@ -1342,26 +1396,48 @@ class ReupService:
                     cfg.tts_engine = "edge-tts"
 
                 stt_max = 90.0 if style == "recap" and (vid_dur or 0) > 180 else None
-                report_stage(0.76, "🎧 Đang nhận dạng lời thoại gốc (Whisper)...")
-                stt_res = pyvideotrans.speech_to_text(
-                    video_path,
-                    detect_lang=src_lang,
-                    model_name="base",
-                    max_seconds=stt_max,
-                )
+                with report_busy(
+                    0.76,
+                    "🎧 Bắt đầu nhận dạng lời thoại gốc (Whisper)...",
+                    "Whisper đang nhận dạng lời thoại",
+                ):
+                    stt_res = pyvideotrans.speech_to_text(
+                        video_path,
+                        detect_lang=src_lang,
+                        model_name="base",
+                        max_seconds=stt_max,
+                        on_status=lambda msg: report_stage(0.76, msg),
+                    )
                 srt_path = stt_res.get("srt_path")
                 is_fallback = stt_res.get("status") in ("fallback", "empty")
-                report_stage(0.80, "✅ Đã nhận dạng lời thoại; chuẩn bị dịch DeepSeek...")
+                cue_count = int(stt_res.get("cue_count") or 0)
+                detected = stt_res.get("detected_language") or src_lang or "auto"
+                used_model = stt_res.get("model") or "base"
+                if is_fallback or not (isinstance(srt_path, str) and os.path.exists(srt_path)):
+                    report_stage(
+                        0.80,
+                        f"⚠️ Whisper không bắt được lời thoại (model={used_model}, lang={detected})",
+                    )
+                else:
+                    report_stage(
+                        0.80,
+                        f"✅ Whisper xong: {cue_count} câu · model {used_model} · lang {detected}. Chuẩn bị dịch kịch bản...",
+                    )
 
                 if isinstance(srt_path, str) and os.path.exists(srt_path) and not is_fallback:
-                    report_stage(0.82, "🌐 Đang dịch phụ đề sang tiếng Việt...")
-                    trans_res = pyvideotrans.translate_subtitles(
-                        srt_path,
-                        target_lang=cfg.target_lang,
-                        style=style,
-                        title=getattr(cfg, "post_title", "") or "",
-                        duration=vid_dur or 0,
-                    )
+                    with report_busy(
+                        0.82,
+                        f"🌐 Đang dịch {cue_count} câu sang tiếng Việt...",
+                        "Đang dịch kịch bản sang tiếng Việt",
+                    ):
+                        trans_res = pyvideotrans.translate_subtitles(
+                            srt_path,
+                            target_lang=cfg.target_lang,
+                            style=style,
+                            title=getattr(cfg, "post_title", "") or "",
+                            duration=vid_dur or 0,
+                            on_status=lambda msg: report_stage(0.82, msg),
+                        )
                     raw_trans_srt = trans_res.get("srt_path") if trans_res else None
                     if (
                         trans_res
@@ -1370,12 +1446,19 @@ class ReupService:
                         and subtitle_matches_target_language(raw_trans_srt, cfg.target_lang)
                     ):
                         translated_srt = raw_trans_srt
-                        report_stage(0.85, "✅ Dịch tiếng Việt hoàn tất; bắt đầu tổng hợp giọng đọc...")
+                        provider = (trans_res or {}).get("provider") or "dịch máy"
+                        report_stage(
+                            0.85,
+                            f"✅ Dịch tiếng Việt xong ({provider}, {cue_count} câu); bắt đầu tổng hợp giọng đọc...",
+                        )
                         logger.info(f"Vietsub SRT ready: {translated_srt}")
                     else:
                         translated_srt = None
-                        tts_warning = "Dịch phụ đề chưa hoàn tất; đã chặn bản trộn ngôn ngữ khỏi video."
+                        tts_warning = (trans_res or {}).get("warning") or (
+                            "Dịch phụ đề chưa hoàn tất; đã chặn bản trộn ngôn ngữ khỏi video."
+                        )
                         logger.error(tts_warning)
+                        report_stage(0.84, f"⚠️ {tts_warning}")
                     if style == "recap" and translated_srt:
                         try:
                             from app.services.xai_media_service import build_recap_lines, recap_to_srt
@@ -1405,6 +1488,7 @@ class ReupService:
                     if not translated_srt:
                         tts_warning = "STT không nhận được lời thoại (whisper fallback). Bỏ qua vietsub/lồng tiếng."
                         logger.warning(tts_warning)
+                        report_stage(0.84, f"⚠️ {tts_warning}")
 
                 if cfg.enable_tts and not synced_tts_audio and translated_srt and os.path.exists(translated_srt):
                     from app.config import Settings
@@ -1429,22 +1513,26 @@ class ReupService:
                         )
 
                     tts_result = None
-                    report_stage(0.86, "🎙️ Đang tổng hợp thuyết minh tiếng Việt...")
-                    try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            import threading
-                            result_holder = {}
-                            def _run():
-                                result_holder["value"] = asyncio.run(_run_tts())
-                            t = threading.Thread(target=_run)
-                            t.start()
-                            t.join()
-                            tts_result = result_holder.get("value")
-                        else:
-                            tts_result = loop.run_until_complete(_run_tts())
-                    except Exception:
-                        tts_result = asyncio.run(_run_tts())
+                    with report_busy(
+                        0.86,
+                        f"🎙️ Đang tổng hợp thuyết minh tiếng Việt ({cfg.tts_voice or 'vieneu'})...",
+                        "TTS đang đọc từng câu phụ đề",
+                    ):
+                        try:
+                            loop = asyncio.get_event_loop()
+                            if loop.is_running():
+                                import threading
+                                result_holder = {}
+                                def _run():
+                                    result_holder["value"] = asyncio.run(_run_tts())
+                                t = threading.Thread(target=_run)
+                                t.start()
+                                t.join()
+                                tts_result = result_holder.get("value")
+                            else:
+                                tts_result = loop.run_until_complete(_run_tts())
+                        except Exception:
+                            tts_result = asyncio.run(_run_tts())
 
                     if os.path.exists(tts_out_path) and os.path.getsize(tts_out_path) > 2048:
                         synced_tts_audio = tts_out_path
@@ -1455,9 +1543,11 @@ class ReupService:
                     else:
                         tts_warning = (tts_warning or "") + " TTS tạo file rỗng/im lặng — giữ audio gốc."
                         logger.warning(tts_warning)
+                        report_stage(0.90, f"⚠️ {tts_warning.strip()}")
             except Exception as e:
                 tts_warning = f"Pipeline vietsub/TTS thất bại: {e}"
                 logger.warning(tts_warning)
+                report_stage(0.86, f"⚠️ {tts_warning}")
 
         # If SRT was provided (sidecar / preset) but TTS audio is still missing, synthesize it
         if cfg.enable_tts and not synced_tts_audio and translated_srt and os.path.exists(translated_srt):
@@ -1527,8 +1617,20 @@ class ReupService:
 
         if cfg.enable_tts and not synced_tts_audio:
             detail = tts_warning or "Không tạo được file TTS tiếng Việt hợp lệ."
-            raise RuntimeError(f"Lồng tiếng Việt thất bại: {detail}")
+            report_stage(
+                0.90,
+                f"⚠️ Bỏ qua lồng tiếng: {detail} Video vẫn được render, giữ tiếng gốc.",
+            )
+            tts_warning = detail
+            try:
+                cfg = cfg.model_copy(update={"enable_tts": False, "enable_vocal_mute": False})
+            except Exception:
+                cfg.enable_tts = False
+                cfg.enable_vocal_mute = False
+        elif tts_warning:
+            report_stage(0.92, f"⚠️ Vietsub/TTS: {tts_warning}")
 
+        report_stage(0.93, "🎞️ Bắt đầu render video (tách BGM nếu cần, FFmpeg encode)...")
         try:
             res = process_reup_video(
                 input_path=video_path,
@@ -1542,6 +1644,9 @@ class ReupService:
             if tts_warning:
                 res["vietsub_warning"] = tts_warning
                 logger.warning(f"Reup completed with vietsub warning: {tts_warning}")
+                report_stage(0.99, f"⚠️ Render xong nhưng vietsub/TTS chưa đủ: {tts_warning}")
+            else:
+                report_stage(0.99, "✅ Render video biến đổi hoàn tất")
 
             return res["output_path"]
         finally:

@@ -97,6 +97,55 @@ def test_reup_config_accepts_overlays(tmp_path):
     assert cfg.overlays[0].kind == "logo"
 
 
+def test_overlay_item_keeps_banner_kind(tmp_path):
+    png = _touch_png(tmp_path / "banner.png")
+    item = OverlayItem(image_path=png, kind="banner", band_h=0.30, x=0, y=0, w=1)
+    assert item.kind == "banner"
+    assert abs(item.band_h - 0.30) < 1e-6
+    assert abs(item.w - 1.0) < 1e-6
+    assert abs(item.y - 0.70) < 1e-6
+    cfg = ReupConfig(overlays=[item], caption_cover="image", caption_cover_image=png)
+    dumped = cfg.model_dump()
+    assert dumped["overlays"][0]["kind"] == "banner"
+    items = normalize_overlays(cfg.overlays)
+    assert items and items[0]["kind"] == "banner"
+    assert abs(items[0]["band_h"] - 0.30) < 1e-6
+
+
+def test_wide_strip_logo_promotes_to_bottom_banner(tmp_path):
+    from PIL import Image
+
+    png = tmp_path / "wide.png"
+    Image.new("RGB", (800, 200), (255, 180, 80)).save(png)
+    items = normalize_overlays(
+        [{"image_path": str(png), "kind": "logo", "x": 0, "y": 0, "w": 1, "opacity": 1}]
+    )
+    assert items and items[0]["kind"] == "banner"
+    assert abs(items[0]["w"] - 1.0) < 1e-6
+    assert items[0]["y"] >= 0.60
+    fc, _ = append_overlay_filter("[0:v]null[v_out]", items, 1, main_size=(690, 1228))
+    assert "overlay=0:H-h" in fc
+    assert "W*" not in fc
+
+
+def test_ensure_caption_cover_banner_dedupes_logo(tmp_path):
+    from app.services.overlay_service import ensure_caption_cover_banner
+
+    png = _touch_png(tmp_path / "cover.png")
+    items = ensure_caption_cover_banner(
+        [{"image_path": png, "kind": "logo", "x": 0, "y": 0, "w": 1, "opacity": 1}],
+        png,
+        0.30,
+    )
+    assert len(items) == 1
+    assert items[0]["kind"] == "banner"
+    assert abs(items[0]["band_h"] - 0.30) < 1e-6
+    fc, paths = append_overlay_filter("[0:v]null[v_out]", items, 1, main_size=(690, 1228))
+    assert len(paths) == 1
+    assert "overlay=0:H-h" in fc
+    assert "crop=690:" in fc
+
+
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
 def test_ffmpeg_overlay_lasts_whole_clip(tmp_path):
     ffmpeg = shutil.which("ffmpeg")

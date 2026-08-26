@@ -18,14 +18,20 @@ import {
   Smile,
   Captions,
   Share2,
-  ChevronDown,
   Music,
   Scissors,
   Play,
   Square,
+  ImagePlus,
 } from 'lucide-react';
 
-import { fetchChannels, fetchBgmLibrary, previewVoice } from '../services/api';
+import { fetchChannels, fetchChannelGroups, fetchBgmLibrary, previewVoice, uploadStudioOverlay, getMediaUrl } from '../services/api';
+import {
+  HORIZONTAL_TOGGLE,
+  VERTICAL_TOGGLE,
+  platformsHaveHorizontal,
+  platformsHaveVertical,
+} from '../lib/previewCanvas';
 
 const VOICE_OPTIONS = {
   vi: [
@@ -82,7 +88,7 @@ const resolveVoiceEngine = (voice) => String(voice || '').toLowerCase().startsWi
 
 export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
   const [channels, setChannels] = useState([]);
-  const [showWmAdvanced, setShowWmAdvanced] = useState(false);
+  const [groups, setGroups] = useState([]);
   const [bgmList, setBgmList] = useState([]);
   const [previewingVoice, setPreviewingVoice] = useState(false);
   const [voicePreviewError, setVoicePreviewError] = useState('');
@@ -97,11 +103,19 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
 
   useEffect(() => {
     loadChannels();
+    fetchChannelGroups()
+      .then((d) => setGroups(d.groups || []))
+      .catch(() => setGroups([]));
     fetchBgmLibrary()
       .then((d) => setBgmList(d.items || []))
       .catch(() => setBgmList([]));
 
-    const refreshChannels = () => loadChannels();
+    const refreshChannels = () => {
+      loadChannels();
+      fetchChannelGroups()
+        .then((d) => setGroups(d.groups || []))
+        .catch(() => setGroups([]));
+    };
     window.addEventListener('reup:channels-changed', refreshChannels);
     return () => window.removeEventListener('reup:channels-changed', refreshChannels);
   }, []);
@@ -163,9 +177,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
         enable_vocal_mute: false,
         preserve_bgm: true,
         vocal_mute_strategy: 'auto',
-        wm_method: 'auto',
         hflip: false,
-        speed_ratio: 1.03,
         crop_percent: 2.0,
       });
     } else if (presetId === 'clean_duck_vocals') {
@@ -177,9 +189,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
         preserve_bgm: true,
         vocal_mute_strategy: 'demucs_duck',
         original_vocal_volume: options.original_vocal_volume ?? 0.10,
-        wm_method: 'auto',
         hflip: false,
-        speed_ratio: 1.03,
         crop_percent: 2.0,
       });
     } else if (presetId === 'clean_mute_all') {
@@ -190,38 +200,53 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
         enable_vocal_mute: true,
         preserve_bgm: false,
         vocal_mute_strategy: 'mute_all',
-        wm_method: 'auto',
         hflip: false,
-        speed_ratio: 1.03,
         crop_percent: 2.0,
       });
     }
   };
 
+  const selectedIds = (() => {
+    const ids = Array.isArray(options.channel_ids) ? options.channel_ids.filter(Boolean) : [];
+    if (options.channel_id && options.channel_id !== 'none' && !ids.includes(options.channel_id)) {
+      ids.unshift(options.channel_id);
+    }
+    return ids;
+  })();
+
+  const applyChannelIds = (nextIds, extra = {}) => {
+    onChange({
+      ...options,
+      channel_ids: nextIds,
+      channel_id: nextIds[0] || null,
+      publish_status: options.publish_status || 'READY',
+      ...extra,
+    });
+  };
+
   const handleChannelSelect = (channelId) => {
     if (!channelId || channelId === 'none') {
-      onChange({
-        ...options,
-        channel_id: null,
-      });
+      applyChannelIds([]);
       return;
     }
     const selectedChan = channels.find((c) => (c.channel_id || c.id) === channelId);
     const chanTags = selectedChan?.tags || [];
     const tagString = chanTags.map((t) => (t.startsWith('#') ? t : `#${t}`)).join(' ');
-
     let newCaption = options.post_caption || '';
     if (tagString && !newCaption.includes(tagString)) {
       newCaption = newCaption ? `${newCaption} ${tagString}` : tagString;
     }
+    applyChannelIds([channelId], { post_tags: chanTags, post_caption: newCaption });
+  };
 
-    onChange({
-      ...options,
-      channel_id: channelId,
-      post_tags: chanTags,
-      post_caption: newCaption,
-      publish_status: options.publish_status || 'READY',
+  const toggleChannelId = (channelId) => {
+    const on = selectedIds.includes(channelId);
+    const next = on ? selectedIds.filter((id) => id !== channelId) : [...selectedIds, channelId];
+    const nextGroups = (options.group_ids || []).filter((gid) => {
+      const members = (groups.find((g) => g.group_id === gid) || {}).channel_ids || [];
+      return members.length > 0 && members.every((id) => next.includes(id));
     });
+    applyChannelIds(next, { group_ids: nextGroups });
   };
 
   const handleAppendTag = (tag) => {
@@ -232,13 +257,32 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
     }
   };
 
-  const activeChannel = channels.find((c) => (c.channel_id || c.id) === options.channel_id);
+  const facebookChannels = channels
+    .filter((c) => String(c.platform || '').toLowerCase() === 'facebook')
+    .slice()
+    .sort((a, b) => {
+      const aid = a.channel_id || a.id;
+      const bid = b.channel_id || b.id;
+      const aOn = selectedIds.includes(aid) ? 0 : 1;
+      const bOn = selectedIds.includes(bid) ? 0 : 1;
+      if (aOn !== bOn) return aOn - bOn;
+      return String(a.name || '').localeCompare(String(b.name || ''), 'vi');
+    });
+  const tiktokChannels = channels
+    .filter((c) => String(c.platform || '').toLowerCase() === 'tiktok')
+    .slice()
+    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'vi'));
+  const otherChannels = channels.filter((c) => {
+    const platform = String(c.platform || '').toLowerCase();
+    return platform !== 'facebook' && platform !== 'tiktok';
+  });
+  const activeChannel = channels.find((c) => selectedIds.includes(c.channel_id || c.id));
 
-  const hasVertical = (options.target_platforms || []).includes('tiktok');
-  const hasHorizontal = (options.target_platforms || []).includes('youtube');
+  const hasVertical = platformsHaveVertical(options.target_platforms);
+  const hasHorizontal = platformsHaveHorizontal(options.target_platforms);
 
   return (
-    <div className="clean-panel rounded-3xl p-6 sm:p-7 shadow-xs space-y-6 max-w-7xl mx-auto">
+    <div className="clean-panel rounded-3xl p-4 sm:p-6 shadow-xs space-y-6 w-full min-w-0">
       <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2 border-b border-slate-100 pb-3">
         <Wand2 className="w-5 h-5 text-blue-600" />
         Tùy chỉnh Reup
@@ -248,10 +292,10 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
         <div>
           <h4 className="text-sm font-black text-slate-900">Chọn âm thanh sau khi làm sạch</h4>
           <p className="text-[11px] text-slate-600 mt-0.5">
-            Cả ba chế độ đều xóa chữ/logo trước. Vietsub và lồng tiếng được chọn độc lập ở mục Âm thanh & Dịch.
+            Âm thanh gốc chọn ở đây. Cách xoá chữ/logo nằm ở mục Hình ảnh — có thể tắt hoặc chỉ cắt đáy để khỏi nhoè.
           </p>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-2.5">
           {[
             {
               id: 'clean_keep_bgm',
@@ -314,81 +358,83 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
               className="mt-2 w-full accent-blue-600"
             />
             <span className="mt-1 block text-[10px] font-medium text-slate-500">
-              Khuyên dùng 8-12%. Mức 0% sẽ bỏ hẳn lời gốc.
+              Chỉ chỉnh audio gốc (lời Trung + nhạc). Giọng Việt lồng tiếng mix lớp riêng ở bước cuối, không dính slider này.
             </span>
           </label>
         )}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 2xl:grid-cols-3 gap-4 lg:gap-6 min-w-0 items-start">
         {/* Cột 1: Hình ảnh & FX */}
-        <div className="space-y-4 bg-slate-50/30 p-4 rounded-2xl border border-slate-100">
+        <div className="space-y-4 bg-slate-50/30 p-4 rounded-2xl border border-slate-100 min-w-0">
           <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider flex items-center gap-1.5 pb-2 border-b border-slate-100">
             <Tv className="w-4 h-4 text-blue-600" />
             Hình ảnh & FX
           </h4>
 
-          <div className="p-4 bg-emerald-50/70 rounded-2xl border border-emerald-200 space-y-2">
-            <div className="flex items-center justify-between">
-              <div>
-                <label className="text-xs font-extrabold text-slate-800 block">Tự xoá chữ & logo</label>
-                <span className="text-[11px] text-slate-500">
-                  Luôn chạy trước Vietsub và lồng tiếng.
+          <div className="p-3.5 sm:p-4 bg-emerald-50/70 rounded-2xl border border-emerald-200 space-y-2">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                <label className="text-xs font-extrabold text-slate-800 block">Xoá chữ & logo</label>
+                <span className="text-[11px] text-slate-500 leading-snug block mt-0.5">
+                  AI dễ nhoè nền. Cắt đáy hoặc tắt để giữ ảnh.
                 </span>
               </div>
-              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-600 px-2.5 py-1 text-[10px] font-black text-white">
-                <CheckCircle2 className="w-3 h-3" /> Luôn bật
-              </span>
+              {(['none', 'off', 'disabled'].includes(options.wm_method) ? (
+                <span className="inline-flex items-center gap-1 rounded-full bg-slate-600 px-2.5 py-1 text-[10px] font-black text-white shrink-0 self-start">
+                  Đã tắt
+                </span>
+              ) : options.wm_method === 'crop' ? (
+                <span className="inline-flex items-center gap-1 rounded-full bg-amber-500 px-2.5 py-1 text-[10px] font-black text-white shrink-0 self-start">
+                  Chỉ cắt đáy
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-600 px-2.5 py-1 text-[10px] font-black text-white shrink-0 self-start">
+                  <CheckCircle2 className="w-3 h-3" /> AI
+                </span>
+              ))}
             </div>
-            <button
-              type="button"
-              onClick={() => setShowWmAdvanced((v) => !v)}
-              className="text-[10px] font-bold text-slate-500 hover:text-slate-800 inline-flex items-center gap-1"
-            >
-              <ChevronDown className={`w-3 h-3 transition ${showWmAdvanced ? 'rotate-180' : ''}`} />
-              Nâng cao (chọn tay thuật toán)
-            </button>
-            {showWmAdvanced && (
-              <div className="space-y-2.5 pt-1">
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  {[
-                    { id: 'auto', label: 'Tự động nhanh (Telea)', desc: 'Mặc định; OCR thưa, xử lý nhanh hơn nhiều' },
-                    { id: 'all', label: 'AI kỹ (LaMa + Telea)', desc: 'Chậm hơn; chỉ dùng cho vùng chữ rất khó' },
-                    { id: 'crop', label: 'Chỉ cắt đáy', desc: 'Khi phụ đề dính cứng dưới chân' },
-                  ].map((item) => {
-                    const isSelected =
-                      options.wm_method === item.id ||
-                      (options.wm_method === 'opencv_telea' && item.id === 'auto');
-                    return (
-                      <label
-                        key={item.id}
-                        className={`flex flex-col p-3 rounded-2xl border cursor-pointer transition-all duration-150 ${
-                          isSelected
-                            ? 'bg-white border-emerald-400 text-slate-900 font-bold shadow-xs'
-                            : 'bg-white/70 border-slate-200 text-slate-600 hover:border-slate-300'
-                        }`}
-                      >
-                        <div className="flex items-center space-x-2">
-                          <input
-                            type="radio"
-                            name="wm_method"
-                            value={item.id}
-                            checked={isSelected}
-                            onChange={() => onChange({
-                              ...options,
-                              wm_method: item.id,
-                            })}
-                            className="text-emerald-600 focus:ring-emerald-500"
-                          />
-                          <span className="text-xs font-bold text-slate-800">{item.label}</span>
-                        </div>
-                        <span className="text-[10px] text-slate-500 font-normal pl-5 mt-0.5">{item.desc}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
+            <div className="grid grid-cols-1 min-[480px]:grid-cols-2 gap-2 text-xs pt-1">
+              {[
+                { id: 'auto', label: 'Tự động (Telea)', desc: 'AI — có thể nhoè nền' },
+                { id: 'all', label: 'AI kỹ (LaMa)', desc: 'Chậm, chữ rất khó' },
+                { id: 'crop', label: 'Chỉ cắt đáy', desc: 'Cắt phụ đề cứng, không nhoè' },
+                { id: 'none', label: 'Không xoá', desc: 'Giữ nguyên hình' },
+              ].map((item) => {
+                const isSelected =
+                  options.wm_method === item.id ||
+                  (options.wm_method === 'opencv_telea' && item.id === 'auto') ||
+                  (['off', 'disabled'].includes(options.wm_method) && item.id === 'none');
+                return (
+                  <label
+                    key={item.id}
+                    className={`flex flex-col p-2.5 sm:p-3 rounded-2xl border cursor-pointer transition-all duration-150 min-w-0 ${
+                      isSelected
+                        ? 'bg-white border-emerald-400 text-slate-900 font-bold shadow-xs'
+                        : 'bg-white/70 border-slate-200 text-slate-600 hover:border-slate-300'
+                    }`}
+                  >
+                    <div className="flex items-start gap-2">
+                      <input
+                        type="radio"
+                        name="wm_method"
+                        value={item.id}
+                        checked={isSelected}
+                        onChange={() => onChange({
+                          ...options,
+                          wm_method: item.id,
+                        })}
+                        className="mt-0.5 shrink-0 text-emerald-600 focus:ring-emerald-500"
+                      />
+                      <span className="min-w-0">
+                        <span className="block text-xs font-bold text-slate-800 leading-snug">{item.label}</span>
+                        <span className="block text-[10px] text-slate-500 font-normal leading-snug mt-0.5">{item.desc}</span>
+                      </span>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
           </div>
 
           <div className="space-y-3">
@@ -413,7 +459,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
             <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-2">
               <div className="flex justify-between text-xs">
                 <span className="font-bold text-slate-700">Tốc Độ Video (Speed Factor)</span>
-                <span className="font-mono text-blue-600 font-bold">{options.speed_ratio}x</span>
+                <span className="font-mono text-blue-600 font-bold">{Number(options.speed_ratio || 1).toFixed(2)}x</span>
               </div>
               <input
                 type="range"
@@ -424,6 +470,9 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                 onChange={(e) => handleChange('speed_ratio', parseFloat(e.target.value))}
                 className="w-full accent-blue-600 bg-slate-200 rounded-lg cursor-pointer"
               />
+              <p className="text-[10px] text-slate-500 font-medium">
+                Preview phát ngay tốc độ này. File encode cũng ngắn/dài đúng hệ số (1.30x ≈ ngắn 23%).
+              </p>
             </div>
 
             {/* Edge Crop Slider */}
@@ -443,23 +492,122 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
               />
             </div>
 
-            {/* Bottom Subtitle Crop Slider */}
+            {/* Cover source captions with a color plate or custom image (keeps 9:16) */}
+            <div className="p-3.5 bg-slate-900/5 rounded-2xl border border-slate-200 space-y-2">
+              <div>
+                <span className="text-xs font-extrabold text-slate-800 block">Phủ chữ gốc</span>
+                <span className="text-[10px] text-slate-500">
+                  Ảnh tuỳ chỉnh che dải đáy, giữ khung 9:16 — không cắt trống. Nền đen → chữ trắng, nền trắng → chữ đen.
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5 min-w-0">
+                {[
+                  { id: 'off', label: 'Không phủ', swatch: 'transparent' },
+                  { id: 'black_soft', label: 'Đen trong suốt', swatch: 'rgba(0,0,0,0.55)' },
+                  { id: 'white_soft', label: 'Trắng trong suốt', swatch: 'rgba(255,255,255,0.7)' },
+                  { id: 'black_solid', label: 'Đen đậm', swatch: '#111' },
+                  { id: 'white_solid', label: 'Trắng đậm', swatch: '#f4f4f4' },
+                ].map((item) => {
+                  const cover = options.caption_cover === 'white_black' ? 'white_solid' : (options.caption_cover || 'off');
+                  const selected = cover === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => handleChange('caption_cover', item.id)}
+                      className={`flex items-center gap-2 rounded-xl border px-2 py-2 text-left transition min-w-0 ${
+                        selected
+                          ? 'border-slate-900 bg-white shadow-xs'
+                          : 'border-slate-200 bg-white/70 hover:border-slate-300'
+                      }`}
+                    >
+                      <span
+                        className="w-5 h-5 rounded-md border border-slate-300 shrink-0"
+                        style={{
+                          background: item.swatch === 'transparent'
+                            ? 'repeating-conic-gradient(#ddd 0% 25%, #fff 0% 50%) 50% / 8px 8px'
+                            : item.swatch,
+                          color: item.id.startsWith('white') ? '#111' : '#fff',
+                          fontSize: 9,
+                          fontWeight: 800,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        {item.id !== 'off' ? 'A' : ''}
+                      </span>
+                      <span className="text-[10px] font-bold text-slate-800 leading-snug min-w-0">{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <label className={`flex items-center gap-2 rounded-xl border px-2.5 py-2 cursor-pointer min-w-0 ${
+                (options.caption_cover || 'off') === 'image'
+                  ? 'border-slate-900 bg-white shadow-xs'
+                  : 'border-slate-200 bg-white/70 hover:border-slate-300'
+              }`}>
+                <span className="w-8 h-8 rounded-md border border-slate-300 shrink-0 overflow-hidden bg-slate-100 flex items-center justify-center">
+                  {options.caption_cover_url ? (
+                    <img src={getMediaUrl(options.caption_cover_url)} alt="" className="w-full h-full object-cover" />
+                  ) : (
+                    <ImagePlus className="w-4 h-4 text-slate-500" />
+                  )}
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-[10px] font-bold text-slate-800 leading-snug">Ảnh tuỳ chỉnh</span>
+                  <span className="block text-[9px] text-slate-500 leading-snug">
+                    {options.caption_cover_name || 'Chọn PNG/JPG phủ dải đáy'}
+                  </span>
+                </span>
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  className="hidden"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (!file) return;
+                    try {
+                      const res = await uploadStudioOverlay(file, { kind: 'logo', x: 0, y: 0.78, w: 1 });
+                      onChange({
+                        ...options,
+                        caption_cover: 'image',
+                        caption_cover_image: res.image_path,
+                        caption_cover_url: res.url,
+                        caption_cover_name: res.filename || file.name,
+                      });
+                    } catch (err) {
+                      console.error(err);
+                    }
+                  }}
+                />
+              </label>
+            </div>
+
+            {/* Bottom Subtitle Crop / cover height */}
             <div className="p-3.5 bg-amber-50/70 rounded-2xl border border-amber-200/80 space-y-2">
               <div className="flex justify-between text-xs">
-                <span className="font-bold text-amber-950">Cắt Mép Đáy Bỏ Phụ Đề Cũ (Bottom Crop)</span>
+                <span className="font-bold text-amber-950">
+                  {options.caption_cover && options.caption_cover !== 'off'
+                    ? 'Độ cao dải phủ'
+                    : 'Cắt mép đáy (bỏ chữ gốc)'}
+                </span>
                 <span className="font-mono text-amber-700 font-bold">{options.subtitle_bottom_crop || 0}%</span>
               </div>
               <input
                 type="range"
                 min="0.0"
-                max="22.0"
+                max="36.0"
                 step="0.5"
                 value={options.subtitle_bottom_crop || 0}
                 onChange={(e) => handleChange('subtitle_bottom_crop', parseFloat(e.target.value))}
                 className="w-full accent-amber-600 bg-amber-200/70 rounded-lg cursor-pointer"
               />
               <span className="text-[10px] text-amber-800 font-medium block">
-                Cắt mép dưới (16-18%) để loại bỏ hoàn toàn dải chữ tiếng Trung cũ ở đáy.
+                {options.caption_cover && options.caption_cover !== 'off'
+                  ? 'Chiều cao dải phủ (ảnh hoặc màu). Giữ nguyên 9:16, không để khung trống.'
+                  : 'Cắt hẳn dải dưới. Để tránh khung trống, chọn Ảnh tuỳ chỉnh ở mục phủ chữ.'}
               </span>
             </div>
 
@@ -521,7 +669,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                 <span>Tinh Chỉnh Màu Sắc (Color Filters)</span>
               </div>
 
-              <div className="grid grid-cols-3 gap-3 text-xs">
+              <div className="grid grid-cols-1 min-[420px]:grid-cols-3 gap-3 text-xs">
                 <div>
                   <span className="text-[10px] font-semibold text-slate-500 block mb-1">Độ Sáng</span>
                   <input
@@ -591,8 +739,9 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
           </div>
         </div>
 
+        <div className="flex flex-col gap-4 lg:gap-6 min-w-0 2xl:contents">
         {/* Cột 2: Âm thanh & Dịch */}
-        <div className="space-y-4 bg-slate-50/30 p-4 rounded-2xl border border-slate-100">
+        <div className="space-y-4 bg-slate-50/30 p-4 rounded-2xl border border-slate-100 min-w-0">
           <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider flex items-center gap-1.5 pb-2 border-b border-slate-100">
             <Mic className="w-4 h-4 text-purple-600" />
             Âm thanh & Dịch
@@ -661,15 +810,15 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
 
             {/* TTS Dubbing Control - Unified Vietnamese Voice Hub */}
             <div className="p-4 bg-gradient-to-br from-purple-50/80 via-indigo-50/50 to-slate-50 border border-purple-200/90 rounded-2xl space-y-3.5 shadow-2xs">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2.5">
-                  <Mic className="w-4 h-4 text-purple-600 shrink-0" />
-                  <div>
-                    <label className="text-xs font-extrabold text-purple-950 cursor-pointer block" htmlFor="tts-toggle">
-                      Tự dịch + lồng tiếng khớp video gốc
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-2.5 min-w-0">
+                  <Mic className="w-4 h-4 text-purple-600 shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <label className="text-xs font-extrabold text-purple-950 cursor-pointer block leading-snug" htmlFor="tts-toggle">
+                      Tự dịch + lồng tiếng
                     </label>
-                    <span className="text-[10px] text-purple-700 font-medium block">
-                      Dịch và lồng tiếng khớp timeline.
+                    <span className="text-[10px] text-purple-700 font-medium block leading-snug">
+                      Dịch và lồng tiếng khớp timeline gốc.
                     </span>
                   </div>
                 </div>
@@ -707,22 +856,22 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                     Chọn tắt hoàn toàn, phụ đề CC, hoặc in cố định lên hình.
                   </span>
                 </div>
-                <div className="grid grid-cols-3 gap-1.5 rounded-xl border border-purple-100 bg-white/70 p-1.5">
+                <div className="grid grid-cols-1 min-[520px]:grid-cols-3 gap-1.5 rounded-xl border border-purple-100 bg-white/70 p-1.5">
                   {[
                     {
                       id: 'off',
                       title: 'Tắt Vietsub',
-                      desc: 'Không tạo hoặc chèn phụ đề.',
+                      desc: 'Không chèn phụ đề.',
                     },
                     {
                       id: 'soft',
                       title: 'CC bật / tắt',
-                      desc: 'Job mới: bật CC khi xem trong Kho Video.',
+                      desc: 'Bật CC khi xem trong Kho.',
                     },
                     {
                       id: 'hard',
                       title: 'In cố định',
-                      desc: 'Luôn hiện trên hình, không thể tắt.',
+                      desc: 'Luôn hiện trên hình.',
                     },
                   ].map((mode) => {
                     const selectedMode = options.burn_subtitles === false
@@ -738,13 +887,13 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                           burn_subtitles: mode.id !== 'off',
                           subtitle_mode: mode.id,
                         })}
-                        className={`rounded-lg border px-2.5 py-2 text-left transition ${
+                        className={`rounded-lg border px-2 py-2 text-left transition min-w-0 ${
                           active
                             ? 'border-purple-500 bg-purple-600 text-white'
                             : 'border-purple-100 bg-white text-purple-950 hover:border-purple-300'
                         }`}
                       >
-                        <span className="block text-[11px] font-extrabold">{mode.title}</span>
+                        <span className="block text-[11px] font-extrabold leading-snug">{mode.title}</span>
                         <span className={`mt-0.5 block text-[9px] leading-snug ${active ? 'text-purple-100' : 'text-purple-700'}`}>
                           {mode.desc}
                         </span>
@@ -758,7 +907,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                 <label className="block text-[11px] font-extrabold text-purple-950 mb-1.5">
                   Chế độ Vietsub
                 </label>
-                <div className="grid grid-cols-3 gap-1.5">
+                <div className="grid grid-cols-1 min-[520px]:grid-cols-3 gap-1.5">
                   {[
                     {
                       id: 'dub',
@@ -791,7 +940,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                           else patch.enable_lipsync = options.enable_lipsync !== false;
                           onChange({ ...options, ...patch });
                         }}
-                        className={`text-left rounded-xl border px-2 py-2.5 transition-all ${
+                        className={`text-left rounded-xl border px-2 py-2.5 transition-all min-w-0 ${
                           active
                             ? 'bg-purple-600 border-purple-700 text-white shadow-sm'
                             : 'bg-white border-purple-200 text-purple-950 hover:border-purple-400'
@@ -916,7 +1065,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
         </div>
 
         {/* Cột 3: Đăng bài & Kênh */}
-        <div className="space-y-4 bg-slate-50/30 p-4 rounded-2xl border border-slate-100">
+        <div className="space-y-4 bg-slate-50/30 p-4 rounded-2xl border border-slate-100 min-w-0">
           <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider flex items-center gap-1.5 pb-2 border-b border-slate-100">
             <Share2 className="w-4 h-4 text-indigo-600" />
             Đăng bài & Kênh
@@ -937,14 +1086,16 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                 type="button"
                 onClick={() => {
                   const cur = Array.isArray(options.target_platforms) ? [...options.target_platforms] : [];
-                  const verticalPlats = ['tiktok', 'youtube_shorts', 'facebook'];
                   let next;
+                  let preview_aspect = options.preview_aspect;
                   if (hasVertical) {
-                    next = cur.filter((x) => !verticalPlats.includes(x));
+                    next = cur.filter((x) => !VERTICAL_TOGGLE.includes(x));
+                    if (hasHorizontal) preview_aspect = '16:9';
                   } else {
-                    next = [...new Set([...cur, ...verticalPlats])];
+                    next = [...new Set([...cur, ...VERTICAL_TOGGLE])];
+                    preview_aspect = '9:16';
                   }
-                  handleChange('target_platforms', next);
+                  onChange({ ...options, target_platforms: next, preview_aspect });
                 }}
                 className={`text-left rounded-xl border px-3 py-2.5 transition-all cursor-pointer ${
                   hasVertical
@@ -952,7 +1103,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                     : 'bg-white border-slate-200 text-slate-700 hover:border-blue-300'
                 }`}
               >
-                <div className="text-[11px] font-extrabold leading-tight">Dọc (9:16)</div>
+                <div className="text-[11px] font-extrabold leading-tight">Dọc · 9:16</div>
                 <div className={`text-[9px] font-bold mt-0.5 ${hasVertical ? 'text-blue-100' : 'text-slate-400'}`}>
                   TikTok, Shorts, Reels
                 </div>
@@ -962,14 +1113,16 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                 type="button"
                 onClick={() => {
                   const cur = Array.isArray(options.target_platforms) ? [...options.target_platforms] : [];
-                  const horizontalPlats = ['youtube'];
                   let next;
+                  let preview_aspect = options.preview_aspect;
                   if (hasHorizontal) {
-                    next = cur.filter((x) => !horizontalPlats.includes(x));
+                    next = cur.filter((x) => !HORIZONTAL_TOGGLE.includes(x));
+                    if (hasVertical) preview_aspect = '9:16';
                   } else {
-                    next = [...new Set([...cur, ...horizontalPlats])];
+                    next = [...new Set([...cur, ...HORIZONTAL_TOGGLE])];
+                    preview_aspect = '16:9';
                   }
-                  handleChange('target_platforms', next);
+                  onChange({ ...options, target_platforms: next, preview_aspect });
                 }}
                 className={`text-left rounded-xl border px-3 py-2.5 transition-all cursor-pointer ${
                   hasHorizontal
@@ -977,80 +1130,200 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                     : 'bg-white border-slate-200 text-slate-700 hover:border-blue-300'
                 }`}
               >
-                <div className="text-[11px] font-extrabold leading-tight">Ngang (16:9)</div>
+                <div className="text-[11px] font-extrabold leading-tight">Ngang · 16:9</div>
                 <div className={`text-[9px] font-bold mt-0.5 ${hasHorizontal ? 'text-blue-100' : 'text-slate-400'}`}>
-                  YouTube
+                  Khung 16:9 · YouTube ngang
                 </div>
               </button>
             </div>
+            <p className="text-[10px] font-semibold text-slate-500 leading-snug">
+              {hasVertical && hasHorizontal
+                ? 'Đang chọn cả hai. Khung xem trước (Sau crop / config) theo tỉ lệ vừa bấm — có nút 9:16 / 16:9 trên preview.'
+                : hasHorizontal
+                  ? 'Xem trước khung 16:9 ngay trên video Sau crop / config.'
+                  : 'Xem trước khung 9:16 ngay trên video Sau crop / config.'}
+            </p>
 
-            {/* Channel Selector */}
+            {/* Channel Selector — Facebook pages are multi-select */}
             <div className="space-y-1.5">
-              <label className="block text-[11px] font-bold text-slate-700">Chọn Kênh Đích:</label>
-              <select
-                value={options.channel_id || 'none'}
-                onChange={(e) => handleChannelSelect(e.target.value)}
-                onFocus={loadChannels}
-                className="w-full text-xs font-semibold bg-white border border-slate-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 shadow-2xs"
-              >
-                <option value="none">📦 Không gán kênh (chỉ lưu kho)</option>
-                {channels.map((chan) => (
-                  <option key={chan.channel_id || chan.id} value={chan.channel_id || chan.id}>
-                    📺 [{chan.platform?.toUpperCase() || 'KHÁC'}] {chan.name} {chan.tags?.length ? `(${chan.tags.join(', ')})` : ''}
-                  </option>
-                ))}
-              </select>
+              {groups.length > 0 && (
+                <div className="space-y-1.5">
+                  <label className="block text-[11px] font-bold text-slate-700">Chọn theo nhóm:</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {groups.map((g) => {
+                      const memberIds = g.channel_ids || [];
+                      const on = memberIds.length > 0 && memberIds.every((id) => selectedIds.includes(id));
+                      return (
+                        <button
+                          key={g.group_id}
+                          type="button"
+                          title={g.notes || ''}
+                          onClick={() => {
+                            if (on) {
+                              applyChannelIds(selectedIds.filter((id) => !memberIds.includes(id)), {
+                                group_ids: (options.group_ids || []).filter((id) => id !== g.group_id),
+                              });
+                            } else {
+                              applyChannelIds(
+                                [...new Set([...selectedIds, ...memberIds])],
+                                { group_ids: [...new Set([...(options.group_ids || []), g.group_id])] },
+                              );
+                            }
+                          }}
+                          className={`px-2.5 py-1 rounded-lg text-[10px] font-extrabold border ${
+                            on ? 'bg-blue-600 text-white border-blue-700' : 'bg-white text-slate-700 border-slate-200'
+                          }`}
+                        >
+                          {g.name} ({memberIds.length})
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              <div className="flex items-center justify-between gap-2">
+                <label className="block text-[11px] font-bold text-slate-700">Đăng lên Fanpage:</label>
+                {facebookChannels.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const all = facebookChannels.map((c) => c.channel_id || c.id);
+                      applyChannelIds(selectedIds.length === all.length ? [] : all, { group_ids: selectedIds.length === all.length ? [] : (options.group_ids || []) });
+                    }}
+                    className="text-[10px] font-extrabold text-blue-700 hover:text-blue-900"
+                  >
+                    {selectedIds.length === facebookChannels.length ? 'Bỏ chọn hết' : 'Chọn tất cả Page'}
+                  </button>
+                )}
+              </div>
+              {tiktokChannels.length > 0 && (
+                <div className="space-y-1.5 pt-1">
+                  <label className="block text-[11px] font-bold text-slate-700">Đăng lên TikTok:</label>
+                  <div className="max-h-40 overflow-y-auto rounded-xl border border-rose-200 bg-white divide-y divide-slate-100">
+                    {tiktokChannels.map((chan) => {
+                      const id = chan.channel_id || chan.id;
+                      const on = selectedIds.includes(id);
+                      return (
+                        <label
+                          key={id}
+                          className={`flex items-center gap-2.5 px-2.5 py-2 cursor-pointer ${on ? 'bg-rose-50' : 'hover:bg-slate-50'}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            onChange={() => toggleChannelId(id)}
+                            className="accent-rose-600 shrink-0"
+                          />
+                          {chan.tiktok_avatar_url ? (
+                            <img src={chan.tiktok_avatar_url} alt="" className="w-8 h-8 rounded-lg object-cover shrink-0 bg-slate-200" />
+                          ) : (
+                            <span className="w-8 h-8 rounded-lg bg-rose-600 text-white text-[10px] font-black flex items-center justify-center shrink-0">
+                              {String(chan.name || '?').slice(0, 2).toUpperCase()}
+                            </span>
+                          )}
+                          <span className="min-w-0">
+                            <span className="block text-[11px] font-bold text-slate-900 leading-snug line-clamp-2">{chan.name}</span>
+                            <span className="block text-[10px] text-slate-500 truncate">
+                              {chan.tiktok_username ? `@${chan.tiktok_username}` : 'TikTok Direct Post'}
+                              {chan.tiktok_auto_publish ? ' · tự đăng' : ''}
+                            </span>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {facebookChannels.length > 0 ? (
+                <div className="max-h-52 overflow-y-auto rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
+                  {facebookChannels.map((chan) => {
+                    const id = chan.channel_id || chan.id;
+                    const on = selectedIds.includes(id);
+                    const pic = chan.facebook_page_id
+                      ? getMediaUrl(`/api/v1/facebook/pages/${chan.facebook_page_id}/picture`)
+                      : '';
+                    return (
+                      <label
+                        key={id}
+                        className={`flex items-center gap-2.5 px-2.5 py-2 cursor-pointer ${on ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          onChange={() => toggleChannelId(id)}
+                          className="accent-blue-600 shrink-0"
+                        />
+                        {pic ? (
+                          <img src={pic} alt="" className="w-8 h-8 rounded-lg object-cover shrink-0 bg-slate-200" />
+                        ) : (
+                          <span className="w-8 h-8 rounded-lg bg-blue-600 text-white text-[10px] font-black flex items-center justify-center shrink-0">
+                            {String(chan.name || '?').slice(0, 2).toUpperCase()}
+                          </span>
+                        )}
+                        <span className="min-w-0">
+                          <span className="block text-[11px] font-bold text-slate-900 leading-snug line-clamp-2">{chan.name}</span>
+                          <span className="block text-[10px] text-slate-500 truncate">
+                            {chan.facebook_category || 'Facebook Reels'}
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-[11px] text-slate-500 font-medium px-1">
+                  Chưa có Fanpage. Vào tab Kênh → kết nối Facebook rồi đồng bộ Page.
+                </p>
+              )}
+              {otherChannels.length > 0 && (
+                <select
+                  value={selectedIds.find((id) => otherChannels.some((c) => (c.channel_id || c.id) === id)) || 'none'}
+                  onChange={(e) => handleChannelSelect(e.target.value)}
+                  onFocus={loadChannels}
+                  className="w-full text-xs font-semibold bg-white border border-slate-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 shadow-2xs"
+                >
+                  <option value="none">Kênh khác (TikTok/YouTube)…</option>
+                  {otherChannels.map((chan) => (
+                    <option key={chan.channel_id || chan.id} value={chan.channel_id || chan.id}>
+                      [{chan.platform?.toUpperCase() || 'KHÁC'}] {chan.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {selectedIds.length > 0 && (
+                <p className="text-[10px] font-bold text-blue-700">
+                  Sẽ đăng {selectedIds.length} page khi reup xong (trạng thái Sẵn sàng).
+                </p>
+              )}
             </div>
 
             {/* If Channel is Selected: Metadata & Caption Form */}
-            {options.channel_id && options.channel_id !== 'none' && (
+            {selectedIds.length > 0 && (
               <div className="space-y-3 pt-2 border-t border-blue-100/80 animate-fadeIn">
-                {/* Post Title */}
                 <div>
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1 flex items-center gap-1">
-                    <FileText className="w-3.5 h-3.5 text-blue-600" />
-                    Tiêu đề:
-                  </label>
-                  <input
-                    type="text"
-                    value={options.post_title || ''}
-                    onChange={(e) => handleChange('post_title', e.target.value)}
-                    placeholder="Nhập tiêu đề..."
-                    className="w-full text-xs bg-white border border-slate-200 rounded-xl px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 shadow-2xs"
-                  />
-                </div>
-
-                {/* Post Caption & Hashtags */}
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1 flex items-center justify-between">
-                    <span className="flex items-center gap-1">
-                      <Tag className="w-3.5 h-3.5 text-indigo-600" />
-                      Mô tả & Hashtags:
-                    </span>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                    Nội dung hướng tới — chỉ cần điền ô này:
                   </label>
                   <textarea
-                    rows={2}
-                    value={options.post_caption || ''}
-                    onChange={(e) => handleChange('post_caption', e.target.value)}
-                    placeholder="Nhập mô tả..."
+                    rows={4}
+                    value={options.post_intent || ''}
+                    onChange={(e) => handleChange('post_intent', e.target.value)}
+                    placeholder="Cần đập phá tháo dỡ nhà, lột gạch liên hệ 0777704099"
                     className="w-full text-xs bg-white border border-slate-200 rounded-xl px-3 py-2 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 shadow-2xs resize-none"
                   />
-                  {/* Quick Tag Pills from Channel */}
-                  {activeChannel?.tags && activeChannel.tags.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5 mt-1.5">
-                      {activeChannel.tags.map((t, idx) => (
-                        <button
-                          key={idx}
-                          type="button"
-                          onClick={() => handleAppendTag(t)}
-                          className="text-[10px] font-bold bg-white text-indigo-700 hover:bg-indigo-50 border border-indigo-200/80 px-2 py-0.5 rounded-lg transition shadow-2xs flex items-center gap-1 cursor-pointer"
-                        >
-                          <Sparkles className="w-2.5 h-2.5 text-amber-500" />
-                          {t.startsWith('#') ? t : `#${t}`}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  <p className="mt-1.5 text-[10px] font-medium text-slate-500 leading-snug">
+                    agy tự viết title + caption + hashtag cho từng Fanpage, bám nội dung video, giữ nguyên SĐT/CTA. Mỗi bài khác nhau.
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">Note video (nội bộ):</label>
+                  <textarea
+                    rows={2}
+                    value={options.video_note || ''}
+                    onChange={(e) => handleChange('video_note', e.target.value)}
+                    placeholder="Ghi lại clip này đăng nhóm nào, mục đích gì..."
+                    className="w-full text-xs bg-amber-50/60 border border-amber-200 rounded-xl px-3 py-2 resize-none"
+                  />
                 </div>
 
                 {/* Publish Status Selector */}
@@ -1086,6 +1359,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
               </div>
             )}
           </div>
+        </div>
         </div>
       </div>
 

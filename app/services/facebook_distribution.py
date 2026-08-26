@@ -20,6 +20,37 @@ from app.services.secret_store import get_secret
 logger = logging.getLogger(__name__)
 PROVIDER = "facebook"
 
+_active_worker: Optional["FacebookDistributionWorker"] = None
+
+
+def absolute_facebook_permalink(
+    permalink: str = "",
+    *,
+    video_id: str = "",
+    page_id: str = "",
+) -> str:
+    """Turn Graph's relative /reel/ID into a clickable facebook.com URL."""
+    text = str(permalink or "").strip()
+    if text.startswith(("http://", "https://")):
+        return text
+    if text.startswith("facebook.com/") or text.startswith("www.facebook.com/"):
+        return f"https://{text.lstrip('/')}"
+    if text.startswith("/"):
+        return f"https://www.facebook.com{text}"
+    vid = str(video_id or "").strip()
+    if vid:
+        return f"https://www.facebook.com/reel/{vid}"
+    pid = str(page_id or "").strip()
+    if pid and text:
+        return f"https://www.facebook.com/{pid}/videos/{text}"
+    return text
+
+
+def wake_distribution_worker() -> None:
+    worker = _active_worker
+    if worker is not None:
+        worker.wake()
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -137,31 +168,32 @@ def enqueue_channel_video(
                     (now, now, existing["id"]),
                 )
                 conn.commit()
-            return str(existing["id"])
-
-        distribution_id = f"dist_{uuid.uuid4().hex[:12]}"
-        conn.execute(
-            """
-            INSERT INTO distribution_jobs (
-                id, channel_video_id, job_id, provider, destination_id,
-                source_path, caption, status, next_attempt_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)
-            """,
-            (
-                distribution_id,
-                channel_video_id,
-                data.get("job_id") or "",
-                PROVIDER,
-                data["destination_id"],
-                source_path,
-                _caption(data),
-                now,
-                now,
-                now,
-            ),
-        )
-        conn.commit()
-        return distribution_id
+            distribution_id = str(existing["id"])
+        else:
+            distribution_id = f"dist_{uuid.uuid4().hex[:12]}"
+            conn.execute(
+                """
+                INSERT INTO distribution_jobs (
+                    id, channel_video_id, job_id, provider, destination_id,
+                    source_path, caption, status, next_attempt_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)
+                """,
+                (
+                    distribution_id,
+                    channel_video_id,
+                    data.get("job_id") or "",
+                    PROVIDER,
+                    data["destination_id"],
+                    source_path,
+                    _caption(data),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+    wake_distribution_worker()
+    return distribution_id
 
 
 class FacebookDistributionWorker:
@@ -173,13 +205,18 @@ class FacebookDistributionWorker:
         self._stopping = False
 
     async def start(self) -> None:
+        global _active_worker
         self._stopping = False
+        _active_worker = self
         if not self._task or self._task.done():
             self._task = asyncio.create_task(self._run(), name="facebook-distribution-worker")
 
     async def stop(self) -> None:
+        global _active_worker
         self._stopping = True
         self._wake.set()
+        if _active_worker is self:
+            _active_worker = None
         if self._task:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
@@ -268,7 +305,11 @@ class FacebookDistributionWorker:
     def _mark_published(self, row: Dict[str, Any], payload: Dict[str, Any]) -> None:
         now = _iso()
         remote_media_id = str(payload.get("id") or row.get("upload_video_id") or "")
-        permalink = str(payload.get("permalink_url") or row.get("permalink") or "")
+        permalink = absolute_facebook_permalink(
+            str(payload.get("permalink_url") or row.get("permalink") or ""),
+            video_id=remote_media_id,
+            page_id=str(row.get("destination_id") or ""),
+        )
         with get_db_connection(self.db_path) as conn:
             conn.execute(
                 """
@@ -288,7 +329,31 @@ class FacebookDistributionWorker:
                 """,
                 (now, now, row["channel_video_id"]),
             )
+            conn.execute(
+                """
+                UPDATE publish_log
+                SET status = 'PUBLISHED', permalink = ?, updated_at = ?
+                WHERE channel_video_id = ?
+                """,
+                (permalink, now, row["channel_video_id"]),
+            )
             conn.commit()
+        try:
+            from app.services.content_catalog import mark_posted_for_input
+
+            job_id = str(row.get("job_id") or "")
+            input_path = ""
+            if job_id:
+                with get_db_connection(self.db_path) as conn:
+                    job = conn.execute(
+                        "SELECT input_file_path FROM jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+                if job:
+                    input_path = str(job["input_file_path"] or "")
+            mark_posted_for_input(self.db_path, input_path)
+        except Exception:
+            logger.warning("Could not mark source catalog video as posted", exc_info=True)
 
     def _process_sync(self, row: Dict[str, Any]) -> None:
         connection = self._connection(row["destination_id"])

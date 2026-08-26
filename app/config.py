@@ -27,6 +27,26 @@ def _load_env_file():
 
 _load_env_file()
 
+_reup_root = os.environ.get("REUP_ROOT")
+if _reup_root and os.path.isdir(_reup_root):
+    try:
+        os.chdir(_reup_root)
+    except OSError:
+        pass
+
+
+_DEEPSEEK_LEGACY_MODELS = {
+    "deepseek-chat": "deepseek-v4-flash",
+    "deepseek-reasoner": "deepseek-v4-pro",
+    "deepseek-coder": "deepseek-v4-flash",
+}
+
+
+def normalize_deepseek_model(name: str) -> str:
+    """Map retired DeepSeek ids onto the current v4 catalog."""
+    raw = (name or "").strip() or "deepseek-v4-flash"
+    return _DEEPSEEK_LEGACY_MODELS.get(raw.lower(), raw)
+
 
 class Settings(BaseModel):
     """System-wide configuration settings with environment variable fallbacks."""
@@ -44,8 +64,12 @@ class Settings(BaseModel):
         description="DeepSeek Base URL"
     )
     DEEPSEEK_MODEL: str = Field(
-        default_factory=lambda: os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+        default_factory=lambda: normalize_deepseek_model(os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")),
         description="DeepSeek Model Name"
+    )
+    SUBTITLE_TRANSLATOR: str = Field(
+        default_factory=lambda: (os.getenv("SUBTITLE_TRANSLATOR", "agy") or "agy").strip().lower(),
+        description="Subtitle translator: agy (Google Antigravity CLI, mặc định), cli, google, or deepseek",
     )
     RAW_INPUT_DIR: str = Field(
         default_factory=lambda: os.getenv("RAW_INPUT_DIR", "data/input/raw"),
@@ -96,7 +120,7 @@ class Settings(BaseModel):
         description="FastAPI server bind host"
     )
     PORT: int = Field(
-        default_factory=lambda: int(os.getenv("PORT", "8000")),
+        default_factory=lambda: int(os.getenv("PORT", "6000")),
         description="FastAPI server bind port"
     )
     DEBUG: bool = Field(

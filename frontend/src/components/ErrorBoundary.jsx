@@ -16,6 +16,22 @@ export class ErrorBoundary extends React.Component {
     this.setState({ errorInfo });
   }
 
+  componentDidMount() {
+    if (!import.meta.hot) return;
+    this._onHotUpdate = () => {
+      if (this.state.hasError) {
+        this.setState({ hasError: false, error: null, errorInfo: null });
+      }
+    };
+    import.meta.hot.on('vite:afterUpdate', this._onHotUpdate);
+  }
+
+  componentWillUnmount() {
+    if (import.meta.hot && this._onHotUpdate) {
+      import.meta.hot.off('vite:afterUpdate', this._onHotUpdate);
+    }
+  }
+
   handleReload = () => {
     window.location.reload();
   };

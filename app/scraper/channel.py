@@ -1,4 +1,4 @@
-"""Clone a Douyin/Kuaishou creator: resolve profile, collect video IDs, prepare reup."""
+"""Clone a Douyin/Kuaishou/YouTube creator: resolve profile, collect video IDs, prepare reup."""
 
 from __future__ import annotations
 
@@ -12,6 +12,13 @@ import httpx
 
 from app.scraper.base import VideoMetadata
 from app.scraper.douyin import DouyinScraper
+from app.scraper.youtube import (
+    YoutubeScraper,
+    extract_youtube_playlist_id,
+    extract_youtube_urls,
+    is_youtube_feed_url,
+    is_youtube_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +49,10 @@ def is_channel_url(text: str) -> bool:
     if re.search(r"douyin\.com/user/", t, re.I):
         return True
     if KS_PROFILE_RE.search(t):
+        return True
+    if is_youtube_feed_url(t):
+        return True
+    if is_youtube_url(t) and extract_youtube_playlist_id(t):
         return True
     return False
 
@@ -85,14 +96,20 @@ def extract_kuaishou_photo_ids(text: str) -> List[str]:
 
 
 def video_page_url(video_id: str, platform: str = "douyin") -> str:
-    if platform == "kuaishou":
+    plat = (platform or "douyin").lower()
+    if plat == "kuaishou":
         return f"https://www.kuaishou.com/short-video/{video_id}"
+    if plat in ("youtube", "yt", "youtube_shorts"):
+        return f"https://www.youtube.com/watch?v={video_id}"
+    if plat in ("xiaohongshu", "xhs"):
+        return f"https://www.xiaohongshu.com/explore/{video_id}"
     return f"https://www.douyin.com/video/{video_id}"
 
 
 class ChannelCloneService:
     def __init__(self) -> None:
         self.douyin = DouyinScraper()
+        self.youtube = YoutubeScraper()
 
     async def _ttwid_client(self) -> httpx.AsyncClient:
         client = httpx.AsyncClient(timeout=18.0, follow_redirects=True)
@@ -139,20 +156,24 @@ class ChannelCloneService:
         try:
             ttwid = client.cookies.get("ttwid") or ""
             headers = self._headers(f"https://www.douyin.com/user/{sec_user_id}", ttwid)
-            url = (
-                "https://www.douyin.com/aweme/v1/web/user/profile/other/"
-                f"?sec_user_id={sec_user_id}&aid=6383&device_platform=webapp"
-            )
-            res = await client.get(url, headers=headers)
-            data = res.json() if res.content else {}
-            user = data.get("user") or {}
-            if not user:
+            user: Dict[str, Any] = {}
+            try:
                 ies = await client.get(
                     f"https://www.iesdouyin.com/web/api/v2/user/info/?sec_uid={sec_user_id}",
                     headers=headers,
                 )
                 payload = ies.json() if ies.content else {}
                 user = payload.get("user_info") or {}
+            except Exception as e:
+                logger.debug(f"iesdouyin profile skipped: {e}")
+            if not user:
+                url = (
+                    "https://www.douyin.com/aweme/v1/web/user/profile/other/"
+                    f"?sec_user_id={sec_user_id}&aid=6383&device_platform=webapp"
+                )
+                res = await client.get(url, headers=headers)
+                data = res.json() if res.content else {}
+                user = data.get("user") or {}
             avatar = ""
             thumb = user.get("avatar_thumb") or user.get("avatar_168x168") or {}
             if isinstance(thumb, dict):
@@ -278,6 +299,54 @@ class ChannelCloneService:
             logger.info(f"f2 channel list unavailable: {e}")
             return []
 
+    async def list_douyin_videos(
+        self,
+        sec_user_id: str,
+        max_videos: int,
+        *,
+        uid: str = "",
+    ) -> Dict[str, Any]:
+        """Collect a Douyin profile catalog: Chrome first, then f2 / snssdk."""
+        catalog: List[Dict[str, str]] = []
+        ids: List[str] = []
+
+        def _extend(entries: List[Dict[str, str]]) -> None:
+            for row in entries:
+                vid = str((row or {}).get("video_id") or "").strip()
+                if not vid or vid in ids:
+                    continue
+                ids.append(vid)
+                catalog.append(row)
+                if len(ids) >= max_videos:
+                    return
+
+        if len(ids) < max_videos:
+            try:
+                from app.scraper.douyin_list import list_douyin_user_videos
+
+                listed = await asyncio.wait_for(
+                    list_douyin_user_videos(sec_user_id, max_videos=max_videos),
+                    timeout=90.0,
+                )
+                _extend(listed)
+            except Exception as e:
+                logger.info("Douyin browser list skipped: %s", e)
+
+        if len(ids) < 3:
+            try:
+                extras = await asyncio.wait_for(
+                    self.try_list_via_f2(sec_user_id, max_videos), timeout=12.0
+                )
+            except Exception:
+                extras = []
+            _extend([{"video_id": vid, "title": "", "url": video_page_url(vid)} for vid in extras])
+
+        if len(ids) < 1 and uid:
+            extras = await self.try_list_snssdk(uid, max_videos)
+            _extend([{"video_id": vid, "title": "", "url": video_page_url(vid)} for vid in extras])
+
+        return {"video_ids": ids[:max_videos], "catalog": catalog[:max_videos]}
+
     async def try_list_kuaishou(self, user_id: str, max_videos: int) -> List[str]:
         if not user_id:
             return []
@@ -337,11 +406,16 @@ class ChannelCloneService:
         if not raw:
             raise ValueError("URL kênh trống")
 
-        max_videos = max(1, min(int(max_videos or 8), 40))
+        yt_urls = extract_youtube_urls(raw)
+        cap = 500 if (yt_urls or extract_sec_user_id(raw)) else 40
+        max_videos = max(1, min(int(max_videos or 8), cap))
         sec = extract_sec_user_id(raw)
         ks_user = extract_kuaishou_user_id(raw)
         video_ids = extract_video_ids(raw)
         ks_photos = extract_kuaishou_photo_ids(raw)
+
+        if yt_urls and not sec and not ks_user:
+            return await self.youtube.collect_feed(raw, max_videos=max_videos)
 
         extra_shorts = await self._expand_short_links(raw)
         for vid in extra_shorts:
@@ -353,24 +427,18 @@ class ChannelCloneService:
 
         profile: Dict[str, Any] = {}
         platform = "kuaishou" if ks_user and not sec else "douyin"
+        catalog: List[Dict[str, str]] = []
 
         if sec:
             profile = await self.resolve_profile(sec)
             platform = "douyin"
-            uid = profile.get("uid") or ""
-            extras: List[str] = []
+            uid = str(profile.get("uid") or "")
             if len(video_ids) < max_videos:
-                try:
-                    extras = await asyncio.wait_for(
-                        self.try_list_via_f2(sec, max_videos), timeout=20.0
-                    )
-                except Exception:
-                    extras = []
-                if len(extras) < 1 and uid:
-                    extras = await self.try_list_snssdk(uid, max_videos)
-            for vid in extras:
-                if vid not in video_ids:
-                    video_ids.append(vid)
+                listed = await self.list_douyin_videos(sec, max_videos, uid=uid)
+                catalog = listed.get("catalog") or []
+                for vid in listed.get("video_ids") or []:
+                    if vid not in video_ids:
+                        video_ids.append(vid)
 
         if ks_user:
             platform = "kuaishou"
@@ -393,6 +461,9 @@ class ChannelCloneService:
                     video_ids.append(pid)
 
         video_ids = video_ids[:max_videos]
+        if catalog:
+            keep = set(video_ids)
+            catalog = [row for row in catalog if row.get("video_id") in keep][:max_videos]
         hint = ""
         if not video_ids:
             nick = profile.get("nickname") or "kênh này"
@@ -400,12 +471,15 @@ class ChannelCloneService:
             count_txt = f" (~{count} video)" if count else ""
             hint = (
                 f"Đã nhận kênh «{nick}»{count_txt} nhưng Douyin/Kuaishou chặn danh sách bài công khai "
-                "từ máy chủ. Dán thêm vài link video trên kênh (mỗi dòng một link, hoặc modal_id) "
-                "rồi bấm quét lại — hệ thống sẽ tải và reup hết."
+                "từ máy chủ. Cài Google Chrome hoặc Microsoft Edge rồi bấm «Đồng bộ danh sách», "
+                "hoặc dán thêm vài link video trên kênh (mỗi dòng một link, hoặc modal_id)."
             )
+        if not profile.get("aweme_count"):
+            profile["aweme_count"] = len(video_ids)
         return {
             "profile": profile,
             "video_ids": video_ids,
+            "catalog": catalog,
             "photo_ids": ks_photos,
             "hint": hint,
             "channel_url": profile.get("url") or raw.splitlines()[0].strip(),

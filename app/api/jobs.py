@@ -87,13 +87,32 @@ async def cancel_job(job_id: str, request: Request):
     if not job:
         raise HTTPException(status_code=404, detail=f"Job ID {job_id} not found")
 
-    cur_status = job.get("status", "").upper()
-    if cur_status in ("COMPLETED", "FAILED", "CANCELLED"):
-        raise HTTPException(status_code=400, detail="Job cannot be cancelled in its terminal state")
+    cur_status = (job.get("status") or "").upper()
+    terminal_messages = {
+        "COMPLETED": "Job đã chạy xong, không cần hủy.",
+        "FAILED": "Job đã thất bại, không cần hủy.",
+        "CANCELLED": "Job đã được hủy trước đó.",
+    }
+    if cur_status in terminal_messages:
+        return {
+            "job_id": job_id,
+            "status": cur_status,
+            "already_finished": True,
+            "message": terminal_messages[cur_status],
+        }
 
     cancelled = qm.cancel_job(job_id)
     if not cancelled:
-        raise HTTPException(status_code=400, detail="Failed to cancel job")
+        latest = qm.get_job(job_id) or job
+        latest_status = (latest.get("status") or "").upper()
+        if latest_status in terminal_messages:
+            return {
+                "job_id": job_id,
+                "status": latest_status,
+                "already_finished": True,
+                "message": terminal_messages[latest_status],
+            }
+        raise HTTPException(status_code=400, detail="Không hủy được job. Thử lại sau vài giây.")
 
     # Broadcast WebSocket notification
     ws_mgr = getattr(request.app.state, "ws_manager", None)

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { fetchJobs, cancelJob, getDownloadUrl, deleteJob, clearJobs, retryJob, retryFailedJobs } from '../services/api';
+import { fetchJobs, fetchJobLogs, cancelJob, getDownloadUrl, deleteJob, clearJobs, retryJob, retryFailedJobs } from '../services/api';
 import { Toast } from './Toast';
 import { ConfirmModal } from './ConfirmModal';
 import { VideoModal } from './VideoModal';
@@ -27,6 +27,35 @@ import {
   ChevronsRight,
 } from 'lucide-react';
 
+function logIdentity(entry) {
+  if (!entry) return '';
+  if (typeof entry === 'string') return entry;
+  return `${entry.timestamp || ''}|${entry.message || ''}`;
+}
+
+function mergeJobLogs(prev = [], incoming = []) {
+  const older = Array.isArray(prev) ? prev : [];
+  const newer = Array.isArray(incoming) ? incoming : [];
+  if (!newer.length) return older;
+  if (!older.length) return newer;
+  // A restarted / crop-only rerun starts with a different first line — replace, do not keep old delogo rows.
+  if (logIdentity(newer[0]) !== logIdentity(older[0])) return newer;
+  const olderSmear = older.some((e) => /che .*(delogo)|chỉ crop\/delogo/i.test(String(e?.message || e || '')));
+  const newerClean = newer.some((e) => /không delogo/i.test(String(e?.message || e || '')));
+  if (olderSmear && newerClean) return newer;
+  if (newer.length >= older.length) return newer;
+  return older;
+}
+
+function mergeJobRecord(previous, incoming) {
+  if (!previous) return incoming;
+  return {
+    ...previous,
+    ...incoming,
+    logs: mergeJobLogs(previous.logs, incoming.logs),
+  };
+}
+
 export function BatchQueue({ wsUpdates }) {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -46,6 +75,7 @@ export function BatchQueue({ wsUpdates }) {
   // Pagination States (Per User Request)
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(8);
+  const [nowTs, setNowTs] = useState(Date.now());
 
   const totalJobs = jobs.length;
   const totalPages = Math.max(1, Math.ceil(totalJobs / pageSize));
@@ -75,7 +105,9 @@ export function BatchQueue({ wsUpdates }) {
     try {
       const data = await fetchJobs();
       const jobList = Array.isArray(data) ? data : (data.jobs || data.items || []);
-      setJobs(jobList);
+      setJobs((prev) =>
+        jobList.map((job) => mergeJobRecord(prev.find((item) => item.job_id === job.job_id), job))
+      );
       if (jobList.length > 0) {
         setSelectedJobId((prev) => {
           if (prev && jobList.some((j) => j.job_id === prev)) return prev;
@@ -95,10 +127,53 @@ export function BatchQueue({ wsUpdates }) {
 
   useEffect(() => {
     loadJobs(false);
-    // Safety watchdog: ensure loading spinner is cleared even on slow network
+    const poll = setInterval(() => loadJobs(false), 2500);
     const timer = setTimeout(() => setLoading(false), 2000);
-    return () => clearTimeout(timer);
+    return () => {
+      clearInterval(poll);
+      clearTimeout(timer);
+    };
   }, [loadJobs]);
+
+  useEffect(() => {
+    if (!selectedJobId) return undefined;
+    let cancelled = false;
+    const pullLogs = async () => {
+      try {
+        const data = await fetchJobLogs(selectedJobId);
+        if (cancelled || !data) return;
+        setJobs((prev) =>
+          prev.map((job) => {
+            if (job.job_id !== selectedJobId) return job;
+            return mergeJobRecord(job, {
+              ...job,
+              status: data.status || job.status,
+              progress_percent: data.progress_percent ?? job.progress_percent,
+              message: data.message || job.message,
+              logs: data.logs || job.logs,
+            });
+          })
+        );
+      } catch {
+        /* keep current console */
+      }
+    };
+    pullLogs();
+    const tick = setInterval(pullLogs, 1500);
+    return () => {
+      cancelled = true;
+      clearInterval(tick);
+    };
+  }, [selectedJobId]);
+
+  useEffect(() => {
+    const selected = jobs.find((j) => j.job_id === selectedJobId) || jobs[0];
+    const running =
+      selected && !['COMPLETED', 'FAILED', 'CANCELLED'].includes(selected.status?.toUpperCase());
+    if (!running) return undefined;
+    const tick = setInterval(() => setNowTs(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, [jobs, selectedJobId]);
 
 
   // Handle incoming WebSocket broadcast updates
@@ -109,15 +184,7 @@ export function BatchQueue({ wsUpdates }) {
       const existingIdx = list.findIndex((j) => j.job_id === wsUpdates.job_id);
       if (existingIdx >= 0) {
         const updated = [...list];
-        const prevLogs = updated[existingIdx].logs || [];
-        const incomingLogs = wsUpdates.logs || [];
-        const mergedLogs = incomingLogs.length > 0 ? incomingLogs : prevLogs;
-
-        updated[existingIdx] = {
-          ...updated[existingIdx],
-          ...wsUpdates,
-          logs: mergedLogs,
-        };
+        updated[existingIdx] = mergeJobRecord(updated[existingIdx], wsUpdates);
         return updated;
       }
       return [wsUpdates, ...list];
@@ -152,12 +219,20 @@ export function BatchQueue({ wsUpdates }) {
     const jobId = cancelTarget;
     setCancelTarget(null);
     try {
-      await cancelJob(jobId);
-      setToast({
-        type: 'info',
-        title: 'Đã Hủy Job',
-        message: `Đã gửi yêu cầu dừng tiến trình của job ${jobId}.`,
-      });
+      const result = await cancelJob(jobId);
+      if (result?.already_finished) {
+        setToast({
+          type: 'info',
+          title: 'Job đã kết thúc',
+          message: result.message || `Job ${jobId} không còn đang chạy.`,
+        });
+      } else {
+        setToast({
+          type: 'info',
+          title: 'Đã Hủy Job',
+          message: `Đã gửi yêu cầu dừng tiến trình của job ${jobId}.`,
+        });
+      }
       loadJobs();
     } catch (e) {
       setToast({
@@ -255,6 +330,24 @@ export function BatchQueue({ wsUpdates }) {
   const selectedJob = jobs.find((j) => j.job_id === selectedJobId) || jobs[0] || null;
   const currentLogs = selectedJob?.logs || [];
   const isJobRunning = selectedJob && !['COMPLETED', 'FAILED', 'CANCELLED'].includes(selectedJob.status?.toUpperCase());
+  const lastActivity = (job) => {
+    const logs = job?.logs || [];
+    const last = logs.length ? logs[logs.length - 1] : null;
+    return (last?.message || job?.message || '').trim();
+  };
+  const activityAgeSec = (() => {
+    if (!isJobRunning || !selectedJob) return 0;
+    const t = Date.parse(selectedJob.updated_at || '');
+    if (!t) return 0;
+    return Math.max(0, Math.round((nowTs - t) / 1000));
+  })();
+  const formatAge = (sec) => {
+    if (sec < 5) return 'vừa xong';
+    if (sec < 60) return `${sec}s trước`;
+    const minutes = Math.floor(sec / 60);
+    const rem = sec % 60;
+    return rem ? `${minutes} phút ${rem}s trước` : `${minutes} phút trước`;
+  };
 
   const handleCopyLogs = () => {
     if (!selectedJob) return;
@@ -465,6 +558,14 @@ export function BatchQueue({ wsUpdates }) {
                               style={{ width: `${progressPct}%` }}
                             />
                           </div>
+                          {!isCompleted && !isFailed && !isCancelled && lastActivity(job) && (
+                            <p
+                              className="text-[10px] text-slate-500 font-medium truncate max-w-[240px]"
+                              title={lastActivity(job)}
+                            >
+                              {lastActivity(job)}
+                            </p>
+                          )}
                           {(isFailed || isCancelled) && (job.error_message || job.error) && (
                             <p className="text-[10px] text-rose-600 font-medium truncate max-w-[220px]" title={job.error_message || job.error}>
                               {job.error_message || job.error}
@@ -726,7 +827,7 @@ export function BatchQueue({ wsUpdates }) {
         {/* Terminal Stream Output Body */}
         <div
           ref={logContainerRef}
-          className="p-4 font-mono text-xs leading-relaxed max-h-72 min-h-48 overflow-y-auto space-y-1.5 select-text selection:bg-blue-600 selection:text-white"
+          className="p-4 font-mono text-xs leading-relaxed max-h-[36rem] min-h-64 overflow-y-auto space-y-1.5 select-text selection:bg-blue-600 selection:text-white"
         >
           {!selectedJob ? (
             <div className="py-12 text-center text-slate-500 space-y-2">
@@ -791,10 +892,13 @@ export function BatchQueue({ wsUpdates }) {
 
           {/* Active Job Blinking Cursor */}
           {isJobRunning && (
-            <div className="flex items-center gap-2 text-emerald-400 pt-2 font-bold">
-              <span className="animate-pulse">&gt;</span>
-              <span className="text-slate-400 text-xs">Pipeline đang xử lý giai đoạn tiếp theo</span>
-              <span className="inline-block w-2 h-4 bg-emerald-400 animate-pulse ml-0.5" />
+            <div className="flex items-start gap-2 text-emerald-400 pt-2 font-bold">
+              <Loader2 className="w-3.5 h-3.5 animate-spin mt-0.5 shrink-0" />
+              <span className="text-slate-300 text-xs font-medium break-all">
+                {lastActivity(selectedJob) || 'Pipeline đang chạy...'}
+                <span className="text-slate-500 font-normal"> · log mới nhất {formatAge(activityAgeSec)}</span>
+              </span>
+              <span className="inline-block w-2 h-4 bg-emerald-400 animate-pulse ml-0.5 shrink-0" />
             </div>
           )}
         </div>
@@ -810,7 +914,11 @@ export function BatchQueue({ wsUpdates }) {
             </span>
           </div>
           <div>
-            <span>Tổng cộng: {currentLogs.length} dòng log</span>
+            <span>
+              {isJobRunning
+                ? `Đang làm: ${lastActivity(selectedJob) || selectedJob.status} · ${currentLogs.length} dòng`
+                : `Tổng cộng: ${currentLogs.length} dòng log`}
+            </span>
           </div>
         </div>
       </div>

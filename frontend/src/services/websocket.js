@@ -2,6 +2,22 @@
  * Singleton WebSocket Manager for real-time job progress tracking
  */
 
+import { DESKTOP_BACKEND_WS } from './backend';
+
+function resolveJobsWsUrl() {
+  if (typeof window === 'undefined') {
+    return `${DESKTOP_BACKEND_WS}/ws/jobs`;
+  }
+  const host = window.location.host;
+  const protocol = window.location.protocol;
+  if (protocol === 'file:' || !host) {
+    return `${DESKTOP_BACKEND_WS}/ws/jobs`;
+  }
+  // Same-origin through the Vite/Electron proxy. Cross-port ws://:6000 from :6001
+  // stays CONNECTING in the desktop renderer and never receives live job updates.
+  return `${protocol === 'https:' ? 'wss:' : 'ws:'}//${host}/ws/jobs`;
+}
+
 class WebSocketService {
   constructor() {
     this.listeners = new Set();
@@ -20,7 +36,8 @@ class WebSocketService {
 
   onStatusChange(callback) {
     this.statusListeners.add(callback);
-    callback(this.connected ? 'connected' : 'disconnected');
+    const initial = this.connected ? 'connected' : this.ws ? 'connecting' : 'disconnected';
+    callback(initial);
     return () => this.statusListeners.delete(callback);
   }
 
@@ -30,17 +47,8 @@ class WebSocketService {
       return;
     }
 
-    let wsUrl = 'ws://127.0.0.1:8000/ws/jobs';
-    if (typeof window !== 'undefined') {
-      const proto = window.location.protocol;
-      if (proto === 'https:') {
-        wsUrl = `wss://${window.location.host}/ws/jobs`;
-      } else if (proto === 'http:' && window.electronAPI?.isDesktop) {
-        wsUrl = 'ws://127.0.0.1:8000/ws/jobs';
-      } else if (proto === 'http:') {
-        wsUrl = `${proto === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/jobs`;
-      }
-    }
+    const wsUrl = resolveJobsWsUrl();
+    this.statusListeners.forEach((fn) => fn('connecting'));
 
     try {
       this.ws = new WebSocket(wsUrl);
@@ -88,7 +96,12 @@ class WebSocketService {
       };
 
       this.ws.onerror = () => {
-        this.ws?.close();
+        // onclose handles reconnect; closing here avoids a stuck CONNECTING socket.
+        try {
+          this.ws?.close();
+        } catch {
+          // ignore
+        }
       };
     } catch {
       this.connected = false;

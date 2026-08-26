@@ -15,6 +15,8 @@ from app.api.channels import router as channels_router
 from app.api.studio import router as studio_router
 from app.api.bgm import router as bgm_router
 from app.api.facebook import router as facebook_router
+from app.api.tiktok import router as tiktok_router
+from app.api.content import router as content_router
 
 api_router = APIRouter()
 
@@ -27,3 +29,5 @@ api_router.include_router(channels_router, tags=["Channels"])
 api_router.include_router(studio_router, tags=["Studio"])
 api_router.include_router(bgm_router, tags=["BGM"])
 api_router.include_router(facebook_router, tags=["Facebook"])
+api_router.include_router(tiktok_router, tags=["TikTok"])
+api_router.include_router(content_router, tags=["Content"])
