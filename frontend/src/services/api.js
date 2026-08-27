@@ -9,10 +9,15 @@ export const isDesktop =
   (!!window.electronAPI?.isDesktop || window.location.protocol === 'file:');
 
 export const getApiBase = () => {
-  if (
-    typeof window !== 'undefined' &&
-    (window.location.protocol === 'file:' || !window.location.host || window.location.host === '')
-  ) {
+  if (typeof window === 'undefined') return '/api/v1';
+  const desktop = !!window.electronAPI?.isDesktop || window.location.protocol === 'file:';
+  const onBackend =
+    (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost') &&
+    String(window.location.port || '') === '6000';
+  if (desktop && !onBackend) {
+    return `${DESKTOP_BACKEND_ORIGIN}/api/v1`;
+  }
+  if (window.location.protocol === 'file:' || !window.location.host) {
     return `${DESKTOP_BACKEND_ORIGIN}/api/v1`;
   }
   return '/api/v1';

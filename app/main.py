@@ -110,9 +110,6 @@ async def lifespan(app: FastAPI):
         app.state.facebook_distribution_worker = facebook_worker
         app.state.tiktok_distribution_worker = tiktok_worker
 
-        if skip_blocking_seed:
-            asyncio.create_task(asyncio.to_thread(_seed_sample_media))
-
         yield
     finally:
         try:
@@ -195,6 +192,19 @@ async def favicon():
     return Response(status_code=204)
 
 
+def _frontend_media_type(path: str) -> str | None:
+    ext = os.path.splitext(path)[1].lower()
+    return {
+        ".js": "text/javascript",
+        ".mjs": "text/javascript",
+        ".css": "text/css",
+        ".html": "text/html",
+        ".svg": "image/svg+xml",
+        ".json": "application/json",
+        ".map": "application/json",
+    }.get(ext)
+
+
 def _frontend_file(rel_path: str):
     rel = (rel_path or "index.html").lstrip("/")
     if not rel or rel.endswith("/"):
@@ -244,7 +254,8 @@ async def _serve_frontend(path: str, request: Request) -> Response:
             return proxied
     local = _frontend_file(path)
     if local:
-        return FileResponse(local)
+        media = _frontend_media_type(local)
+        return FileResponse(local, media_type=media) if media else FileResponse(local)
     html = """<!DOCTYPE html>
 <html lang="vi"><head>
 <meta charset="UTF-8"/>

@@ -8,13 +8,18 @@ function resolveJobsWsUrl() {
   if (typeof window === 'undefined') {
     return `${DESKTOP_BACKEND_WS}/ws/jobs`;
   }
+  const desktop = !!window.electronAPI?.isDesktop || window.location.protocol === 'file:';
+  const onBackend =
+    (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost') &&
+    String(window.location.port || '') === '6000';
+  if (desktop && !onBackend) {
+    return `${DESKTOP_BACKEND_WS}/ws/jobs`;
+  }
   const host = window.location.host;
   const protocol = window.location.protocol;
   if (protocol === 'file:' || !host) {
     return `${DESKTOP_BACKEND_WS}/ws/jobs`;
   }
-  // Same-origin through the Vite/Electron proxy. Cross-port ws://:6000 from :6001
-  // stays CONNECTING in the desktop renderer and never receives live job updates.
   return `${protocol === 'https:' ? 'wss:' : 'ws:'}//${host}/ws/jobs`;
 }
 

@@ -118,6 +118,13 @@ const BACKEND_PORT = 6000;
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 const ELECTRON_MANAGES_BACKEND = !isDev;
 
+if (!isDev) {
+  app.commandLine.appendSwitch(
+    'disable-features',
+    'BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights,PrivateNetworkAccessRespectPreflightResults',
+  );
+}
+
 function bundledWindowsPython() {
   return path.join(process.resourcesPath, 'python', 'python.exe');
 }
@@ -597,6 +604,24 @@ function killPythonBackend() {
 const APP_ICON_PATH = path.join(__dirname, 'assets', 'icon.png');
 const APP_ICNS_PATH = path.join(__dirname, 'assets', 'icon.icns');
 
+function packagedIndexHtml() {
+  const candidates = [
+    path.join(process.resourcesPath, 'ui', 'index.html'),
+    path.join(__dirname, '..', 'dist', 'index.html'),
+  ];
+  return candidates.find((item) => fs.existsSync(item)) || null;
+}
+
+function loadStudioUi() {
+  if (!mainWindow || mainWindow.isDestroyed()) return Promise.resolve();
+  if (isDev) {
+    const devServerUrl = process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5273';
+    return mainWindow.loadURL(devServerUrl);
+  }
+  console.log('[Electron] Loading Studio UI from', `${BACKEND_URL}/`);
+  return mainWindow.loadURL(`${BACKEND_URL}/`);
+}
+
 function createMainWindow() {
   const iconToUse = fs.existsSync(APP_ICNS_PATH)
     ? APP_ICNS_PATH
@@ -613,7 +638,8 @@ function createMainWindow() {
     icon: iconToUse,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     trafficLightPosition: { x: 16, y: 18 },
-    backgroundColor: '#ffffff',
+    autoHideMenuBar: true,
+    backgroundColor: '#0f172a',
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -638,24 +664,15 @@ function createMainWindow() {
   mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
     console.warn(`[Electron] Failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
     if (isQuitting) return;
-    if (isDev) {
-      setTimeout(() => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          console.log('[Electron] Retrying dev server load...');
-          mainWindow.loadURL(devServerUrl);
-        }
-      }, 1200);
-      return;
-    }
     setTimeout(() => {
       if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.loadURL(`${BACKEND_URL}/`);
+        loadStudioUi();
       }
-    }, 1500);
+    }, 1200);
   });
 
   if (isDev) {
-    mainWindow.loadURL(devServerUrl);
+    loadStudioUi();
   } else {
     mainWindow.loadURL(
       'data:text/html;charset=utf-8,' +
@@ -667,8 +684,8 @@ font-family:Inter,system-ui,sans-serif;background:#0f172a;color:#e2e8f0}
 .card{max-width:420px;padding:32px;border-radius:20px;background:#1e293b;text-align:center}
 h1{font-size:20px;margin:0 0 8px}p{color:#94a3b8;line-height:1.5}
 </style></head><body><div class="card">
-<h1>Đang khởi động backend</h1>
-<p>API FastAPI đang mở trên 127.0.0.1:6000. Giao diện Studio sẽ mở ngay khi sẵn sàng.</p>
+<h1>Đang khởi động</h1>
+<p>Đang mở backend FastAPI rồi vào Studio.</p>
 </div></body></html>`),
     );
   }
@@ -801,7 +818,7 @@ function setupIpcHandlers() {
     const started = await startPythonBackend();
     const ready = started && (await waitForBackend());
     if (ready && mainWindow && !mainWindow.isDestroyed() && !isDev) {
-      await mainWindow.loadURL(`${BACKEND_URL}/`);
+      await loadStudioUi();
     }
     return ready;
   });
@@ -820,6 +837,7 @@ function setupIpcHandlers() {
 // --- APP LIFECYCLE ---
 
 app.whenReady().then(async () => {
+  Menu.setApplicationMenu(null);
   if (process.platform === 'darwin' && app.dock) {
     try {
       const iconImg = nativeImage.createFromPath(APP_ICON_PATH);
@@ -847,8 +865,7 @@ app.whenReady().then(async () => {
 
   const backendReady = await startPythonBackend();
   if (backendReady && mainWindow && !mainWindow.isDestroyed() && !isDev) {
-    console.log(`[Electron] Loading Studio UI from ${BACKEND_URL}/`);
-    await mainWindow.loadURL(`${BACKEND_URL}/`);
+    await loadStudioUi();
   }
   if (!backendReady) {
     console.error('[Electron] Backend is unavailable; the UI remains open so the error can be surfaced and retried.');
