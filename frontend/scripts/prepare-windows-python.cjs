@@ -14,7 +14,7 @@ const destDir = path.join(frontendDir, '.cache', 'win-python');
 const siteDir = path.join(destDir, 'Lib', 'site-packages');
 const stampPath = path.join(destDir, '.bundle-ready');
 const requirementsPath = path.join(repoRoot, 'requirements.txt');
-const pipBin = path.join(repoRoot, 'venv311', 'bin', 'pip');
+const isWin = process.platform === 'win32';
 
 const BINARY_PACKAGES = [
   'fastapi>=0.110.0',
@@ -53,6 +53,20 @@ const BINARY_PACKAGES = [
   'sea-g2p',
   'sniffio',
   'safetensors',
+  'starlette>=0.46.0,<2',
+  'anyio>=4.0.0,<5',
+];
+
+// Pure-Python ASGI stack. Installed again without --platform/--abi so pip
+// unpacks complete py3-none-any wheels (starlette as a real package, not a
+// namespace). --target + --platform win_amd64 --abi cp312 otherwise leaves
+// `from starlette import status` failing with "(unknown location)".
+const WEB_STACK_PACKAGES = [
+  'starlette==1.6.0',
+  'anyio==4.14.2',
+  'fastapi==0.141.1',
+  'uvicorn==0.52.4',
+  'click>=8.1.0,<8.2',
 ];
 
 function fail(message) {
@@ -69,11 +83,42 @@ function run(cmd, args, extra = {}) {
   const result = spawnSync(cmd, args, {
     stdio: 'inherit',
     encoding: 'utf-8',
+    windowsHide: true,
     ...extra,
   });
   if (result.status !== 0) {
     fail(`Command failed (${result.status}): ${cmd} ${args.join(' ')}`);
   }
+}
+
+function resolvePipPython() {
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  const local = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+  const candidates = [
+    process.env.PYTHON_PATH,
+    path.join(repoRoot, 'venv311', 'Scripts', 'python.exe'),
+    path.join(repoRoot, 'venv', 'Scripts', 'python.exe'),
+    path.join(repoRoot, '.venv', 'Scripts', 'python.exe'),
+    path.join(repoRoot, 'venv311', 'bin', 'python3'),
+    path.join(repoRoot, 'venv311', 'bin', 'python'),
+    path.join(repoRoot, 'venv', 'bin', 'python3'),
+    path.join(repoRoot, 'venv', 'bin', 'python'),
+    path.join(local, 'Programs', 'Python', 'Python312', 'python.exe'),
+    path.join(local, 'Programs', 'Python', 'Python311', 'python.exe'),
+    path.join(local, 'Programs', 'Python', 'Python310', 'python.exe'),
+  ].filter(Boolean);
+  const found = candidates.find((item) => fs.existsSync(item));
+  if (found) return found;
+
+  const cmd = isWin ? 'python' : 'python3';
+  const probe = spawnSync(cmd, ['-c', 'import sys; print(sys.executable)'], {
+    encoding: 'utf-8',
+    timeout: 8000,
+    windowsHide: true,
+  });
+  const exe = (probe.stdout || '').trim().split(/\r?\n/).pop();
+  if (probe.status === 0 && exe && fs.existsSync(exe)) return exe;
+  fail('Missing Python with pip. Install Python 3.10+ or create venv first.');
 }
 
 function download(url, dest) {
@@ -99,16 +144,52 @@ function download(url, dest) {
   });
 }
 
+function pipEnv() {
+  const py = resolvePipPython();
+  const pyDir = path.dirname(py);
+  const delim = isWin ? ';' : ':';
+  const blocked = ['win-python', 'reup-video studio', 'python312.dll'];
+  const pathParts = (process.env.PATH || '')
+    .split(delim)
+    .filter((item) => {
+      const lower = item.toLowerCase();
+      return item && !blocked.some((token) => lower.includes(token));
+    });
+  const env = { ...process.env, PATH: [pyDir, ...pathParts].join(delim) };
+  delete env.PYTHONHOME;
+  delete env.PYTHONPATH;
+  env.PYTHONNOUSERSITE = '1';
+  return { py, env };
+}
+
 function pip(args) {
-  if (!fs.existsSync(pipBin)) {
-    fail(`Missing ${pipBin}. Create venv311 first.`);
-  }
-  run(pipBin, args, { cwd: repoRoot });
+  const { py, env } = pipEnv();
+  run(py, ['-m', 'pip', ...args], { cwd: repoRoot, env });
 }
 
 function unpackArchive(archive, dest) {
   fs.mkdirSync(dest, { recursive: true });
-  if (archive.endsWith('.zip')) {
+  if (isWin) {
+    const tarArgs = archive.endsWith('.tar.gz') || archive.endsWith('.tgz')
+      ? ['-xzf', archive, '-C', dest]
+      : ['-xf', archive, '-C', dest];
+    const tar = spawnSync('tar', tarArgs, { stdio: 'inherit', windowsHide: true });
+    if (tar.status === 0) return;
+    if (archive.endsWith('.zip') || archive.endsWith('.whl')) {
+      const zipPath = archive.endsWith('.whl') ? `${archive}.zip` : archive;
+      if (zipPath !== archive) fs.copyFileSync(archive, zipPath);
+      run('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `Expand-Archive -LiteralPath ${JSON.stringify(zipPath)} -DestinationPath ${JSON.stringify(dest)} -Force`,
+      ]);
+      if (zipPath !== archive) fs.rmSync(zipPath, { force: true });
+      return;
+    }
+    fail(`Could not unpack ${archive}`);
+  }
+  if (archive.endsWith('.zip') || archive.endsWith('.whl')) {
     run('unzip', ['-qo', archive, '-d', dest]);
     return;
   }
@@ -165,6 +246,14 @@ async function vendorVieneu() {
     tmp,
     '--only-binary=:all:',
     '--no-deps',
+    '--platform',
+    'win_amd64',
+    '--python-version',
+    '312',
+    '--implementation',
+    'cp',
+    '--abi',
+    'cp312',
     'vieneu==3.3.0',
   ]);
   const wheel = fs.readdirSync(tmp).find((name) => name.startsWith('vieneu-') && name.endsWith('.whl'));
@@ -259,6 +348,65 @@ function pipWin(packages, extra = []) {
   ]);
 }
 
+function wipeSitePackage(name) {
+  const folded = name.replace(/-/g, '_');
+  for (const dir of [name, folded]) {
+    fs.rmSync(path.join(siteDir, dir), { recursive: true, force: true });
+  }
+  if (!fs.existsSync(siteDir)) return;
+  for (const entry of fs.readdirSync(siteDir)) {
+    const isMeta = entry.endsWith('.dist-info') || entry.endsWith('.egg-info');
+    if (isMeta && (entry.startsWith(`${name}-`) || entry.startsWith(`${folded}-`))) {
+      fs.rmSync(path.join(siteDir, entry), { recursive: true, force: true });
+    }
+  }
+}
+
+function pipWebStack(packages) {
+  pip([
+    'install',
+    '--target', siteDir,
+    '--upgrade',
+    '--force-reinstall',
+    '--python-version', '312',
+    '--only-binary=:all:',
+    '--no-compile',
+    ...packages,
+  ]);
+}
+
+function verifyWebStack() {
+  const py = path.join(destDir, 'python.exe');
+  if (!fs.existsSync(py)) fail(`Missing ${py} for web-stack verify`);
+  const probe = [
+    'from fastapi import FastAPI',
+    'from starlette import status',
+    'import uvicorn, anyio, starlette, inspect',
+    'assert getattr(starlette, "__file__", None), "starlette is a namespace package"',
+    'assert inspect.getfile(status)',
+    'print("WEB_STACK_OK", "starlette", starlette.__version__, "fastapi", FastAPI.__module__)',
+  ].join('; ');
+  const result = spawnSync(py, ['-c', probe], {
+    encoding: 'utf-8',
+    timeout: 30000,
+    windowsHide: true,
+  });
+  const out = `${result.stdout || ''}${result.stderr || ''}`;
+  if (result.status !== 0 || !out.includes('WEB_STACK_OK')) {
+    fail(`Bundled Python cannot import FastAPI/Starlette:\n${out || `exit ${result.status}`}`);
+  }
+  console.log(`[win-python] ${out.trim()}`);
+}
+
+function ensureWebStack() {
+  console.log('[win-python] Reinstalling FastAPI/Starlette/Uvicorn/AnyIO (complete wheels)...');
+  for (const name of ['starlette', 'fastapi', 'uvicorn', 'anyio']) {
+    wipeSitePackage(name);
+  }
+  pipWebStack(WEB_STACK_PACKAGES);
+  verifyWebStack();
+}
+
 function hasPkg(name) {
   const folded = name.replace(/-/g, '_');
   return fs.existsSync(path.join(siteDir, name)) || fs.existsSync(path.join(siteDir, folded));
@@ -272,9 +420,12 @@ function ensureExtraPackages() {
   }
   if (!hasPkg('sphn')) {
     console.log('[win-python] Trying optional sphn wheel for Demucs...');
+    const { py, env } = pipEnv();
     const result = spawnSync(
-      pipBin,
+      py,
       [
+        '-m',
+        'pip',
         'install',
         '--target', siteDir,
         '--upgrade',
@@ -286,7 +437,7 @@ function ensureExtraPackages() {
         '--no-compile',
         'sphn',
       ],
-      { stdio: 'inherit', encoding: 'utf-8', cwd: repoRoot },
+      { stdio: 'inherit', encoding: 'utf-8', cwd: repoRoot, windowsHide: true, env },
     );
     if (result.status !== 0) {
       console.warn('[win-python] sphn has no Windows wheel; Demucs may be unavailable.');
@@ -313,6 +464,36 @@ function findNamedFile(root, name) {
   return null;
 }
 
+function copyLocalFfmpeg(ffmpegDest, ffmpegExe, ffprobeExe) {
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  const local = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+  const which = spawnSync(isWin ? 'where' : 'which', ['ffmpeg'], {
+    encoding: 'utf-8',
+    windowsHide: true,
+  });
+  const whichPath = (which.stdout || '').trim().split(/\r?\n/).find(Boolean);
+  const ffmpegCandidates = [
+    whichPath,
+    path.join(home, 'ffmpeg', 'ffmpeg.exe'),
+    path.join(home, 'ffmpeg', 'bin', 'ffmpeg.exe'),
+    path.join(local, 'Microsoft', 'WinGet', 'Links', 'ffmpeg.exe'),
+    'C:\\ffmpeg\\bin\\ffmpeg.exe',
+    'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',
+  ].filter(Boolean);
+  const ffmpeg = ffmpegCandidates.find((item) => fs.existsSync(item));
+  if (!ffmpeg) return false;
+  const ffprobe = [
+    path.join(path.dirname(ffmpeg), 'ffprobe.exe'),
+    path.join(path.dirname(ffmpeg), 'ffprobe'),
+  ].find((item) => fs.existsSync(item));
+  if (!ffprobe) return false;
+  fs.mkdirSync(ffmpegDest, { recursive: true });
+  fs.copyFileSync(ffmpeg, ffmpegExe);
+  fs.copyFileSync(ffprobe, ffprobeExe);
+  console.log(`[win-python] Copied local FFmpeg from ${path.dirname(ffmpeg)}`);
+  return true;
+}
+
 async function ensureFfmpeg() {
   const ffmpegDest = path.join(frontendDir, '.cache', 'win-ffmpeg');
   const ffmpegExe = path.join(ffmpegDest, 'ffmpeg.exe');
@@ -324,23 +505,30 @@ async function ensureFfmpeg() {
 
   console.log('[win-python] Downloading Windows FFmpeg (GPL, includes libass)...');
   const zipPath = path.join(frontendDir, '.cache', 'ffmpeg-win64-gpl.zip');
-  if (!fs.existsSync(zipPath)) {
-    await download(
-      'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip',
-      zipPath,
-    );
+  try {
+    if (!fs.existsSync(zipPath)) {
+      await download(
+        'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip',
+        zipPath,
+      );
+    }
+    const tmp = path.join(frontendDir, '.cache', 'tmp-ffmpeg');
+    fs.rmSync(tmp, { recursive: true, force: true });
+    unpackArchive(zipPath, tmp);
+    const ffmpeg = findNamedFile(tmp, 'ffmpeg.exe');
+    const ffprobe = findNamedFile(tmp, 'ffprobe.exe');
+    if (!ffmpeg || !ffprobe) fail('FFmpeg zip missing ffmpeg.exe/ffprobe.exe');
+    fs.mkdirSync(ffmpegDest, { recursive: true });
+    fs.copyFileSync(ffmpeg, ffmpegExe);
+    fs.copyFileSync(ffprobe, ffprobeExe);
+    fs.rmSync(tmp, { recursive: true, force: true });
+    console.log(`[win-python] FFmpeg ready: ${ffmpegDest}`);
+    return;
+  } catch (error) {
+    console.warn(`[win-python] FFmpeg download failed: ${error.message}`);
+    if (copyLocalFfmpeg(ffmpegDest, ffmpegExe, ffprobeExe)) return;
+    fail('Could not bundle FFmpeg. Install FFmpeg or allow the GitHub download.');
   }
-  const tmp = path.join(frontendDir, '.cache', 'tmp-ffmpeg');
-  fs.rmSync(tmp, { recursive: true, force: true });
-  unpackArchive(zipPath, tmp);
-  const ffmpeg = findNamedFile(tmp, 'ffmpeg.exe');
-  const ffprobe = findNamedFile(tmp, 'ffprobe.exe');
-  if (!ffmpeg || !ffprobe) fail('FFmpeg zip missing ffmpeg.exe/ffprobe.exe');
-  fs.mkdirSync(ffmpegDest, { recursive: true });
-  fs.copyFileSync(ffmpeg, ffmpegExe);
-  fs.copyFileSync(ffprobe, ffprobeExe);
-  fs.rmSync(tmp, { recursive: true, force: true });
-  console.log(`[win-python] FFmpeg ready: ${ffmpegDest}`);
 }
 
 async function main() {
@@ -351,6 +539,7 @@ async function main() {
       console.log(`[win-python] Using cached runtime at ${destDir}`);
       writePth();
       writeSitecustomize();
+      ensureWebStack();
       ensureExtraPackages();
       pruneRuntime();
       copyMsvcDlls();
@@ -402,6 +591,8 @@ async function main() {
     ...BINARY_PACKAGES,
   ]);
 
+  ensureWebStack();
+
   pip([
     'install',
     '--target', siteDir,
@@ -429,6 +620,7 @@ async function main() {
   console.log(`[win-python] Ready: ${destDir}`);
   writePth();
   writeSitecustomize();
+  ensureWebStack();
   ensureExtraPackages();
   pruneRuntime();
   copyMsvcDlls();

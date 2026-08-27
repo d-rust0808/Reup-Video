@@ -51,12 +51,18 @@ if (!pythonBin) {
   );
 }
 
-const extraPath = [
-  binDir,
-  path.join(process.env.USERPROFILE || process.env.HOME || '', '.local', 'bin'),
-  path.join(process.env.LOCALAPPDATA || '', 'agy'),
-  path.join(process.env.LOCALAPPDATA || '', 'Google', 'Antigravity'),
-].filter((item) => item && fs.existsSync(item));
+  const extraPath = [
+    binDir,
+    path.join(process.env.USERPROFILE || process.env.HOME || '', '.local', 'bin'),
+    path.join(process.env.USERPROFILE || process.env.HOME || '', 'ffmpeg'),
+    path.join(process.env.USERPROFILE || process.env.HOME || '', 'ffmpeg', 'bin'),
+    path.join(process.env.LOCALAPPDATA || '', 'agy'),
+    path.join(process.env.LOCALAPPDATA || '', 'agy', 'bin'),
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'agy'),
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'agy', 'bin'),
+    path.join(process.env.LOCALAPPDATA || '', 'Google', 'Antigravity'),
+    path.join(process.env.LOCALAPPDATA || '', 'Antigravity', 'cli'),
+  ].filter((item) => item && fs.existsSync(item));
 
 const env = {
   ...process.env,

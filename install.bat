@@ -81,7 +81,9 @@ if not exist ".env" (
 )
 
 echo ======================================================
-echo ✅ CÀI ĐẶT HOÀN TẤT THÀNH CÔNG!
-echo Để khởi chạy ứng dụng, vui lòng nhấp đúp vào: start.bat
+echo  CAI DAT HOAN TAT THANH CONG!
+echo  Web UI:     start.bat
+echo  Desktop:    start-desktop.bat
+echo  Build app:  cd frontend ^&^& npm run electron:build:win
 echo ======================================================
 pause

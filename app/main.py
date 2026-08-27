@@ -9,6 +9,7 @@ import json
 import logging
 import subprocess
 import shutil
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
@@ -38,9 +39,20 @@ def _seed_sample_media() -> None:
         logger.warning(f"Sample media seeding failed: {e}")
 
 
-# Call directory creation & sample media seeding on module import so files exist for test setups
+def _defer_sample_seed() -> bool:
+    """Packaged Electron sets REUP_ROOT; skip blocking seed so /health binds immediately."""
+    flag = os.environ.get("REUP_SKIP_SAMPLE_SEED", "").strip().lower()
+    if flag in {"1", "true", "yes"}:
+        return True
+    return bool(os.environ.get("REUP_ROOT"))
+
+
+# Directories on import so tests and first requests have a writable tree.
+# Sample MP4 seeding is deferred in packaged Electron (REUP_SKIP_SAMPLE_SEED=1)
+# so uvicorn can bind /health before edge-tts/FFmpeg run.
 settings.ensure_directories()
-_seed_sample_media()
+if not _defer_sample_seed():
+    _seed_sample_media()
 
 
 @asynccontextmanager
@@ -58,11 +70,23 @@ async def lifespan(app: FastAPI):
     tiktok_worker = None
     try:
         settings.ensure_directories()
-        _seed_sample_media()
+        skip_blocking_seed = _defer_sample_seed()
+        if not skip_blocking_seed:
+            _seed_sample_media()
 
         logger.info(f"Initializing SQLite database schema at: {settings.DB_PATH}")
         init_db(settings.DB_PATH)
 
+        logger.info(
+            "Runtime limits: jobs=%s gpu=%s onnx_threads=%s tts=%sx%s stt_threads=%s stt_workers=%s",
+            settings.MAX_CONCURRENT_JOBS,
+            settings.GPU_CONCURRENCY,
+            settings.ONNX_INTRA_OP_THREADS,
+            settings.TTS_CONCURRENCY,
+            settings.TTS_ONNX_THREADS,
+            settings.STT_CPU_THREADS,
+            settings.STT_WORKERS,
+        )
         logger.info("Starting Batch Queue Manager workers...")
         queue_mgr = BatchQueueManager(
             db_path=settings.DB_PATH,
@@ -85,6 +109,9 @@ async def lifespan(app: FastAPI):
         app.state.scraper_manager = scraper_mgr
         app.state.facebook_distribution_worker = facebook_worker
         app.state.tiktok_distribution_worker = tiktok_worker
+
+        if skip_blocking_seed:
+            asyncio.create_task(asyncio.to_thread(_seed_sample_media))
 
         yield
     finally:
@@ -110,11 +137,19 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Configure CORS Middleware
+# Configure CORS Middleware. Never use allow_origins=["*"] with credentials —
+# Chromium rejects that, and file:// sends Origin: null.
+_cors_origins = settings.get_cors_origins()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.get_cors_origins(),
-    allow_origin_regex=".*",
+    allow_origins=_cors_origins if _cors_origins != ["*"] else [
+        "http://127.0.0.1:6000",
+        "http://127.0.0.1:6001",
+        "http://localhost:6000",
+        "http://localhost:6001",
+        "null",
+    ],
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -128,7 +163,9 @@ app.include_router(api_router, prefix="/api/v1")
 
 # Mount React frontend dist assets if present
 FRONTEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend"))
-FRONTEND_DIST = os.path.join(FRONTEND_ROOT, "dist")
+FRONTEND_DIST = os.path.abspath(
+    os.environ.get("FRONTEND_DIST") or os.path.join(FRONTEND_ROOT, "dist")
+)
 FRONTEND_PUBLIC = os.path.join(FRONTEND_ROOT, "public")
 VITE_ORIGIN = os.environ.get("VITE_ORIGIN", "http://127.0.0.1:6001")
 
@@ -201,9 +238,10 @@ async def _proxy_vite(path: str, request: Request) -> Optional[Response]:
 
 
 async def _serve_frontend(path: str, request: Request) -> Response:
-    proxied = await _proxy_vite(path, request)
-    if proxied is not None:
-        return proxied
+    if not os.environ.get("FRONTEND_DIST"):
+        proxied = await _proxy_vite(path, request)
+        if proxied is not None:
+            return proxied
     local = _frontend_file(path)
     if local:
         return FileResponse(local)

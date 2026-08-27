@@ -35,25 +35,25 @@ export function getMediaUrl(path) {
 }
 
 export async function checkHealth() {
-  const res = await fetch(`${API_BASE}/health`);
+  const res = await fetch(`${getApiBase()}/health`);
   if (!res.ok) throw new Error('Health check failed');
   return res.json();
 }
 
 export async function fetchSampleVideos() {
-  const res = await fetch(`${API_BASE}/samples`);
+  const res = await fetch(`${getApiBase()}/samples`);
   if (!res.ok) throw new Error('Failed to fetch sample videos');
   return res.json();
 }
 
 export async function fetchLibrary() {
-  const res = await fetch(`${API_BASE}/library`);
+  const res = await fetch(`${getApiBase()}/library`);
   if (!res.ok) throw new Error('Failed to fetch video library');
   return res.json();
 }
 
 export async function deleteLibraryVideo(videoId) {
-  const res = await fetch(`${API_BASE}/library/${encodeURIComponent(videoId)}`, { method: 'DELETE' });
+  const res = await fetch(`${getApiBase()}/library/${encodeURIComponent(videoId)}`, { method: 'DELETE' });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.detail || 'Không thể xóa video nguồn');
@@ -62,7 +62,7 @@ export async function deleteLibraryVideo(videoId) {
 }
 
 export async function extractUrls(urls) {
-  const res = await fetch(`${API_BASE}/extract`, {
+  const res = await fetch(`${getApiBase()}/extract`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ urls }),
@@ -75,7 +75,7 @@ export async function extractUrls(urls) {
 }
 
 export async function extractChannel(payload) {
-  const res = await fetch(`${API_BASE}/extract/channel`, {
+  const res = await fetch(`${getApiBase()}/extract/channel`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -90,7 +90,7 @@ export async function extractChannel(payload) {
 export async function uploadVideoFile(file) {
   const formData = new FormData();
   formData.append('file', file);
-  const res = await fetch(`${API_BASE}/videos/upload`, {
+  const res = await fetch(`${getApiBase()}/videos/upload`, {
     method: 'POST',
     body: formData,
   });
@@ -102,7 +102,7 @@ export async function uploadVideoFile(file) {
 }
 
 export async function submitJob(payload) {
-  const res = await fetch(`${API_BASE}/process/job`, {
+  const res = await fetch(`${getApiBase()}/process/job`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -115,31 +115,31 @@ export async function submitJob(payload) {
 }
 
 export async function fetchJobs() {
-  const res = await fetch(`${API_BASE}/jobs`);
+  const res = await fetch(`${getApiBase()}/jobs`);
   if (!res.ok) throw new Error('Failed to fetch jobs');
   return res.json();
 }
 
 export async function fetchJobLogs(jobId) {
-  const res = await fetch(`${API_BASE}/jobs/${jobId}/logs`);
+  const res = await fetch(`${getApiBase()}/jobs/${jobId}/logs`);
   if (!res.ok) throw new Error('Failed to fetch job logs');
   return res.json();
 }
 
 export async function retryJob(jobId) {
-  const res = await fetch(`${API_BASE}/jobs/${jobId}/retry`, { method: 'POST' });
+  const res = await fetch(`${getApiBase()}/jobs/${jobId}/retry`, { method: 'POST' });
   if (!res.ok) throw new Error('Không chạy lại được job');
   return res.json();
 }
 
 export async function retryFailedJobs() {
-  const res = await fetch(`${API_BASE}/jobs/retry-failed`, { method: 'POST' });
+  const res = await fetch(`${getApiBase()}/jobs/retry-failed`, { method: 'POST' });
   if (!res.ok) throw new Error('Không chạy lại hàng loạt');
   return res.json();
 }
 
 export async function cancelJob(jobId) {
-  const res = await fetch(`${API_BASE}/jobs/${jobId}/cancel`, {
+  const res = await fetch(`${getApiBase()}/jobs/${jobId}/cancel`, {
     method: 'POST',
   });
   const data = await res.json().catch(() => ({}));
@@ -156,7 +156,7 @@ export async function cancelJob(jobId) {
 }
 
 export async function deleteJob(jobId) {
-  const res = await fetch(`${API_BASE}/jobs/${jobId}`, {
+  const res = await fetch(`${getApiBase()}/jobs/${jobId}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -168,7 +168,7 @@ export async function deleteJob(jobId) {
 
 export async function clearJobs(status = null) {
   const query = status ? `?status=${encodeURIComponent(status)}` : '?all=true';
-  const res = await fetch(`${API_BASE}/jobs${query}`, {
+  const res = await fetch(`${getApiBase()}/jobs${query}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -179,7 +179,7 @@ export async function clearJobs(status = null) {
 }
 
 export async function deleteBatchJobs(jobIds) {
-  const res = await fetch(`${API_BASE}/jobs/delete-batch`, {
+  const res = await fetch(`${getApiBase()}/jobs/delete-batch`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ job_ids: jobIds }),
@@ -192,26 +192,26 @@ export async function deleteBatchJobs(jobIds) {
 }
 
 export async function fetchOutputs() {
-  const res = await fetch(`${API_BASE}/outputs`);
+  const res = await fetch(`${getApiBase()}/outputs`);
   if (!res.ok) throw new Error('Failed to fetch output files');
   return res.json();
 }
 
 export function getStreamUrl(mediaId) {
-  return `${API_BASE}/videos/stream/${mediaId}`;
+  return `${getApiBase()}/videos/stream/${mediaId}`;
 }
 
 export function getSubtitleUrl(mediaId) {
-  return `${API_BASE}/videos/subtitles/${mediaId}`;
+  return `${getApiBase()}/videos/subtitles/${mediaId}`;
 }
 
 export function getDownloadUrl(jobId) {
-  return `${API_BASE}/outputs/download/${jobId}`;
+  return `${getApiBase()}/outputs/download/${jobId}`;
 }
 
 export async function downloadBatchZip(jobIds) {
   const query = encodeURIComponent(jobIds.join(','));
-  const res = await fetch(`${API_BASE}/outputs/download-batch?job_ids=${query}`);
+  const res = await fetch(`${getApiBase()}/outputs/download-batch?job_ids=${query}`);
   if (!res.ok) throw new Error('Batch ZIP download failed');
   const blob = await res.blob();
   const url = window.URL.createObjectURL(blob);
@@ -224,7 +224,7 @@ export async function downloadBatchZip(jobIds) {
 }
 
 export async function deleteOutput(jobId) {
-  const res = await fetch(`${API_BASE}/outputs/${jobId}`, {
+  const res = await fetch(`${getApiBase()}/outputs/${jobId}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -235,7 +235,7 @@ export async function deleteOutput(jobId) {
 }
 
 export async function deleteBatchOutputs(jobIds) {
-  const res = await fetch(`${API_BASE}/outputs/delete-batch`, {
+  const res = await fetch(`${getApiBase()}/outputs/delete-batch`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ job_ids: jobIds }),
@@ -248,7 +248,7 @@ export async function deleteBatchOutputs(jobIds) {
 }
 
 export async function clearAllOutputs() {
-  const res = await fetch(`${API_BASE}/outputs`, {
+  const res = await fetch(`${getApiBase()}/outputs`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -259,13 +259,13 @@ export async function clearAllOutputs() {
 }
 
 export async function fetchVoices() {
-  const res = await fetch(`${API_BASE}/voices`);
+  const res = await fetch(`${getApiBase()}/voices`);
   if (!res.ok) throw new Error('Failed to fetch voices list');
   return res.json();
 }
 
 export async function previewVoice({ voice, lang, engine }) {
-  const res = await fetch(`${API_BASE}/voices/preview`, {
+  const res = await fetch(`${getApiBase()}/voices/preview`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ voice, lang, engine }),
@@ -282,13 +282,13 @@ export async function previewVoice({ voice, lang, engine }) {
 // -----------------------------------------------------------------------------
 
 export async function fetchChannels() {
-  const res = await fetch(`${API_BASE}/channels`);
+  const res = await fetch(`${getApiBase()}/channels`);
   if (!res.ok) throw new Error('Failed to fetch channels');
   return res.json();
 }
 
 export async function createChannel(payload) {
-  const res = await fetch(`${API_BASE}/channels`, {
+  const res = await fetch(`${getApiBase()}/channels`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -301,7 +301,7 @@ export async function createChannel(payload) {
 }
 
 export async function updateChannel(channelId, payload) {
-  const res = await fetch(`${API_BASE}/channels/${channelId}`, {
+  const res = await fetch(`${getApiBase()}/channels/${channelId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -314,7 +314,7 @@ export async function updateChannel(channelId, payload) {
 }
 
 export async function deleteChannel(channelId) {
-  const res = await fetch(`${API_BASE}/channels/${channelId}`, {
+  const res = await fetch(`${getApiBase()}/channels/${channelId}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -325,7 +325,7 @@ export async function deleteChannel(channelId) {
 }
 
 export async function fetchChannelVideos(channelId, status = '', tag = '') {
-  let url = `${API_BASE}/channels/${channelId}/videos`;
+  let url = `${getApiBase()}/channels/${channelId}/videos`;
   const params = new URLSearchParams();
   if (status) params.append('status_filter', status);
   if (tag) params.append('tag', tag);
@@ -338,7 +338,7 @@ export async function fetchChannelVideos(channelId, status = '', tag = '') {
 }
 
 export async function assignVideoToChannel(channelId, payload) {
-  const res = await fetch(`${API_BASE}/channels/${channelId}/videos`, {
+  const res = await fetch(`${getApiBase()}/channels/${channelId}/videos`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -351,7 +351,7 @@ export async function assignVideoToChannel(channelId, payload) {
 }
 
 export async function updateChannelVideo(videoId, payload) {
-  const res = await fetch(`${API_BASE}/channel-videos/${videoId}`, {
+  const res = await fetch(`${getApiBase()}/channel-videos/${videoId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -364,13 +364,13 @@ export async function updateChannelVideo(videoId, payload) {
 }
 
 export async function fetchChannelGroups() {
-  const res = await fetch(`${API_BASE}/channel-groups`);
+  const res = await fetch(`${getApiBase()}/channel-groups`);
   if (!res.ok) throw new Error('Không tải được nhóm kênh');
   return res.json();
 }
 
 export async function createChannelGroup(payload) {
-  const res = await fetch(`${API_BASE}/channel-groups`, {
+  const res = await fetch(`${getApiBase()}/channel-groups`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -383,7 +383,7 @@ export async function createChannelGroup(payload) {
 }
 
 export async function updateChannelGroup(groupId, payload) {
-  const res = await fetch(`${API_BASE}/channel-groups/${groupId}`, {
+  const res = await fetch(`${getApiBase()}/channel-groups/${groupId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -396,7 +396,7 @@ export async function updateChannelGroup(groupId, payload) {
 }
 
 export async function deleteChannelGroup(groupId) {
-  const res = await fetch(`${API_BASE}/channel-groups/${groupId}`, { method: 'DELETE' });
+  const res = await fetch(`${getApiBase()}/channel-groups/${groupId}`, { method: 'DELETE' });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Không xóa được nhóm');
@@ -405,13 +405,13 @@ export async function deleteChannelGroup(groupId) {
 }
 
 export async function fetchPublishLog(limit = 80) {
-  const res = await fetch(`${API_BASE}/publish-log?limit=${limit}`);
+  const res = await fetch(`${getApiBase()}/publish-log?limit=${limit}`);
   if (!res.ok) throw new Error('Không tải được nhật ký đăng');
   return res.json();
 }
 
 export async function removeVideoFromChannel(videoId) {
-  const res = await fetch(`${API_BASE}/channel-videos/${videoId}`, {
+  const res = await fetch(`${getApiBase()}/channel-videos/${videoId}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -422,13 +422,13 @@ export async function removeVideoFromChannel(videoId) {
 }
 
 export async function fetchFacebookSettings() {
-  const res = await fetch(`${API_BASE}/facebook/settings`);
+  const res = await fetch(`${getApiBase()}/facebook/settings`);
   if (!res.ok) throw new Error('Không tải được cấu hình Facebook');
   return res.json();
 }
 
 export async function saveFacebookSettings(payload) {
-  const res = await fetch(`${API_BASE}/facebook/settings`, {
+  const res = await fetch(`${getApiBase()}/facebook/settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -441,7 +441,7 @@ export async function saveFacebookSettings(payload) {
 }
 
 export async function syncFacebookPages() {
-  const res = await fetch(`${API_BASE}/facebook/sync-pages`, { method: 'POST' });
+  const res = await fetch(`${getApiBase()}/facebook/sync-pages`, { method: 'POST' });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Đồng bộ Fanpage thất bại');
@@ -450,13 +450,13 @@ export async function syncFacebookPages() {
 }
 
 export async function fetchFacebookPages() {
-  const res = await fetch(`${API_BASE}/facebook/pages`);
+  const res = await fetch(`${getApiBase()}/facebook/pages`);
   if (!res.ok) throw new Error('Không tải được danh sách Fanpage');
   return res.json();
 }
 
 export async function bindFacebookPage(channelId, payload) {
-  const res = await fetch(`${API_BASE}/facebook/channels/${channelId}/binding`, {
+  const res = await fetch(`${getApiBase()}/facebook/channels/${channelId}/binding`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -469,7 +469,7 @@ export async function bindFacebookPage(channelId, payload) {
 }
 
 export async function publishFacebookReel(videoId) {
-  const res = await fetch(`${API_BASE}/facebook/channel-videos/${videoId}/publish`, {
+  const res = await fetch(`${getApiBase()}/facebook/channel-videos/${videoId}/publish`, {
     method: 'POST',
   });
   if (!res.ok) {
@@ -480,13 +480,13 @@ export async function publishFacebookReel(videoId) {
 }
 
 export async function fetchTikTokSettings() {
-  const res = await fetch(`${API_BASE}/tiktok/settings`);
+  const res = await fetch(`${getApiBase()}/tiktok/settings`);
   if (!res.ok) throw new Error('Không tải được cấu hình TikTok');
   return res.json();
 }
 
 export async function saveTikTokSettings(payload) {
-  const res = await fetch(`${API_BASE}/tiktok/settings`, {
+  const res = await fetch(`${getApiBase()}/tiktok/settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -499,13 +499,13 @@ export async function saveTikTokSettings(payload) {
 }
 
 export async function fetchTikTokAccounts() {
-  const res = await fetch(`${API_BASE}/tiktok/accounts`);
+  const res = await fetch(`${getApiBase()}/tiktok/accounts`);
   if (!res.ok) throw new Error('Không tải được tài khoản TikTok');
   return res.json();
 }
 
 export async function bindTikTokAccount(channelId, payload) {
-  const res = await fetch(`${API_BASE}/tiktok/channels/${channelId}/binding`, {
+  const res = await fetch(`${getApiBase()}/tiktok/channels/${channelId}/binding`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -518,7 +518,7 @@ export async function bindTikTokAccount(channelId, payload) {
 }
 
 export async function publishTikTokVideo(videoId) {
-  const res = await fetch(`${API_BASE}/tiktok/channel-videos/${videoId}/publish`, {
+  const res = await fetch(`${getApiBase()}/tiktok/channel-videos/${videoId}/publish`, {
     method: 'POST',
   });
   if (!res.ok) {
@@ -536,7 +536,7 @@ export async function uploadChannelOverlay(channelId, file, meta = {}) {
   form.append('y', String(meta.y ?? 0.04));
   form.append('w', String(meta.w ?? 0.18));
   form.append('opacity', String(meta.opacity ?? 1));
-  const res = await fetch(`${API_BASE}/channels/${channelId}/overlays`, {
+  const res = await fetch(`${getApiBase()}/channels/${channelId}/overlays`, {
     method: 'POST',
     body: form,
   });
@@ -548,7 +548,7 @@ export async function uploadChannelOverlay(channelId, file, meta = {}) {
 }
 
 export async function saveChannelOverlays(channelId, overlays) {
-  const res = await fetch(`${API_BASE}/channels/${channelId}/overlays`, {
+  const res = await fetch(`${getApiBase()}/channels/${channelId}/overlays`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ overlays: overlays || [] }),
@@ -561,7 +561,7 @@ export async function saveChannelOverlays(channelId, overlays) {
 }
 
 export async function deleteChannelOverlay(channelId, overlayId) {
-  const res = await fetch(`${API_BASE}/channels/${channelId}/overlays/${overlayId}`, {
+  const res = await fetch(`${getApiBase()}/channels/${channelId}/overlays/${overlayId}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -578,7 +578,7 @@ export async function uploadStudioOverlay(file, meta = {}) {
   form.append('x', String(meta.x ?? 0.78));
   form.append('y', String(meta.y ?? 0.04));
   form.append('w', String(meta.w ?? 0.18));
-  const res = await fetch(`${API_BASE}/studio/overlay`, { method: 'POST', body: form });
+  const res = await fetch(`${getApiBase()}/studio/overlay`, { method: 'POST', body: form });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Tải logo/khung thất bại');
@@ -587,13 +587,13 @@ export async function uploadStudioOverlay(file, meta = {}) {
 }
 
 export async function fetchFramePresets() {
-  const res = await fetch(`${API_BASE}/frames/presets`);
+  const res = await fetch(`${getApiBase()}/frames/presets`);
   if (!res.ok) throw new Error('Không tải được mẫu khung');
   return res.json();
 }
 
 export async function renderFramePreset(payload) {
-  const res = await fetch(`${API_BASE}/frames/render`, {
+  const res = await fetch(`${getApiBase()}/frames/render`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -608,7 +608,7 @@ export async function renderFramePreset(payload) {
 export async function uploadCustomFrame(file) {
   const form = new FormData();
   form.append('file', file);
-  const res = await fetch(`${API_BASE}/frames/upload`, { method: 'POST', body: form });
+  const res = await fetch(`${getApiBase()}/frames/upload`, { method: 'POST', body: form });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Tải khung thất bại');
@@ -617,13 +617,13 @@ export async function uploadCustomFrame(file) {
 }
 
 export async function fetchBgmLibrary() {
-  const res = await fetch(`${API_BASE}/bgm`);
+  const res = await fetch(`${getApiBase()}/bgm`);
   if (!res.ok) throw new Error('Không tải được kho nhạc');
   return res.json();
 }
 
 export async function extractBgm(payload) {
-  const res = await fetch(`${API_BASE}/bgm/extract`, {
+  const res = await fetch(`${getApiBase()}/bgm/extract`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -638,7 +638,7 @@ export async function extractBgm(payload) {
 export async function uploadBgmFile(file) {
   const form = new FormData();
   form.append('file', file);
-  const res = await fetch(`${API_BASE}/bgm/upload`, { method: 'POST', body: form });
+  const res = await fetch(`${getApiBase()}/bgm/upload`, { method: 'POST', body: form });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Tải nhạc thất bại');
@@ -647,13 +647,13 @@ export async function uploadBgmFile(file) {
 }
 
 export async function deleteBgm(id) {
-  const res = await fetch(`${API_BASE}/bgm/${id}`, { method: 'DELETE' });
+  const res = await fetch(`${getApiBase()}/bgm/${id}`, { method: 'DELETE' });
   if (!res.ok) throw new Error('Không xóa được nhạc');
   return res.json();
 }
 
 export async function fetchBgmProviders() {
-  const res = await fetch(`${API_BASE}/bgm/providers`);
+  const res = await fetch(`${getApiBase()}/bgm/providers`);
   if (!res.ok) throw new Error('Không tải được danh sách nguồn nhạc');
   return res.json();
 }
@@ -676,7 +676,7 @@ export async function searchOnlineBgm({
   });
   if (minDuration > 0) params.set('min_duration', String(minDuration));
   if (maxDuration > 0) params.set('max_duration', String(maxDuration));
-  const res = await fetch(`${API_BASE}/bgm/search?${params.toString()}`);
+  const res = await fetch(`${getApiBase()}/bgm/search?${params.toString()}`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Không tìm được nhạc trên kho online');
@@ -685,7 +685,7 @@ export async function searchOnlineBgm({
 }
 
 export async function importOnlineBgm(track) {
-  const res = await fetch(`${API_BASE}/bgm/import`, {
+  const res = await fetch(`${getApiBase()}/bgm/import`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -713,13 +713,13 @@ async function readError(res, fallback) {
 }
 
 export async function fetchContentChannels() {
-  const res = await fetch(`${API_BASE}/content/channels`);
+  const res = await fetch(`${getApiBase()}/content/channels`);
   if (!res.ok) throw new Error(await readError(res, 'Không tải được kênh nguồn'));
   return res.json();
 }
 
 export async function addContentChannel(payload) {
-  const res = await fetch(`${API_BASE}/content/channels`, {
+  const res = await fetch(`${getApiBase()}/content/channels`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -729,7 +729,7 @@ export async function addContentChannel(payload) {
 }
 
 export async function patchContentChannel(channelId, payload) {
-  const res = await fetch(`${API_BASE}/content/channels/${channelId}`, {
+  const res = await fetch(`${getApiBase()}/content/channels/${channelId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -739,27 +739,27 @@ export async function patchContentChannel(channelId, payload) {
 }
 
 export async function deleteContentChannel(channelId) {
-  const res = await fetch(`${API_BASE}/content/channels/${channelId}`, { method: 'DELETE' });
+  const res = await fetch(`${getApiBase()}/content/channels/${channelId}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(await readError(res, 'Không xóa được kênh nguồn'));
   return res.json();
 }
 
 export async function fetchContentVideos(channelId, status = 'all') {
   const res = await fetch(
-    `${API_BASE}/content/channels/${channelId}/videos?status=${encodeURIComponent(status)}`
+    `${getApiBase()}/content/channels/${channelId}/videos?status=${encodeURIComponent(status)}`
   );
   if (!res.ok) throw new Error(await readError(res, 'Không tải được danh sách video'));
   return res.json();
 }
 
 export async function syncContentChannel(channelId) {
-  const res = await fetch(`${API_BASE}/content/channels/${channelId}/sync`, { method: 'POST' });
+  const res = await fetch(`${getApiBase()}/content/channels/${channelId}/sync`, { method: 'POST' });
   if (!res.ok) throw new Error(await readError(res, 'Không đồng bộ được kênh'));
   return res.json();
 }
 
 export async function fetchContentChannelVideos(channelId, videoIds) {
-  const res = await fetch(`${API_BASE}/content/channels/${channelId}/fetch`, {
+  const res = await fetch(`${getApiBase()}/content/channels/${channelId}/fetch`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ video_ids: videoIds || null }),
@@ -769,7 +769,7 @@ export async function fetchContentChannelVideos(channelId, videoIds) {
 }
 
 export async function markContentVideoPosted(videoPk, posted) {
-  const res = await fetch(`${API_BASE}/content/videos/${videoPk}`, {
+  const res = await fetch(`${getApiBase()}/content/videos/${videoPk}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ posted }),

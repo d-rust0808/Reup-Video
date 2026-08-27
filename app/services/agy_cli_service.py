@@ -41,37 +41,108 @@ _CUE_SCHEMA = {
 def _usable_bin(path: Optional[str]) -> bool:
     if not path:
         return False
-    return os.path.isfile(path)
+    if os.path.isfile(path):
+        return True
+    if os.path.isdir(path):
+        for name in ("agy.exe", "agy.cmd", "agy"):
+            nested = os.path.join(path, name)
+            if os.path.isfile(nested):
+                return True
+    return False
+
+
+def _bin_inside(directory: str) -> Optional[str]:
+    if not directory:
+        return None
+    for name in ("agy.exe", "agy.cmd", "agy"):
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate):
+            return candidate
+        nested = os.path.join(directory, "bin", name)
+        if os.path.isfile(nested):
+            return nested
+    return None
+
+
+def _windows_path_dirs() -> List[str]:
+    dirs: List[str] = []
+    for part in os.environ.get("PATH", "").split(os.pathsep):
+        cleaned = part.strip().strip('"')
+        if cleaned:
+            dirs.append(cleaned)
+    if os.name != "nt":
+        return dirs
+    try:
+        import winreg
+
+        for hive, subkey in (
+            (winreg.HKEY_CURRENT_USER, r"Environment"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        ):
+            try:
+                with winreg.OpenKey(hive, subkey) as key:
+                    raw, _ = winreg.QueryValueEx(key, "Path")
+            except OSError:
+                continue
+            for part in str(raw or "").split(";"):
+                expanded = os.path.expandvars(part.strip().strip('"'))
+                if expanded:
+                    dirs.append(expanded)
+    except Exception:
+        pass
+    return dirs
 
 
 def resolve_agy_bin() -> Optional[str]:
-    """Find `agy` on macOS or Windows. Ignore AGY_BIN if that path does not exist."""
+    """Find system `agy` on PATH or standard install dirs. .env / API keys are not required."""
     configured = (os.getenv("AGY_BIN") or "").strip().strip('"')
-    if _usable_bin(configured):
-        return configured
+    if configured:
+        if os.path.isfile(configured):
+            return configured
+        nested = _bin_inside(configured)
+        if nested:
+            return nested
 
     for name in ("agy", "agy.exe", "agy.cmd"):
         found = shutil.which(name)
-        if _usable_bin(found):
+        if found and os.path.isfile(found):
             return found
 
     home = Path.home()
     local_app = os.environ.get("LOCALAPPDATA") or str(home / "AppData" / "Local")
+    roaming = os.environ.get("APPDATA") or str(home / "AppData" / "Roaming")
+    program_files = os.environ.get("ProgramFiles") or r"C:\Program Files"
+    program_files_x86 = os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"
     candidates = [
         home / ".local" / "bin" / "agy",
         home / ".local" / "bin" / "agy.exe",
         home / ".local" / "bin" / "agy.cmd",
         Path(local_app) / "agy" / "agy.exe",
+        Path(local_app) / "agy" / "agy.cmd",
+        Path(local_app) / "agy" / "bin" / "agy.exe",
+        Path(local_app) / "agy" / "bin" / "agy.cmd",
         Path(local_app) / "Programs" / "agy" / "agy.exe",
+        Path(local_app) / "Programs" / "agy" / "bin" / "agy.exe",
         Path(local_app) / "Google" / "Antigravity" / "agy.exe",
+        Path(local_app) / "Google" / "Antigravity" / "bin" / "agy.exe",
         Path(local_app) / "Antigravity" / "cli" / "agy.exe",
-        home / "AppData" / "Roaming" / "npm" / "agy.cmd",
-        home / "AppData" / "Roaming" / "npm" / "agy.exe",
+        Path(local_app) / "Antigravity" / "cli" / "bin" / "agy.exe",
+        Path(roaming) / "npm" / "agy.cmd",
+        Path(roaming) / "npm" / "agy.exe",
+        Path(program_files) / "agy" / "agy.exe",
+        Path(program_files) / "agy" / "bin" / "agy.exe",
+        Path(program_files) / "Google" / "Antigravity" / "agy.exe",
+        Path(program_files_x86) / "agy" / "bin" / "agy.exe",
     ]
     for candidate in candidates:
         path = str(candidate)
-        if _usable_bin(path):
+        if os.path.isfile(path):
             return path
+
+    for directory in _windows_path_dirs():
+        found = _bin_inside(directory)
+        if found:
+            return found
     return None
 
 
@@ -240,6 +311,23 @@ def _agy_env() -> Dict[str, str]:
     env = {**os.environ, "TERM": os.environ.get("TERM") or "dumb"}
     env["ANTIGRAVITY_BROWSER_TOOLS_ENABLED"] = "false"
     env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "1"
+    binary = resolve_agy_bin()
+    extras: List[str] = []
+    if binary:
+        extras.append(str(Path(binary).resolve().parent))
+    local_app = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    extras.extend(
+        [
+            str(Path(local_app) / "agy" / "bin"),
+            str(Path(local_app) / "agy"),
+            str(Path(local_app) / "Programs" / "agy" / "bin"),
+            str(Path(local_app) / "Google" / "Antigravity"),
+        ]
+    )
+    existing = env.get("PATH") or ""
+    prefix = os.pathsep.join(item for item in extras if item and os.path.isdir(item))
+    if prefix:
+        env["PATH"] = prefix + os.pathsep + existing
     return env
 
 

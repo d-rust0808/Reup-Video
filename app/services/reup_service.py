@@ -384,7 +384,7 @@ def apply_vietnamese_dubbing(video_path: str, text_to_translate: str, output_pat
             target_out = output_path or video_path + ".vi.mp4"
             tmp_out = target_out + ".tmp_dub.mp4"
             cmd = [
-                "ffmpeg", "-y", "-i", video_path, "-i", tts_file,
+                "ffmpeg", "-y", "-threads", "0", "-i", video_path, "-i", tts_file,
                 "-c:v", "copy", "-map", "0:v:0", "-map", "1:a:0", "-shortest", tmp_out
             ]
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -558,7 +558,7 @@ def _burn_hardsub_overlay(ffmpeg_bin: str, video_path: str, srt_path: str, outpu
         fc, input_args = build_overlay_filter(overlays)
         tmp_out = output_path + ".ovlsub.tmp.mp4"
         encode_args = browser_safe_encode_args(ffmpeg_bin)
-        cmd = [ffmpeg_bin, "-y", "-i", video_path, *input_args,
+        cmd = [ffmpeg_bin, "-y", "-threads", "0", "-i", video_path, *input_args,
                "-filter_complex", fc, "-map", "[v_out]", "-map", "0:a?",
                *encode_args, "-c:a", "copy", tmp_out]
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -618,7 +618,7 @@ def burn_vietnamese_hardsub(video_path: str, srt_path: str, output_path: str, sp
     tmp_out = output_path + ".hardsub.tmp.mp4"
     encode_args = browser_safe_encode_args(ffmpeg_bin)
     cmd = [
-        ffmpeg_bin, "-y", "-i", video_path,
+        ffmpeg_bin, "-y", "-threads", "0", "-i", video_path,
         "-vf", vf,
         *encode_args,
         "-c:a", "copy",
@@ -706,7 +706,7 @@ def mix_tts_with_background(
     if vid_dur > 0:
         temp_padded = video_path + ".padded_tts.wav"
         pad_cmd = [
-            ffmpeg_bin, "-y", "-i", tts_audio_path,
+            ffmpeg_bin, "-y", "-threads", "0", "-i", tts_audio_path,
             "-af", "apad", "-t", f"{vid_dur:.3f}",
             temp_padded,
         ]
@@ -719,7 +719,7 @@ def mix_tts_with_background(
     if has_audio:
         fc = build_tts_bgm_mix_filter()
         cmd = [
-            ffmpeg_bin, "-y",
+            ffmpeg_bin, "-y", "-threads", "0",
             "-i", video_path,
             "-i", audio_to_use,
             "-filter_complex", fc,
@@ -730,7 +730,7 @@ def mix_tts_with_background(
         ]
     else:
         cmd = [
-            ffmpeg_bin, "-y",
+            ffmpeg_bin, "-y", "-threads", "0",
             "-i", video_path,
             "-i", audio_to_use,
             "-map", "0:v:0", "-map", "1:a:0",

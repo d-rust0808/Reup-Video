@@ -129,7 +129,7 @@ class BatchQueueManager:
     and a bounded thread pool for heavy video/audio subprocess transformations.
     """
 
-    def __init__(self, db_path: str = DEFAULT_DB_PATH, max_concurrent_jobs: int = 8):
+    def __init__(self, db_path: str = DEFAULT_DB_PATH, max_concurrent_jobs: int = 16):
         self.db_path = db_path
         self.max_concurrent_jobs = max(1, int(max_concurrent_jobs))
         try:

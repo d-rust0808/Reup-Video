@@ -21,6 +21,20 @@ from app.services.performance import gpu_task_slot
 logger = logging.getLogger(__name__)
 
 
+def _windows_media_candidates(name: str) -> List[str]:
+    home = os.path.expanduser("~")
+    local = os.environ.get("LOCALAPPDATA", os.path.join(home, "AppData", "Local"))
+    exe = f"{name}.exe" if os.name == "nt" else name
+    return [
+        os.path.join(home, "ffmpeg", exe),
+        os.path.join(home, "ffmpeg", "bin", exe),
+        os.path.join(local, "Microsoft", "WinGet", "Links", exe),
+        os.path.join("C:\\ffmpeg", "bin", exe),
+        os.path.join("C:\\Program Files", "ffmpeg", "bin", exe),
+        os.path.join("C:\\Program Files (x86)", "ffmpeg", "bin", exe),
+    ]
+
+
 def find_ffmpeg_binary() -> Optional[str]:
     """Locates ffmpeg executable in PATH or standard system installation paths."""
     env_path = os.environ.get("FFMPEG_PATH")
@@ -29,12 +43,14 @@ def find_ffmpeg_binary() -> Optional[str]:
     path = shutil.which("ffmpeg")
     if path:
         return path
-    for candidate in [
+    candidates = [
         "/opt/homebrew/bin/ffmpeg",
         "/usr/local/bin/ffmpeg",
         "/usr/bin/ffmpeg",
-    ]:
-        if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+        *_windows_media_candidates("ffmpeg"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
             return candidate
     return None
 
@@ -47,12 +63,19 @@ def find_ffprobe_binary() -> Optional[str]:
     path = shutil.which("ffprobe")
     if path:
         return path
-    for candidate in [
+    ffmpeg = os.environ.get("FFMPEG_PATH")
+    if ffmpeg:
+        sibling = os.path.join(os.path.dirname(ffmpeg), "ffprobe.exe" if os.name == "nt" else "ffprobe")
+        if os.path.exists(sibling):
+            return sibling
+    candidates = [
         "/opt/homebrew/bin/ffprobe",
         "/usr/local/bin/ffprobe",
         "/usr/bin/ffprobe",
-    ]:
-        if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+        *_windows_media_candidates("ffprobe"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
             return candidate
     return None
 
@@ -121,7 +144,7 @@ def extract_audio_stream(video_path: str, output_audio_path: str, sample_rate: i
 
     os.makedirs(os.path.dirname(os.path.abspath(output_audio_path)), exist_ok=True)
     cmd = [
-        ffmpeg_bin, "-y",
+        ffmpeg_bin, "-y", "-threads", "0",
         "-i", video_path,
         "-vn",
         "-acodec", "pcm_s16le",
@@ -271,7 +294,7 @@ def apply_ffmpeg_vocal_mute(
     os.makedirs(os.path.dirname(os.path.abspath(output_audio_path)), exist_ok=True)
     if ";" in (af_filter or ""):
         cmd = [
-            ffmpeg_bin, "-y",
+            ffmpeg_bin, "-y", "-threads", "0",
             "-i", input_audio_path,
             "-filter_complex", f"[0:a]{af_filter}[aout]",
             "-map", "[aout]",
@@ -280,7 +303,7 @@ def apply_ffmpeg_vocal_mute(
         ]
     else:
         cmd = [
-            ffmpeg_bin, "-y",
+            ffmpeg_bin, "-y", "-threads", "0",
             "-i", input_audio_path,
             "-af", af_filter,
             "-c:a", "pcm_s16le" if output_audio_path.endswith(".wav") else "aac",
@@ -314,7 +337,7 @@ def mix_separated_stems(
         "[bg][voc]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[aout]"
     )
     cmd = [
-        ffmpeg_bin, "-y",
+        ffmpeg_bin, "-y", "-threads", "0",
         "-i", background_path,
         "-i", vocal_path,
         "-filter_complex", filter_complex,
@@ -366,7 +389,7 @@ def mix_audio_tracks(
         )
 
     cmd = [
-        ffmpeg_bin, "-y",
+        ffmpeg_bin, "-y", "-threads", "0",
         "-i", bgm_path,
         "-i", voiceover_path,
         "-filter_complex", filter_complex,

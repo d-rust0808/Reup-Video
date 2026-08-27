@@ -7,7 +7,7 @@ import { BatchQueue } from './components/BatchQueue';
 import { OutputGallery } from './components/OutputGallery';
 import { ChannelManager } from './components/ChannelManager';
 import { ContentManager } from './components/ContentManager';
-import { fetchJobs, fetchOutputs, fetchLibrary } from './services/api';
+import { fetchJobs, fetchOutputs, fetchLibrary, checkHealth } from './services/api';
 import { WebSocketClient } from './services/websocket';
 import { loadSession, saveSession, hydrateSession } from './services/session';
 
@@ -96,13 +96,18 @@ export default function App() {
 
   const updateCounts = useCallback(async () => {
     try {
+      await checkHealth();
+      setServerOnline(true);
+    } catch {
+      setServerOnline(false);
+    }
+    try {
       const jobsData = await fetchJobs();
       const jobsList = Array.isArray(jobsData) ? jobsData : (jobsData.jobs || jobsData.items || []);
       const active = jobsList.filter((j) => !['COMPLETED', 'FAILED', 'CANCELLED'].includes((j.status || '').toUpperCase()));
       setQueueCount(active.length);
-      setServerOnline(true);
     } catch {
-      setServerOnline(false);
+      // queue count is optional if health already passed
     }
     try {
       const outputsData = await fetchOutputs();

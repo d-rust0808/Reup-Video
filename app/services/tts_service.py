@@ -221,7 +221,7 @@ def scale_audio_speed_ffmpeg(
 
     filter_str = ",".join(nodes) if nodes else "anull"
     cmd = [
-        ffmpeg_bin, "-y",
+        ffmpeg_bin, "-y", "-threads", "0",
         "-i", input_audio_path,
         "-af", filter_str,
         "-ar", str(sample_rate),
@@ -477,7 +477,7 @@ class TTSService:
         filter_complex = ";".join(filter_nodes + [mix_filter])
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        cmd = [ffmpeg_bin, "-y"] + inputs + [
+        cmd = [ffmpeg_bin, "-y", "-threads", "0"] + inputs + [
             "-filter_complex", filter_complex,
             "-map", "[aout]"
         ]

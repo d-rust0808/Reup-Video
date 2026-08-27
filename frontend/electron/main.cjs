@@ -72,16 +72,42 @@ if (process.platform === 'darwin') {
 if (process.platform === 'win32') {
   const home = process.env.USERPROFILE || process.env.HOME || '';
   const local = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+  const roaming = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
   const searchPaths = [
     path.join(home, '.local', 'bin'),
+    path.join(home, 'ffmpeg'),
+    path.join(home, 'ffmpeg', 'bin'),
     path.join(local, 'agy'),
+    path.join(local, 'agy', 'bin'),
     path.join(local, 'Programs', 'agy'),
+    path.join(local, 'Programs', 'agy', 'bin'),
     path.join(local, 'Google', 'Antigravity'),
+    path.join(local, 'Google', 'Antigravity', 'bin'),
     path.join(local, 'Antigravity', 'cli'),
-    path.join(home, 'AppData', 'Roaming', 'npm'),
+    path.join(roaming, 'npm'),
   ];
+  let persistent = [];
+  try {
+    const ps = spawnSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        "[Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')",
+      ],
+      { encoding: 'utf-8', timeout: 8000, windowsHide: true },
+    );
+    if (ps.status === 0 && ps.stdout) {
+      persistent = ps.stdout.split(';').map((item) => item.trim()).filter(Boolean);
+    }
+  } catch {
+    // Registry PATH is best-effort so GUI apps can still see user-installed agy.
+  }
   const existingPath = process.env.PATH || '';
-  process.env.PATH = Array.from(new Set([...searchPaths.filter((p) => fs.existsSync(p)), ...existingPath.split(';')])).join(';');
+  process.env.PATH = Array.from(
+    new Set([...searchPaths.filter((p) => fs.existsSync(p)), ...persistent, ...existingPath.split(';').filter(Boolean)]),
+  ).join(';');
 }
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
@@ -120,11 +146,7 @@ function applyWindowsRuntimePath() {
 }
 
 function pythonPathValue() {
-  const parts = [
-    ROOT_DIR,
-    path.join(ROOT_DIR, 'app'),
-    path.resolve(__dirname, '..', '..'),
-  ];
+  const parts = [ROOT_DIR];
   const site = bundledSitePackages();
   if (fs.existsSync(site)) parts.push(site);
   if (process.env.PYTHONPATH) parts.push(process.env.PYTHONPATH);
@@ -162,14 +184,16 @@ function writeBackendLauncher() {
   fs.writeFileSync(
     launcher,
     [
-      'import os, sys',
+      'import os, sys, multiprocessing',
       'from pathlib import Path',
+      'multiprocessing.freeze_support()',
       `ROOT = Path(${rootLiteral})`,
       'os.chdir(ROOT)',
       'sys.path.insert(0, str(ROOT))',
-      'os.environ["PYTHONPATH"] = str(ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")',
+      'os.environ["PYTHONPATH"] = str(ROOT)',
       'import uvicorn',
-      `uvicorn.run("app.main:app", host="127.0.0.1", port=${BACKEND_PORT}, log_level="info")`,
+      'if __name__ == "__main__":',
+      `    uvicorn.run("app.main:app", host="127.0.0.1", port=${BACKEND_PORT}, log_level="info", reload=False, workers=1)`,
       '',
     ].join('\n'),
     'utf8',
@@ -447,7 +471,16 @@ async function startPythonBackend() {
 
   const ffmpegDir = path.join(process.resourcesPath, 'ffmpeg');
   const torchLib = path.join(pythonDir, 'Lib', 'site-packages', 'torch', 'lib');
-  const pathExtras = [pythonDir, ffmpegDir, torchLib].filter((item) => fs.existsSync(item));
+  const local = process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Local');
+  const pathExtras = [
+    pythonDir,
+    ffmpegDir,
+    torchLib,
+    path.join(local, 'agy', 'bin'),
+    path.join(local, 'agy'),
+    path.join(local, 'Programs', 'agy', 'bin'),
+    path.join(local, 'Google', 'Antigravity'),
+  ].filter((item) => item && fs.existsSync(item));
   const cacheDir = path.join(logDir, 'cache');
   fs.mkdirSync(cacheDir, { recursive: true });
   const pythonEnv = {
@@ -460,6 +493,7 @@ async function startPythonBackend() {
     PATH: [...pathExtras, process.env.PATH || ''].join(pathDelimiter()),
     PORT: String(BACKEND_PORT),
     REUP_ROOT: ROOT_DIR,
+    REUP_SKIP_SAMPLE_SEED: '1',
     HF_HOME: path.join(cacheDir, 'huggingface'),
     HUGGINGFACE_HUB_CACHE: path.join(cacheDir, 'huggingface'),
     TORCH_HOME: path.join(cacheDir, 'torch'),
@@ -472,6 +506,8 @@ async function startPythonBackend() {
   if (fs.existsSync(path.join(ffmpegDir, 'ffprobe.exe'))) {
     pythonEnv.FFPROBE_PATH = path.join(ffmpegDir, 'ffprobe.exe');
   }
+  const uiDir = path.join(process.resourcesPath, 'ui');
+  if (fs.existsSync(uiDir)) pythonEnv.FRONTEND_DIST = uiDir;
 
   try {
     pythonProcess = spawn(pythonBin, [launcher], {
@@ -601,21 +637,40 @@ function createMainWindow() {
 
   mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
     console.warn(`[Electron] Failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
-    if (isDev && !isQuitting) {
+    if (isQuitting) return;
+    if (isDev) {
       setTimeout(() => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           console.log('[Electron] Retrying dev server load...');
           mainWindow.loadURL(devServerUrl);
         }
       }, 1200);
+      return;
     }
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.loadURL(`${BACKEND_URL}/`);
+      }
+    }, 1500);
   });
 
   if (isDev) {
     mainWindow.loadURL(devServerUrl);
   } else {
-    const distPath = path.join(__dirname, '..', 'dist', 'index.html');
-    mainWindow.loadFile(distPath);
+    mainWindow.loadURL(
+      'data:text/html;charset=utf-8,' +
+        encodeURIComponent(`<!DOCTYPE html>
+<html lang="vi"><head><meta charset="UTF-8"/><title>Reup-Video Studio</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+font-family:Inter,system-ui,sans-serif;background:#0f172a;color:#e2e8f0}
+.card{max-width:420px;padding:32px;border-radius:20px;background:#1e293b;text-align:center}
+h1{font-size:20px;margin:0 0 8px}p{color:#94a3b8;line-height:1.5}
+</style></head><body><div class="card">
+<h1>Đang khởi động backend</h1>
+<p>API FastAPI đang mở trên 127.0.0.1:6000. Giao diện Studio sẽ mở ngay khi sẵn sàng.</p>
+</div></body></html>`),
+    );
   }
 
   mainWindow.on('close', (e) => {
@@ -743,8 +798,12 @@ function setupIpcHandlers() {
       return await waitForBackend(60, 500, 500);
     }
     killPythonBackend();
-    await startPythonBackend();
-    return await waitForBackend();
+    const started = await startPythonBackend();
+    const ready = started && (await waitForBackend());
+    if (ready && mainWindow && !mainWindow.isDestroyed() && !isDev) {
+      await mainWindow.loadURL(`${BACKEND_URL}/`);
+    }
+    return ready;
   });
 
   ipcMain.handle('window:minimize', () => mainWindow?.minimize());
@@ -787,6 +846,10 @@ app.whenReady().then(async () => {
   });
 
   const backendReady = await startPythonBackend();
+  if (backendReady && mainWindow && !mainWindow.isDestroyed() && !isDev) {
+    console.log(`[Electron] Loading Studio UI from ${BACKEND_URL}/`);
+    await mainWindow.loadURL(`${BACKEND_URL}/`);
+  }
   if (!backendReady) {
     console.error('[Electron] Backend is unavailable; the UI remains open so the error can be surfaced and retried.');
   }

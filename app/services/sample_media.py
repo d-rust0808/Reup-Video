@@ -31,14 +31,27 @@ def _ffmpeg() -> Optional[str]:
     path = shutil.which("ffmpeg")
     if path:
         return path
-    for candidate in ("/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg"):
-        if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+    home = os.path.expanduser("~")
+    for candidate in (
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+        "/opt/homebrew/bin/ffmpeg",
+        os.path.join(home, "ffmpeg", "ffmpeg.exe"),
+        os.path.join(home, "ffmpeg", "bin", "ffmpeg.exe"),
+        os.path.join("C:\\ffmpeg", "bin", "ffmpeg.exe"),
+    ):
+        if os.path.exists(candidate):
             return candidate
     return None
 
 
 def _cjk_font() -> str:
+    windir = os.environ.get("WINDIR", r"C:\Windows")
     for p in (
+        os.path.join(windir, "Fonts", "msyh.ttc"),
+        os.path.join(windir, "Fonts", "msyh.ttf"),
+        os.path.join(windir, "Fonts", "simhei.ttf"),
+        os.path.join(windir, "Fonts", "simsun.ttc"),
         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -48,9 +61,22 @@ def _cjk_font() -> str:
     return ""
 
 
+def _ff_filter_path(path: str) -> str:
+    """Escape a filesystem path for FFmpeg filtergraph (Windows backslash/colon)."""
+    return path.replace("\\", "/").replace(":", "\\:")
+
+
 def _run(cmd, timeout=60) -> bool:
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout)
+        kwargs = {
+            "capture_output": True,
+            "text": True,
+            "check": False,
+            "timeout": timeout,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        res = subprocess.run(cmd, **kwargs)
         if res.returncode != 0:
             logger.warning("cmd failed (%s): %s", res.returncode, (res.stderr or "")[-400:])
             return False
@@ -141,9 +167,9 @@ def generate_douyin_sample(output_path: str, duration: float = 8.0) -> bool:
     vf = (
         f"format=yuv420p,"
         f"drawbox=x=iw-280:y=36:w=250:h=64:color=white@0.88:t=fill,"
-        f"drawtext={font_opt}textfile='{logo_file}':x=iw-268:y=54:fontsize=22:fontcolor=0x111827,"
+        f"drawtext={font_opt}textfile='{_ff_filter_path(logo_file)}':x=iw-268:y=54:fontsize=22:fontcolor=0x111827,"
         f"drawbox=x=0:y=ih-118:w=iw:h=118:color=black@0.58:t=fill,"
-        f"drawtext={font_opt}textfile='{caption_file}':x=(w-text_w)/2:y=h-78:"
+        f"drawtext={font_opt}textfile='{_ff_filter_path(caption_file)}':x=(w-text_w)/2:y=h-78:"
         f"fontsize=36:fontcolor=white:borderw=2:bordercolor=black"
     )
 

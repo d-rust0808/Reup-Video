@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
+const buildDefaults = require('./desktop-build.json');
 
-const target = (process.env.DESKTOP_PLATFORM || 'mac').toLowerCase();
+const target = (process.env.DESKTOP_PLATFORM || buildDefaults.platform || 'win').toLowerCase();
 const isWindows = target === 'win';
 
 const extraResources = [
@@ -65,6 +66,12 @@ if (isWindows) {
   });
 }
 
+extraResources.push({
+  from: 'dist',
+  to: 'ui',
+  filter: ['**/*'],
+});
+
 const envFile = path.resolve(__dirname, '..', '.env');
 if (fs.existsSync(envFile)) {
   extraResources.push({ from: '../.env', to: '.env' });
@@ -78,6 +85,8 @@ module.exports = {
   },
   files: ['dist/**/*', 'electron/**/*', 'package.json'],
   extraResources,
+  compression: isWindows ? 'normal' : 'maximum',
+  forceCodeSigning: false,
   mac: {
     target: [
       { target: 'dmg', arch: ['arm64'] },
@@ -96,7 +105,6 @@ module.exports = {
   },
   win: {
     target: [
-      { target: 'zip', arch: ['x64'] },
       { target: 'nsis', arch: ['x64'] },
       { target: 'portable', arch: ['x64'] },
     ],

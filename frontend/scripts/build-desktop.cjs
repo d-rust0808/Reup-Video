@@ -58,7 +58,11 @@ const result = spawnSync(builder, args, {
   cwd: path.resolve(__dirname, '..'),
   stdio: 'inherit',
   shell: process.platform === 'win32',
-  env: { ...process.env, DESKTOP_PLATFORM: target },
+  env: {
+    ...process.env,
+    DESKTOP_PLATFORM: target,
+    CSC_IDENTITY_AUTO_DISCOVERY: process.env.CSC_IDENTITY_AUTO_DISCOVERY || 'false',
+  },
 });
 
 if (result.error) {
@@ -76,9 +80,17 @@ if (target === 'win') {
   if (fs.existsSync(unpacked) && (result.status ?? 1) !== 0) {
     const zipOut = path.resolve(__dirname, '..', 'release', 'win', 'Reup-Video Studio-1.0.0-win-x64.zip');
     console.log(`[desktop-build] installer failed; zipping unpacked app to ${zipOut}`);
-    const zip = spawnSync('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', unpacked, zipOut], {
-      stdio: 'inherit',
-    });
+    fs.mkdirSync(path.dirname(zipOut), { recursive: true });
+    const zip = process.platform === 'win32'
+      ? spawnSync('powershell.exe', [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `Compress-Archive -LiteralPath ${JSON.stringify(unpacked)} -DestinationPath ${JSON.stringify(zipOut)} -Force`,
+        ], { stdio: 'inherit', windowsHide: true })
+      : spawnSync('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', unpacked, zipOut], {
+          stdio: 'inherit',
+        });
     if (zip.status === 0) {
       console.log(`[desktop-build] fallback zip ready: ${zipOut}`);
     }

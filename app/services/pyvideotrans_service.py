@@ -421,7 +421,7 @@ class PyVideoTransService:
         if not ffmpeg_bin:
             return video_or_audio_path
         cmd = [
-            ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+            ffmpeg_bin, "-y", "-threads", "0", "-hide_banner", "-loglevel", "error",
             "-i", video_or_audio_path,
             "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
         ]
@@ -650,7 +650,7 @@ class PyVideoTransService:
         raw = (
             os.getenv("SUBTITLE_TRANSLATOR")
             or getattr(settings, "SUBTITLE_TRANSLATOR", "")
-            or "google"
+            or "agy"
         )
         engine = str(raw).strip().lower()
         if engine in ("ai", "llm", "api"):
