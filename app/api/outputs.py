@@ -40,6 +40,7 @@ async def list_outputs(request: Request):
     """
     qm = _get_queue_manager(request)
     completed_jobs = qm.list_jobs(status_filter="COMPLETED")
+    from app.api.stream import prefer_vertical_output_path
 
     outputs = []
     seen = set()
@@ -59,8 +60,15 @@ async def list_outputs(request: Request):
                 or ("hard" if (raw_cfg or {}).get("burn_subtitles", True) else "off")
             )
             subtitle_modes[j["job_id"]] = subtitle_mode
+            vertical = prefer_vertical_output_path(j["job_id"])
+            stream_job_id = (
+                os.path.basename(vertical)[:-4]
+                if vertical and str(vertical).endswith(".mp4")
+                else j["job_id"]
+            )
             outputs.append({
                 "job_id": j["job_id"],
+                "stream_job_id": stream_job_id,
                 "output_path": out_p,
                 "output_file_path": out_p,
                 "filename": os.path.basename(out_p),
@@ -69,6 +77,11 @@ async def list_outputs(request: Request):
                 "title": (raw_cfg or {}).get("post_title"),
                 "caption": (raw_cfg or {}).get("post_caption"),
                 "platform": j.get("platform"),
+                "play_platform": (
+                    os.path.basename(vertical).rsplit(".", 2)[-2]
+                    if vertical and os.path.basename(vertical).count(".") >= 2
+                    else j.get("platform")
+                ),
                 "subtitle_mode": subtitle_mode,
             })
 
@@ -114,11 +127,11 @@ async def download_output(job_id: str, request: Request):
     """
     qm = _get_queue_manager(request)
     job = qm.get_job(job_id)
+    from app.api.stream import _resolve_media_file_path
     out_p = None
     if job:
         out_p = job.get("output_file_path") or job.get("output_path")
     if not out_p or not os.path.exists(out_p):
-        from app.api.stream import _resolve_media_file_path
         out_p = _resolve_media_file_path(job_id)
     if not out_p or not os.path.exists(out_p):
         raise HTTPException(status_code=404, detail="Output video file missing from disk")
@@ -132,7 +145,7 @@ async def download_output(job_id: str, request: Request):
         status_code=200,
         headers={
             "Content-Type": "video/mp4",
-            "Content-Disposition": f'attachment; filename="{job_id}.mp4"',
+            "Content-Disposition": f'attachment; filename="{os.path.basename(out_p) if out_p else job_id + ".mp4"}"',
             "Content-Length": str(len(data)),
         },
     )

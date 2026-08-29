@@ -30,6 +30,19 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_quality_report(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
+
+
 def _run_coro_sync(coro):
     """Executes a coroutine synchronously, safely handling existing running event loops."""
     try:
@@ -509,6 +522,8 @@ class BatchQueueManager:
                 "reup_config": d.get("reup_config"),
                 "created_at": d.get("created_at"),
                 "updated_at": d.get("updated_at"),
+                "quality_status": d.get("quality_status") or "PENDING",
+                "quality_report": _parse_quality_report(d.get("quality_report")),
             }
 
     def append_job_log(
@@ -642,6 +657,26 @@ class BatchQueueManager:
         """Lightweight method to update progress percentage and broadcast to WebSocket."""
         self.update_job_status(job_id, status=stage or "WATERMARK_REMOVAL", progress=progress)
 
+    def update_job_quality(
+        self,
+        job_id: str,
+        quality_status: str,
+        quality_report: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        status = str(quality_status or "PENDING").strip().upper() or "PENDING"
+        if status not in ("PENDING", "PASS", "NEEDS_REVIEW"):
+            status = "PENDING"
+        report = quality_report if isinstance(quality_report, dict) else {}
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE jobs SET quality_status = ?, quality_report = ?, updated_at = ? WHERE job_id = ?",
+                (status, json.dumps(report, ensure_ascii=False), _utc_now_iso(), job_id),
+            )
+            conn.commit()
+        updated_job = self.get_job(job_id)
+        if updated_job:
+            self._notify_callbacks(updated_job)
+
 
     def _row_to_dict(self, row) -> Dict[str, Any]:
         """Converts an SQLite row to a clean job dictionary."""
@@ -713,6 +748,8 @@ class BatchQueueManager:
             "params": params_dict,
             "created_at": d.get("created_at"),
             "updated_at": d.get("updated_at"),
+            "quality_status": d.get("quality_status") or "PENDING",
+            "quality_report": _parse_quality_report(d.get("quality_report")),
         }
 
     def list_jobs(self, status_filter: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -1280,13 +1317,38 @@ class BatchQueueManager:
                 except Exception:
                     pass
 
+            quality_out: Dict[str, Any] = {}
             final_video_path = ReupService.process_reup_pipeline(
                 video_path=current_video_path,
                 config=reup_config,
                 output_path=target_out_path,
                 tts_progress_callback=self._tts_progress_callback(job_id),
                 stage_progress_callback=self._pipeline_stage_callback(job_id),
+                quality_out=quality_out,
             )
+            self.update_job_quality(
+                job_id,
+                str(quality_out.get("status") or "PENDING"),
+                quality_out.get("report") if isinstance(quality_out.get("report"), dict) else {},
+            )
+            q_status = str(quality_out.get("status") or "").upper()
+            if q_status == "NEEDS_REVIEW":
+                from app.services.vietsub_rules import review_label
+                report = quality_out.get("report") or {}
+                reason = report.get("stt_fail_reason") or report.get("translate_fail_reason")
+                self.append_job_log(
+                    job_id,
+                    f"⚠️ Cần kiểm tra Vietsub ({review_label(reason)}). Video vẫn tải được.",
+                    level="WARN",
+                    stage="REUP_TRANSFORM",
+                )
+            elif q_status == "PASS":
+                self.append_job_log(
+                    job_id,
+                    "✅ Vietsub đạt.",
+                    level="SUCCESS",
+                    stage="REUP_TRANSFORM",
+                )
 
 
             # Cleanup intermediate stage 2 file if separate
@@ -1341,13 +1403,24 @@ class BatchQueueManager:
             variants = []
             try:
                 from app.services.platform_export import export_for_platforms, normalize_platforms
+                from app.services.overlay_service import overlays_for_job
+                from app.services.reup_service import _probe_video_size
                 wanted = normalize_platforms(
                     getattr(reup_config, "target_platforms", None)
                     or params.get("target_platforms")
                     or []
                 )
                 if wanted:
-                    variants = export_for_platforms(final_video_path, job_id, wanted)
+                    fill = float(getattr(reup_config, "canvas_fill", 0.0) or 0.0)
+                    src_w, src_h = _probe_video_size(final_video_path)
+                    _master, plate_banners = overlays_for_job(reup_config, src_w, src_h)
+                    variants = export_for_platforms(
+                        final_video_path,
+                        job_id,
+                        wanted,
+                        canvas_fill=fill,
+                        plate_banners=plate_banners,
+                    )
                     if variants:
                         labels = ", ".join(f"{v['label']} {v['ratio']}" for v in variants)
                         self.append_job_log(

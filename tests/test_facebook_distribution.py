@@ -207,6 +207,98 @@ def test_synced_pages_are_materialized_as_bound_channels(tmp_path, monkeypatch):
     assert binding["auto_publish"] == 0
 
 
+def test_parse_facebook_page_ref():
+    from app.api.facebook import parse_facebook_page_ref
+
+    assert parse_facebook_page_ref("106957297783867") == "106957297783867"
+    assert parse_facebook_page_ref("https://www.facebook.com/profile.php?id=106957297783867") == "106957297783867"
+    assert parse_facebook_page_ref("https://www.facebook.com/phimhayne") == "phimhayne"
+    assert parse_facebook_page_ref("facebook.com/pages/foo/123456789012345") == "123456789012345"
+    assert parse_facebook_page_ref("") == ""
+
+
+def test_granted_page_ids_from_granular_scopes():
+    from app.services.facebook_client import granted_page_ids, token_metadata
+
+    debug = {
+        "is_valid": True,
+        "user_id": "u1",
+        "scopes": ["pages_show_list"],
+        "granular_scopes": [
+            {"scope": "pages_show_list", "target_ids": ["111", "222"]},
+            {"scope": "pages_manage_posts", "target_ids": ["222", "333"]},
+        ],
+    }
+    assert granted_page_ids(debug) == ["111", "222", "333"]
+    assert token_metadata(debug)["granted_page_ids"] == ["111", "222", "333"]
+
+
+def test_page_payload_can_publish_with_manage_task():
+    from app.api.facebook import _page_payload
+    payload = _page_payload({
+        "id": "9",
+        "name": "New Page",
+        "tasks": ["MANAGE"],
+        "access_token": "tok",
+    })
+    assert payload["can_publish"] is True
+    skipped = _page_payload({"id": "9", "name": "New Page", "tasks": ["ANALYZE"]})
+    assert skipped["can_publish"] is False
+
+
+def test_store_pages_keeps_pages_without_token(tmp_path, monkeypatch):
+    from app.api import facebook
+    from app.config import settings
+
+    db_path = str(tmp_path / "pages.sqlite")
+    init_db(db_path)
+    monkeypatch.setattr(settings, "DB_PATH", db_path)
+    monkeypatch.setattr(facebook, "set_secret", lambda _ref, _value: None)
+    count = facebook._store_pages([
+        {"id": "new1", "name": "Page Mới", "tasks": ["MANAGE"]},
+    ])
+    assert count >= 1
+    with get_db_connection(db_path) as conn:
+        row = dict(conn.execute("SELECT name FROM facebook_pages WHERE page_id = 'new1'").fetchone())
+    assert row["name"] == "Page Mới"
+
+
+def test_list_pages_merges_business_owned_and_fills_missing_token():
+    from app.services.facebook_client import FacebookClient
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._payload = payload
+            self.status_code = 200
+            self.is_success = True
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, params=None, headers=None):
+        if url.endswith("/me/accounts"):
+            return FakeResp({"data": [{"id": "1", "name": "Cũ", "access_token": "t1", "tasks": ["CREATE_CONTENT"]}]})
+        if url.endswith("/me/businesses"):
+            return FakeResp({"data": [{"id": "biz1", "name": "Biz"}]})
+        if url.endswith("/owned_pages"):
+            return FakeResp({"data": [{"id": "2", "name": "Page mới", "tasks": ["MANAGE"]}]})
+        if url.endswith("/client_pages"):
+            return FakeResp({"data": []})
+        if url.endswith("/assigned_pages"):
+            return FakeResp({"data": []})
+        if url.endswith("/2"):
+            return FakeResp({"id": "2", "name": "Page mới", "access_token": "t2", "tasks": ["MANAGE"]})
+        return FakeResp({"data": []})
+
+    client = FacebookClient("v24.0")
+    client.client.get = fake_get
+    pages = client.list_pages("user-token")
+    by_id = {str(p["id"]): p for p in pages}
+    assert "1" in by_id
+    assert "2" in by_id
+    assert by_id["2"]["access_token"] == "t2"
+
+
 def test_page_payload_keeps_large_picture_and_profile_fields():
     from app.api.facebook import _page_payload, enlarge_facebook_picture
 

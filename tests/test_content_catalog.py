@@ -30,8 +30,8 @@ def test_upsert_channel_and_posted_checklist(tmp_path):
         platform="youtube",
         url="https://www.youtube.com/@hongguo/videos",
         catalog=[
-            {"video_id": "aaaaaaaaaaa", "title": "Clip 1", "url": "https://www.youtube.com/watch?v=aaaaaaaaaaa"},
-            {"video_id": "bbbbbbbbbbb", "title": "Clip 2", "url": "https://www.youtube.com/watch?v=bbbbbbbbbbb"},
+            {"video_id": "aaaaaaaaaaa", "title": "Clip 1", "url": "https://www.youtube.com/watch?v=aaaaaaaaaaa", "upload_date": "20240115"},
+            {"video_id": "bbbbbbbbbbb", "title": "Clip 2", "url": "https://www.youtube.com/watch?v=bbbbbbbbbbb", "timestamp": 1735689600},
         ],
         tags=["xây dựng", "đập phá"],
     )
@@ -57,8 +57,10 @@ def test_upsert_channel_and_posted_checklist(tmp_path):
     assert ch["posted_count"] == 0
 
     videos = list_videos(db, cid)
-    assert [v["video_id"] for v in videos][::-1] or True
     assert {v["video_id"] for v in videos} == {"aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"}
+    dated = [v["video_id"] for v in videos if v.get("published_at")]
+    assert dated[0] == "aaaaaaaaaaa"
+    assert dated[-1] == "bbbbbbbbbbb"
     first = next(v for v in videos if v["video_id"] == "aaaaaaaaaaa")
     updated = set_posted(db, first["id"], True)
     assert updated and updated["posted"] is True
@@ -93,6 +95,65 @@ def test_upsert_channel_and_posted_checklist(tmp_path):
     assert patched["notes"] == "Kênh Hồng Quỷ"
     assert "reup" in patched["tags"]
     assert os.path.isfile(db)
+
+
+def test_upsert_with_channel_id_does_not_create_a_duplicate(tmp_path):
+    db = str(tmp_path / "jobs.sqlite")
+    init_db(db)
+    cid = upsert_source_catalog(
+        db,
+        profile={"nickname": "Film AI", "platform": "douyin", "unique_id": "96885436754"},
+        platform="douyin",
+        url="https://www.douyin.com/user/MS4wLjABAAAAUCheO6MMkKFzs1MrJSMOIRz3chPjF4fhjK74-PzN3Hqj3znbUs5uyzKJ8AFINMX2",
+        catalog=[{"video_id": "7672973074735680804", "title": "old", "url": ""}],
+    )
+    again = upsert_source_catalog(
+        db,
+        profile={
+            "nickname": "开饭说漫",
+            "platform": "douyin",
+            "unique_id": "MS4wLjABAAAAUCheO6MMkKFzs1MrJSMOIRz3chPjF4fhjK74-PzN3Hqj3znbUs5uyzKJ8AFINMX2",
+        },
+        platform="douyin",
+        url="https://www.douyin.com/user/MS4wLjABAAAAUCheO6MMkKFzs1MrJSMOIRz3chPjF4fhjK74-PzN3Hqj3znbUs5uyzKJ8AFINMX2?from_tab_name=main",
+        catalog=[
+            {"video_id": "7675543491506976430", "title": "开饭起飞", "url": ""},
+            {"video_id": "7658077670655177563", "title": "绝世逃荒", "url": ""},
+        ],
+        channel_id=cid,
+    )
+    assert again == cid
+    channels = list_channels(db)
+    assert len(channels) == 1
+    assert channels[0]["channel_id"] == cid
+    assert channels[0]["video_count"] == 3
+    videos = list_videos(db, cid)
+    assert {v["video_id"] for v in videos} == {
+        "7672973074735680804",
+        "7675543491506976430",
+        "7658077670655177563",
+    }
+
+
+def test_list_channels_stats_do_not_need_per_video_decorate(tmp_path):
+    db = str(tmp_path / "jobs.sqlite")
+    init_db(db)
+    cid = upsert_source_catalog(
+        db,
+        profile={"nickname": "Kênh A", "platform": "youtube", "unique_id": "chanA"},
+        platform="youtube",
+        url="https://www.youtube.com/@chanA/videos",
+        catalog=[
+            {"video_id": "aaaaaaaaaaa", "title": "One", "url": ""},
+            {"video_id": "bbbbbbbbbbb", "title": "Two", "url": ""},
+        ],
+    )
+    first = list_videos(db, cid)[0]
+    set_posted(db, first["id"], True)
+    ch = next(c for c in list_channels(db) if c["channel_id"] == cid)
+    assert ch["video_count"] == 2
+    assert ch["posted_count"] == 1
+    assert ch["unposted_count"] == 1
 
 
 def test_new_channel_has_no_default_tags(tmp_path):

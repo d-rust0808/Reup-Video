@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 STREAM_CHUNK_SIZE = 1024 * 1024
-MAX_OPEN_ENDED_RANGE_SIZE = 4 * 1024 * 1024
 
 
 def _iter_file_range(file_path: str, start: int, end: int):
@@ -38,7 +37,10 @@ def _iter_file_range(file_path: str, start: int, end: int):
 
 
 def _parse_byte_range(range_header: str, file_size: int):
-    """Parse one HTTP byte range and cap open-ended requests for fast startup."""
+    """Parse one HTTP byte range. Open-ended `bytes=N-` reads through EOF.
+
+    Capping `bytes=0-` made Chromium start the picture without the audio track.
+    """
     unit, range_str = range_header.strip().split("=", 1)
     if unit.lower() != "bytes" or "," in range_str:
         raise ValueError("Invalid range unit")
@@ -49,7 +51,7 @@ def _parse_byte_range(range_header: str, file_size: int):
         if end_str:
             end = min(int(end_str), file_size - 1)
         else:
-            end = min(start + MAX_OPEN_ENDED_RANGE_SIZE - 1, file_size - 1)
+            end = file_size - 1
     elif end_str:
         suffix_length = min(int(end_str), file_size)
         start = file_size - suffix_length
@@ -60,6 +62,38 @@ def _parse_byte_range(range_header: str, file_size: int):
     if start < 0 or start >= file_size or start > end:
         raise ValueError("Requested range not satisfiable")
     return start, end
+
+
+_VERTICAL_STREAM_PRESETS = (
+    "tiktok", "youtube_shorts", "facebook", "instagram", "douyin",
+)
+
+
+def _is_platform_variant_id(clean_id: str) -> bool:
+    stem = clean_id[:-4] if clean_id.endswith(".mp4") else clean_id
+    bits = stem.split(".")
+    if len(bits) < 2:
+        return False
+    try:
+        from app.services.platform_export import PRESETS
+        return bits[-1] in PRESETS
+    except Exception:
+        return bits[-1] in _VERTICAL_STREAM_PRESETS
+
+
+def prefer_vertical_output_path(job_id: str, out_dir: Optional[str] = None) -> Optional[str]:
+    """When a job has 9:16 platform files, those match the after-config preview."""
+    stem = os.path.basename(str(job_id or "").strip())
+    if stem.endswith(".mp4"):
+        stem = stem[:-4]
+    if not stem or _is_platform_variant_id(stem):
+        return None
+    folder = out_dir or getattr(settings, "OUTPUT_DIR", "data/outputs")
+    for plat in _VERTICAL_STREAM_PRESETS:
+        path = os.path.join(folder, f"{stem}.{plat}.mp4")
+        if os.path.isfile(path) and os.path.getsize(path) > 0:
+            return path
+    return None
 
 
 def _resolve_media_file_path(media_id: str, db_path: str = settings.DB_PATH) -> Optional[str]:
@@ -170,12 +204,18 @@ def _resolve_subtitle_sidecar(media_id: str) -> Optional[str]:
     return None
 
 
+# Pin browser CC to the bottom. `line:-2` is snap-to-lines from the last row so
+# 1–2 line cues sit just above the native control bar instead of the default
+# `line:auto` center. Percentage `end` alignment is a fallback some engines honor.
+_VTT_BOTTOM_SETTINGS = "line:-2 align:center size:94%"
+
+
 def _srt_to_webvtt(srt_text: str) -> str:
     """Convert ordinary SRT timing syntax into browser-native WebVTT."""
     normalized = (srt_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     normalized = re.sub(
-        r"(?m)^(\d{2}:\d{2}:\d{2}),(\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2}),(\d{3})$",
-        r"\1.\2 --> \3.\4",
+        r"(?m)^(\d{2}:\d{2}:\d{2}),(\d{3})[ \t]+-->[ \t]+(\d{2}:\d{2}:\d{2}),(\d{3})[ \t]*$",
+        rf"\1.\2 --> \3.\4 {_VTT_BOTTOM_SETTINGS}",
         normalized,
     )
     return "WEBVTT\n\n" + normalized + ("\n" if normalized else "")
@@ -202,14 +242,22 @@ async def stream_video(
     if file_size == 0:
         raise HTTPException(status_code=400, detail="Media file is empty")
 
+    stat = os.stat(file_path)
+    cache_headers = {
+        "Content-Type": "video/mp4",
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
+        "ETag": f'W/"{int(stat.st_mtime)}-{file_size}"',
+    }
+
     # HEAD request support for browser media players (Safari, Chrome)
     if request.method == "HEAD":
         return Response(
             content=b"",
             status_code=200,
             headers={
-                "Content-Type": "video/mp4",
-                "Accept-Ranges": "bytes",
+                **cache_headers,
                 "Content-Length": str(file_size),
             },
         )
@@ -221,7 +269,7 @@ async def stream_video(
             status_code=200,
             media_type="video/mp4",
             headers={
-                "Accept-Ranges": "bytes",
+                **cache_headers,
                 "Content-Length": str(file_size),
             },
         )
@@ -242,9 +290,9 @@ async def stream_video(
         status_code=206,
         media_type="video/mp4",
         headers={
+            **cache_headers,
             "Content-Range": f"bytes {start}-{end}/{file_size}",
             "Content-Length": str(chunk_length),
-            "Accept-Ranges": "bytes",
         },
     )
 

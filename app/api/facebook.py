@@ -169,6 +169,33 @@ class FacebookBindRequest(BaseModel):
     auto_publish: bool = True
 
 
+class FacebookImportPageRequest(BaseModel):
+    page: str = Field(min_length=1, max_length=500)
+
+
+def parse_facebook_page_ref(raw: str) -> str:
+    """Accept a numeric Page ID or facebook.com URL."""
+    from urllib.parse import parse_qs, urlparse
+
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if re.fullmatch(r"\d{5,}", text):
+        return text
+    if "facebook.com" in text or text.startswith("http"):
+        parsed = urlparse(text if "://" in text else f"https://{text}")
+        query_id = (parse_qs(parsed.query).get("id") or [""])[0]
+        if re.fullmatch(r"\d{5,}", str(query_id)):
+            return str(query_id)
+        parts = [part for part in parsed.path.split("/") if part and part not in {"pages", "profile.php", "people", "pg", "p"}]
+        if parts and re.fullmatch(r"\d{5,}", parts[-1]):
+            return parts[-1]
+        if parts:
+            return parts[0]
+        return ""
+    return text
+
+
 def enlarge_facebook_picture(url: str) -> str:
     text = str(url or "").strip()
     if not text:
@@ -206,7 +233,13 @@ def _page_payload(page: Dict[str, Any]) -> Dict[str, Any]:
         "category": str(page.get("category") or ""),
         "tasks": tasks,
         "picture_url": _picture_url(page),
-        "can_publish": "CREATE_CONTENT" in {task.upper() for task in tasks},
+        "can_publish": bool(
+            str(page.get("access_token") or "").strip()
+            and (
+                not tasks
+                or bool({"CREATE_CONTENT", "MANAGE"} & {task.upper() for task in tasks})
+            )
+        ),
         "access_token": str(page.get("access_token") or ""),
         "username": str(page.get("username") or "").lstrip("@"),
         "link": str(page.get("link") or ""),
@@ -280,15 +313,18 @@ def _store_pages(pages: List[Dict[str, Any]]) -> int:
     normalized = [_page_payload(page) for page in pages]
     page_ids = [page["page_id"] for page in normalized if page["page_id"]]
     for page in normalized:
-        if not page["page_id"] or not page["access_token"]:
+        if not page["page_id"]:
             continue
-        token_ref = f"facebook.page.{page['page_id']}.token"
-        set_secret(token_ref, page["access_token"])
-        page["token_ref"] = token_ref
+        if page["access_token"]:
+            token_ref = f"facebook.page.{page['page_id']}.token"
+            set_secret(token_ref, page["access_token"])
+            page["token_ref"] = token_ref
+        else:
+            page["token_ref"] = f"facebook.page.{page['page_id']}.token"
 
     with get_db_connection(settings.DB_PATH) as conn:
         for page in normalized:
-            if not page.get("token_ref"):
+            if not page.get("page_id"):
                 continue
             conn.execute(
                 """
@@ -492,8 +528,98 @@ async def sync_facebook_pages():
     client = FacebookClient(data["graph_version"])
     try:
         client.validate_user_token(token)
-        page_count = _store_pages(client.list_pages(token))
-        return {"page_count": page_count, "message": f"Đã đồng bộ {page_count} Fanpage"}
+        listed = client.list_pages(token)
+        page_count = _store_pages(listed)
+        names = [str(page.get("name") or page.get("id") or "").strip() for page in listed]
+        names = [name for name in names if name]
+        missing_token = sum(1 for page in listed if not str(page.get("access_token") or "").strip())
+        granted: List[str] = []
+        app_id = str(data.get("app_id") or "")
+        app_secret = get_secret(data.get("app_secret_ref") or "")
+        if app_id and app_secret:
+            try:
+                debug = client.debug_user_token(token, app_id, app_secret)
+                granted = token_metadata(debug).get("granted_page_ids") or []
+            except Exception:
+                granted = []
+        hint = ""
+        if granted:
+            hint = (
+                f" Token đang khóa {len(granted)} page. Page mới không vào khi reload — "
+                "Graph API Explorer tạo token mới, tick page vừa tạo, dán token rồi "
+                "bấm Xác thực & lưu."
+            )
+        elif missing_token or page_count == 0:
+            hint = (
+                " Page mới tạo thường chưa nằm trong User Token cũ — tạo token mới, "
+                "tick pages_show_list + page vừa tạo, rồi bấm Xác thực & lưu."
+            )
+        preview = ", ".join(names[:8])
+        extra = f" (+{len(names) - 8})" if len(names) > 8 else ""
+        listing = f" ({preview}{extra})" if preview else ""
+        return {
+            "page_count": page_count,
+            "listed": len(listed),
+            "missing_token": missing_token,
+            "granted_page_ids": granted,
+            "page_names": names,
+            "message": f"Đã đồng bộ {page_count} Fanpage{listing}.{hint}",
+        }
+    except Exception as error:
+        raise _api_error(error) from error
+    finally:
+        client.close()
+
+
+@router.post("/pages/import")
+async def import_facebook_page(req: FacebookImportPageRequest):
+    """Add one Fanpage by ID or URL when /me/accounts omits a newly created page."""
+    page_ref = parse_facebook_page_ref(req.page)
+    if not page_ref:
+        raise HTTPException(status_code=400, detail="Dán Page ID hoặc link facebook.com/…")
+    with get_db_connection(settings.DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT * FROM facebook_connections WHERE id = ?",
+            (CONNECTION_ID,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=400, detail="Chưa cấu hình Facebook App")
+    data = dict(row)
+    token = get_secret(data["user_token_ref"])
+    if not token:
+        raise HTTPException(status_code=400, detail="Không tìm thấy User Token trong Keychain")
+    client = FacebookClient(data["graph_version"])
+    try:
+        page = client.fetch_page(page_ref, token)
+        count = _store_pages([page])
+        name = str(page.get("name") or page_ref)
+        if not str(page.get("access_token") or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Đã thấy «{name}» nhưng token không cấp page token. "
+                    "Tạo User Token mới trên Graph API Explorer, tick đúng page này "
+                    "(kể cả nằm trong «Xem thêm trang») rồi bấm Xác thực & lưu."
+                ),
+            )
+        return {
+            "page_id": str(page.get("id") or page_ref),
+            "name": name,
+            "stored": count,
+            "message": f"Đã thêm Fanpage «{name}»",
+        }
+    except HTTPException:
+        raise
+    except FacebookAPIError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Facebook không cho token hiện tại đọc «{page_ref}». "
+                "Page mới (ví dụ Phim Hay Nè) phải được tick khi tạo token. "
+                "Graph API Explorer → token mới → chọn page đó → Xác thực & lưu. "
+                f"({error})"
+            ),
+        ) from error
     except Exception as error:
         raise _api_error(error) from error
     finally:

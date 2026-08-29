@@ -487,10 +487,13 @@ def translate_cues(
     target_lang: str = "vi",
     *,
     title: str = "",
+    style: str = "dub",
     on_status: Optional[Callable[[str], None]] = None,
-    chunk_size: int = 24,
+    chunk_size: int = 20,
 ) -> List[str]:
     """Translate subtitle cues via local `agy` (Gemini 3.7 Flash). Raises on hard failure."""
+    from app.services.vietsub_rules import CHUNK_OVERLAP, build_agy_prompt, resolve_vietsub_style
+
     if not texts:
         return []
     lang = (target_lang or "vi").lower()
@@ -498,6 +501,7 @@ def translate_cues(
     out: List[str] = []
     total = len(texts)
     model = default_model()
+    style_n = resolve_vietsub_style(style)
 
     def emit(message: str) -> None:
         if callable(on_status):
@@ -506,20 +510,19 @@ def translate_cues(
             except Exception:
                 return
 
-    emit(f"🌐 Google CLI (agy / {model}): dịch {total} câu sang {lang_name}...")
+    emit(f"🌐 Google CLI (agy / {model} / {style_n}): dịch {total} câu sang {lang_name}...")
     size = max(4, int(chunk_size))
     for start in range(0, total, size):
         chunk = [str(t or "").strip() for t in texts[start:start + size]]
-        numbered = "\n".join(f"{i}. {text}" for i, text in enumerate(chunk, start=1))
-        extra = f"Ngữ cảnh video: {title}\n" if title else ""
-        prompt = (
-            "Bạn là biên dịch phụ đề phim. Chỉ dịch, không giải thích, không dùng tool.\n"
-            f"{extra}"
-            f"Dịch sang {lang_name}. Giữ đúng {len(chunk)} câu, cùng thứ tự, cùng số thứ tự.\n"
-            "Không để lại chữ Trung/Hàn/Nhật trong bản dịch tiếng Việt.\n"
-            "Mỗi câu là lời thoại tự nhiên, đủ nghĩa, không chỉ dấu câu.\n"
-            "Trả về JSON đúng schema: lines[{index, text}].\n\n"
-            f"{numbered}"
+        before = [str(t or "").strip() for t in texts[max(0, start - CHUNK_OVERLAP):start]]
+        after = [str(t or "").strip() for t in texts[start + len(chunk):start + len(chunk) + CHUNK_OVERLAP]]
+        prompt = build_agy_prompt(
+            chunk,
+            style=style_n,
+            title=title,
+            target_lang=target_lang,
+            context_before=before,
+            context_after=after,
         )
         emit(f"🌐 Google CLI đang dịch câu {start + 1}–{min(start + len(chunk), total)}/{total}...")
         parsed: Optional[List[str]] = None

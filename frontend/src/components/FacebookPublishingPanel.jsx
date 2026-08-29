@@ -3,6 +3,7 @@ import {
   bindFacebookPage,
   fetchFacebookPages,
   fetchFacebookSettings,
+  importFacebookPage,
   saveFacebookSettings,
   syncFacebookPages,
 } from '../services/api';
@@ -21,6 +22,8 @@ export function FacebookPublishingPanel({ activeChannel, onChanged }) {
   const [pages, setPages] = useState([]);
   const [form, setForm] = useState(EMPTY_FORM);
   const [selectedPageId, setSelectedPageId] = useState('');
+  const [pageQuery, setPageQuery] = useState('');
+  const [importRef, setImportRef] = useState('');
   const [autoPublish, setAutoPublish] = useState(true);
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState(null);
@@ -45,7 +48,25 @@ export function FacebookPublishingPanel({ activeChannel, onChanged }) {
   }, [onChanged]);
 
   useEffect(() => {
-    load();
+    let cancelled = false;
+    (async () => {
+      await load();
+      try {
+        const settingsData = await fetchFacebookSettings();
+        if (cancelled || !settingsData?.connected) return;
+        const result = await syncFacebookPages();
+        if (cancelled) return;
+        setMessage({ type: 'success', text: result.message });
+        await load();
+      } catch (error) {
+        if (!cancelled) {
+          setMessage({ type: 'error', text: error.message || 'Đồng bộ page từ Facebook thất bại' });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [load]);
 
   useEffect(() => {
@@ -75,6 +96,24 @@ export function FacebookPublishingPanel({ activeChannel, onChanged }) {
     try {
       const result = await syncFacebookPages();
       setMessage({ type: 'success', text: result.message });
+      await load();
+    } catch (error) {
+      setMessage({ type: 'error', text: error.message });
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const handleImport = async () => {
+    const value = importRef.trim();
+    if (!value) return;
+    setBusy('import');
+    setMessage(null);
+    try {
+      const result = await importFacebookPage(value);
+      setMessage({ type: 'success', text: result.message });
+      setImportRef('');
+      if (result.page_id) setSelectedPageId(result.page_id);
       await load();
     } catch (error) {
       setMessage({ type: 'error', text: error.message });
@@ -211,18 +250,62 @@ export function FacebookPublishingPanel({ activeChannel, onChanged }) {
 
           {isFacebookChannel ? (
             <div className="space-y-3 text-xs">
+              <input
+                value={pageQuery}
+                onChange={(e) => setPageQuery(e.target.value)}
+                placeholder="Tìm page theo tên…"
+                className="w-full px-3 py-2 rounded-xl bg-blue-950/60 border border-white/15 text-white placeholder:text-blue-200/40 focus:outline-none focus:border-sky-300"
+              />
               <select
                 value={selectedPageId}
                 onChange={(e) => setSelectedPageId(e.target.value)}
                 className="w-full px-3 py-3 rounded-xl bg-blue-950/60 border border-white/15 text-white focus:outline-none focus:border-sky-300"
               >
                 <option value="">Chọn Fanpage...</option>
-                {pages.map((page) => (
-                  <option key={page.page_id} value={page.page_id} disabled={!page.can_publish}>
-                    {page.name}{page.can_publish ? '' : ' · thiếu CREATE_CONTENT'}
-                  </option>
-                ))}
+                {pages
+                  .filter((page) => {
+                    const q = pageQuery.trim().toLowerCase();
+                    if (!q) return true;
+                    return String(page.name || '').toLowerCase().includes(q)
+                      || String(page.page_id || '').includes(q);
+                  })
+                  .map((page) => {
+                    const hasToken = Boolean(page.page_token_ref || page.has_page_token);
+                    let note = '';
+                    if (!hasToken) note = ' · cần token mới';
+                    else if (!page.can_publish) note = ' · thiếu quyền đăng';
+                    return (
+                      <option key={page.page_id} value={page.page_id} disabled={!page.can_publish}>
+                        {page.name}{note}
+                      </option>
+                    );
+                  })}
               </select>
+              <div className="rounded-xl bg-amber-300/10 border border-amber-200/20 px-3 py-2 text-[10px] text-amber-50 leading-relaxed space-y-1">
+                <p className="font-extrabold text-amber-100">Page mới không nằm trong token — không phải thiếu tên quyền.</p>
+                <ol className="list-decimal pl-4 space-y-0.5 text-amber-50/90">
+                  <li>Graph Explorer: app <strong>JENJO TREEBOT</strong> ({settings?.app_id || form.app_id || '3287685321396427'}), loại <strong>Mã người dùng</strong>.</li>
+                  <li>Quyền cần có: <code className="text-[9px]">pages_show_list</code>, <code className="text-[9px]">pages_read_engagement</code>, <code className="text-[9px]">pages_manage_posts</code>.</li>
+                  <li>Bấm <strong>Generate Access Token</strong>. Cửa sổ Facebook hỏi chọn Trang — mở <strong>Xem thêm trang</strong>, tick page mới (vd. Phim Hay Nè). Đừng để nguyên 22 trang cũ.</li>
+                  <li>Copy token, dán vào ô trên, bấm <strong>Xác thực &amp; lưu</strong>. Generate xong mà không dán vào app thì app vẫn dùng token cũ.</li>
+                </ol>
+              </div>
+              <div className="flex gap-2">
+                <input
+                  value={importRef}
+                  onChange={(e) => setImportRef(e.target.value)}
+                  placeholder="Dán Page ID hoặc link facebook.com/…"
+                  className="flex-1 px-3 py-2 rounded-xl bg-blue-950/60 border border-white/15 text-white placeholder:text-blue-200/40 focus:outline-none focus:border-sky-300"
+                />
+                <button
+                  type="button"
+                  onClick={handleImport}
+                  disabled={!importRef.trim() || !!busy}
+                  className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 font-bold disabled:opacity-40"
+                >
+                  {busy === 'import' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Thêm'}
+                </button>
+              </div>
               <label className="flex items-center justify-between gap-4 p-3 rounded-xl bg-white/8 border border-white/10">
                 <span>
                   <strong className="block">Tự đăng khi reup xong</strong>

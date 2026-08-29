@@ -57,6 +57,10 @@ def render_srt_to_overlays(
     *,
     cover_band: float = 0.0,
     cover_kind: str = "off",
+    subtitle_y: float = 0.0,
+    cover_pad: float = 0.0,
+    subtitle_box_w: float = 0.88,
+    subtitle_box_h: float = 0.08,
 ) -> List[Dict[str, Any]]:
     """Render each cue to a full-frame transparent PNG. Returns [{png,start,end}]."""
     from PIL import Image, ImageDraw, ImageFont
@@ -70,27 +74,44 @@ def render_srt_to_overlays(
     segs = parse_srt_segments(srt_path)
     if not segs:
         return []
+    from app.services.vietsub_rules import split_cues_for_display
+
+    segs = split_cues_for_display(segs)
 
     os.makedirs(out_dir, exist_ok=True)
     band = max(0.0, min(0.36, float(cover_band or 0.0)))
     cover = (cover_kind or "off").strip().lower()
+    from app.services.caption_cover import (
+        caption_layout,
+        clamp_subtitle_box_h,
+        clamp_subtitle_box_w,
+        clamp_subtitle_y,
+        cover_cue_rgba,
+        normalize_caption_cover,
+        resolve_cue_y,
+    )
+
+    cover = normalize_caption_cover(cover)
     has_band = band > 0 and cover not in ("", "off")
-    # Scale type to the remaining picture so a deep bottom banner does not inflate the font.
-    picture_h = max(64, int(round(video_h * (1.0 - band)))) if has_band else video_h
-    if has_band:
-        font_size = max(14, min(20, int(round(picture_h * 0.023))))
-    else:
-        font_size = max(20, int(round(video_h * 0.042)))
+    cue_y = clamp_subtitle_y(subtitle_y)
+    text_rgba, box_rgba, stroke_rgba = cover_cue_rgba(cover)
+    margin_v, font_size = caption_layout(
+        video_w, video_h, cover, band if has_band else 0.0,
+        subtitle_y=cue_y, cover_pad=cover_pad,
+    )
     try:
         font = ImageFont.truetype(font_path, font_size)
     except Exception as e:
         logger.warning(f"Font load failed ({e})")
         return []
 
-    margin_x = int(video_w * 0.05)
-    # Keep translated text close to the lower edge of the *picture*, never on the logo banner.
-    margin_v = int(video_h * 0.025)
-    max_text_w = video_w - 2 * margin_x
+    box_w = clamp_subtitle_box_w(subtitle_box_w)
+    box_h = clamp_subtitle_box_h(subtitle_box_h)
+    cue_center = resolve_cue_y(
+        cue_y, cover, band if has_band else 0.0, video_w, video_h,
+    )
+    margin_x = int(video_w * (1.0 - box_w) / 2)
+    max_text_w = max(32, int(video_w * box_w) - 2 * int(font_size * 0.45))
     line_gap = int(font_size * 0.28)
     pad_x, pad_y = int(font_size * 0.45), int(font_size * 0.28)
     stroke_w = max(2, font_size // 10)
@@ -118,29 +139,25 @@ def render_srt_to_overlays(
 
         img = Image.new("RGBA", (video_w, video_h), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
-        plate_w = block_w + 2 * pad_x
-        plate_h = block_h + 2 * pad_y
+        plate_w = max(int(video_w * box_w), block_w + 2 * pad_x)
+        plate_h = max(int(video_h * box_h), block_h + 2 * pad_y) if box_h > 0 else (block_h + 2 * pad_y)
         plate_x = (video_w - plate_w) // 2
-        if has_band:
-            gap = max(6, int(round(video_h * 0.01)))
-            band_px = max(16, int(round(video_h * band)))
-            plate_y = video_h - band_px - gap - plate_h
-            plate_y = max(6, plate_y)
-        else:
-            plate_y = video_h - margin_v - plate_h
-        radius = max(6, int(font_size * 0.35))
-        d.rounded_rectangle(
-            [plate_x, plate_y, plate_x + plate_w, plate_y + plate_h],
-            radius=radius, fill=(0, 0, 0, 170),
-        )
+        plate_y = int(round(video_h * cue_center - plate_h / 2))
+        plate_y = max(6, min(plate_y, video_h - plate_h - 2))
+        if box_h > 0:
+            radius = max(6, int(font_size * 0.35))
+            d.rounded_rectangle(
+                [plate_x, plate_y, plate_x + plate_w, plate_y + plate_h],
+                radius=radius, fill=box_rgba,
+            )
 
         y = plate_y + pad_y
         for i, ln in enumerate(lines):
             lw = widths[i]
             x = (video_w - lw) // 2
             d.text(
-                (x, y), ln, font=font, fill=(255, 255, 255, 255),
-                stroke_width=stroke_w, stroke_fill=(0, 0, 0, 220),
+                (x, y), ln, font=font, fill=text_rgba,
+                stroke_width=stroke_w, stroke_fill=stroke_rgba,
             )
             y += line_h + line_gap
 
@@ -180,6 +197,10 @@ def render_srt_to_apng(
     *,
     cover_band: float = 0.0,
     cover_kind: str = "off",
+    subtitle_y: float = 0.0,
+    cover_pad: float = 0.0,
+    subtitle_box_w: float = 0.88,
+    subtitle_box_h: float = 0.08,
 ) -> Optional[str]:
     """Render all timed cues into one transparent APNG subtitle track."""
     from PIL import Image
@@ -192,6 +213,10 @@ def render_srt_to_apng(
             frame_dir,
             cover_band=cover_band,
             cover_kind=cover_kind,
+            subtitle_y=subtitle_y,
+            cover_pad=cover_pad,
+            subtitle_box_w=subtitle_box_w,
+            subtitle_box_h=subtitle_box_h,
         )
         if not overlays:
             return None
@@ -264,4 +289,33 @@ def append_timed_subtitle_filter(
     return (
         f"{base};[{input_index}:v]format=rgba[v_sub_track];"
         "[v_sub_base][v_sub_track]overlay=0:0:eof_action=pass:repeatlast=0[v_out]"
+    )
+
+
+def inject_timed_overlay_before_speed(
+    filter_complex: str,
+    input_index: int,
+) -> str:
+    """Composite the timed APNG on the source clock, then speed the picture+subs together.
+
+    Scaling the SRT and overlaying *after* setpts makes captions race ahead when the
+    encoder (often VideoToolbox) ignores setpts and keeps the original frame timing.
+    """
+    if "[v_out]" not in filter_complex:
+        return filter_complex
+    marker = ",setpts=PTS/"
+    split_at = filter_complex.find(marker)
+    if split_at < 0:
+        return append_timed_subtitle_filter(filter_complex, input_index)
+    v_out_at = filter_complex.find("[v_out]", split_at)
+    if v_out_at < 0:
+        return append_timed_subtitle_filter(filter_complex, input_index)
+    pre = filter_complex[:split_at]
+    sped = filter_complex[split_at + 1:v_out_at]  # setpts=...,fps=...
+    rest = filter_complex[v_out_at + len("[v_out]"):]
+    return (
+        f"{pre}[v_pre];"
+        f"[{input_index}:v]format=rgba[v_sub_track];"
+        "[v_pre][v_sub_track]overlay=0:0:eof_action=pass:repeatlast=0[v_mid];"
+        f"[v_mid]{sped}[v_out]{rest}"
     )

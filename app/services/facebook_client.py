@@ -114,26 +114,94 @@ class FacebookClient:
         )
         return self._decode(response)
 
-    def list_pages(self, user_token: str) -> List[Dict[str, Any]]:
-        url: Optional[str] = f"{self.base_url}/me/accounts"
-        params: Optional[Dict[str, str]] = {
-            "fields": (
-                "id,name,access_token,category,tasks,username,link,"
-                "fan_count,followers_count,about,"
-                "picture.type(large){url,width,height}"
-            ),
-            "limit": "100",
-        }
-        pages: List[Dict[str, Any]] = []
-        while url:
-            response = self.client.get(url, params=params, headers=self._auth(user_token))
+    _PAGE_FIELDS = (
+        "id,name,access_token,category,tasks,username,link,"
+        "fan_count,followers_count,about,"
+        "picture.type(large){url,width,height}"
+    )
+
+    def _paged(self, url: str, user_token: str, params: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        next_url: Optional[str] = url
+        next_params = params
+        while next_url:
+            response = self.client.get(next_url, params=next_params, headers=self._auth(user_token))
             payload = self._decode(response)
             data = payload.get("data") or []
-            pages.extend(item for item in data if isinstance(item, dict))
-            next_url = ((payload.get("paging") or {}).get("next") or "").strip()
-            url = next_url or None
-            params = None
-        return pages
+            items.extend(item for item in data if isinstance(item, dict))
+            next_url = ((payload.get("paging") or {}).get("next") or "").strip() or None
+            next_params = None
+        return items
+
+    def list_pages(self, user_token: str) -> List[Dict[str, Any]]:
+        """All Fanpages this user can see: /me/accounts plus Business Manager pages."""
+        params = {"fields": self._PAGE_FIELDS, "limit": "100"}
+        by_id: Dict[str, Dict[str, Any]] = {}
+
+        def _merge(rows: List[Dict[str, Any]]) -> None:
+            for item in rows:
+                pid = str(item.get("id") or "").strip()
+                if not pid:
+                    continue
+                current = by_id.get(pid) or {}
+                merged = {**current, **item}
+                if current.get("access_token") and not item.get("access_token"):
+                    merged["access_token"] = current["access_token"]
+                by_id[pid] = merged
+
+        _merge(self._paged(f"{self.base_url}/me/accounts", user_token, params))
+        try:
+            businesses = self._paged(
+                f"{self.base_url}/me/businesses",
+                user_token,
+                {"fields": "id,name", "limit": "100"},
+            )
+        except FacebookAPIError:
+            businesses = []
+        for business in businesses:
+            bid = str(business.get("id") or "").strip()
+            if not bid:
+                continue
+            for edge in ("owned_pages", "client_pages", "assigned_pages"):
+                try:
+                    _merge(self._paged(
+                        f"{self.base_url}/{bid}/{edge}",
+                        user_token,
+                        {"fields": self._PAGE_FIELDS, "limit": "100"},
+                    ))
+                except FacebookAPIError:
+                    continue
+
+        for pid, page in list(by_id.items()):
+            if str(page.get("access_token") or "").strip():
+                continue
+            try:
+                response = self.client.get(
+                    f"{self.base_url}/{pid}",
+                    params={"fields": self._PAGE_FIELDS},
+                    headers=self._auth(user_token),
+                )
+                extra = self._decode(response)
+                if isinstance(extra, dict):
+                    _merge([extra])
+            except FacebookAPIError:
+                continue
+        return list(by_id.values())
+
+    def fetch_page(self, page_id: str, user_token: str) -> Dict[str, Any]:
+        """Load one Page with the user token (page access token included when granted)."""
+        pid = str(page_id or "").strip()
+        if not pid:
+            raise FacebookAPIError("Thiếu Page ID")
+        response = self.client.get(
+            f"{self.base_url}/{pid}",
+            params={"fields": self._PAGE_FIELDS},
+            headers=self._auth(user_token),
+        )
+        payload = self._decode(response)
+        if not isinstance(payload, dict) or not payload.get("id"):
+            raise FacebookAPIError("Facebook không trả về Fanpage")
+        return payload
 
     def get_page_profile(self, page_id: str, page_token: str) -> Dict[str, Any]:
         response = self.client.get(
@@ -218,6 +286,21 @@ class FacebookClient:
         return self._decode(response)
 
 
+def granted_page_ids(debug_data: Dict[str, Any]) -> List[str]:
+    """Page IDs locked into a granular Facebook Login token (empty = all pages)."""
+    found: List[str] = []
+    seen = set()
+    for item in debug_data.get("granular_scopes") or []:
+        if not isinstance(item, dict):
+            continue
+        for pid in item.get("target_ids") or []:
+            text = str(pid or "").strip()
+            if text and text not in seen:
+                seen.add(text)
+                found.append(text)
+    return found
+
+
 def token_metadata(debug_data: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "user_id": str(debug_data.get("user_id") or ""),
@@ -225,5 +308,6 @@ def token_metadata(debug_data: Dict[str, Any]) -> Dict[str, Any]:
         "expires_at": _iso_from_timestamp(debug_data.get("expires_at")),
         "is_valid": bool(debug_data.get("is_valid")),
         "app_id": str(debug_data.get("app_id") or ""),
+        "granted_page_ids": granted_page_ids(debug_data),
         "raw": json.dumps(debug_data, ensure_ascii=True),
     }

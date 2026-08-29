@@ -327,6 +327,42 @@ export function BatchQueue({ wsUpdates }) {
     }
   };
 
+  const getQualityBadge = (job) => {
+    const q = String(job?.quality_status || '').toUpperCase();
+    if (q !== 'PASS' && q !== 'NEEDS_REVIEW') return null;
+    const report = job?.quality_report || {};
+    const reasonCode = report.stt_fail_reason || report.translate_fail_reason || '';
+    const reasonMap = {
+      zero_cues: 'STT rác',
+      punctuation_only: 'STT rác',
+      looped_phrases: 'STT rác',
+      too_many_short_cues: 'STT rác',
+      too_many_single_cjk: 'STT rác',
+      empty_audio: 'STT rác',
+      agy_missing: 'Chưa có agy',
+      count_mismatch: 'AGY không đạt',
+      cjk_or_invalid: 'AGY không đạt',
+      empty: 'AGY không đạt',
+      agy_failed: 'AGY không đạt',
+    };
+    if (q === 'PASS') {
+      return (
+        <span className="px-2 py-0.5 text-[10px] font-bold rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 w-max">
+          Vietsub đạt
+        </span>
+      );
+    }
+    const label = reasonMap[reasonCode] || 'Cần kiểm tra Vietsub';
+    return (
+      <span
+        className="px-2 py-0.5 text-[10px] font-bold rounded-md bg-amber-50 text-amber-800 border border-amber-200 w-max"
+        title={label}
+      >
+        Cần kiểm tra Vietsub
+      </span>
+    );
+  };
+
   const selectedJob = jobs.find((j) => j.job_id === selectedJobId) || jobs[0] || null;
   const currentLogs = selectedJob?.logs || [];
   const isJobRunning = selectedJob && !['COMPLETED', 'FAILED', 'CANCELLED'].includes(selectedJob.status?.toUpperCase());
@@ -541,7 +577,12 @@ export function BatchQueue({ wsUpdates }) {
                           {job.platform || 'douyin'}
                         </span>
                       </td>
-                      <td className="px-4 py-3.5 whitespace-nowrap">{getStatusBadge(job.status)}</td>
+                      <td className="px-4 py-3.5 whitespace-nowrap">
+                        <div className="flex flex-col gap-1">
+                          {getStatusBadge(job.status)}
+                          {getQualityBadge(job)}
+                        </div>
+                      </td>
                       <td className="px-4 py-3.5 min-w-[200px]">
                         <div className="space-y-1.5">
                           <div className="flex items-center justify-between text-[11px] font-mono">

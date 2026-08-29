@@ -253,27 +253,105 @@ class TTSServiceError(Exception):
     pass
 
 
+def _is_spoken_cue_text(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw or raw.startswith("["):
+        return False
+    return any(char.isalnum() for char in raw)
+
+
+_TERMINAL_PUNCT_RE = re.compile(r"[.!?。！？…]+$")
+TTS_GROUP_MAX_GAP = 0.22
+TTS_CONTINUE_GAP = 0.55
+TTS_JUMP_CUT_GAP = 0.28
+TTS_TAKE_BREATH = 0.02
+TTS_PAUSE_BREATH = 0.16
+TTS_MAX_FIT = 1.28
+TTS_MAX_TAKE_SEC = 4.8
+TTS_MAX_TAKE_CHARS = 140
+TTS_OWN_SHOT_SEC = 2.8
+TTS_SENTENCE_SPAN = 10.5
+TTS_SENTENCE_CHARS = 240
+
+
+def join_spoken_cue_text(previous: str, current: str, gap: float) -> str:
+    """Join two subtitle lines the way a narrator should read them.
+
+    Jump-cut lines must not keep a full stop in the middle — VieNeu treats
+    ``.`` as a long hold, so the last sentence of one block stalls before
+    the first sentence of the next block.
+    """
+    prev = re.sub(r"\s+", " ", (previous or "").rstrip())
+    curr = re.sub(r"\s+", " ", (current or "").lstrip())
+    if not prev:
+        return curr
+    if not curr:
+        return prev
+    if not _TERMINAL_PUNCT_RE.search(prev):
+        return f"{prev} {curr}"
+    if gap <= TTS_GROUP_MAX_GAP:
+        stripped = _TERMINAL_PUNCT_RE.sub("", prev).rstrip()
+        if stripped:
+            prev = stripped
+        if gap >= 0.40 and prev[-1:] not in ",;:，、":
+            return f"{prev}, {curr}"
+        return f"{prev} {curr}"
+    return f"{prev} {curr}"
+
+
 def group_long_form_tts_segments(
     segments: List[Dict[str, Any]],
-    min_segment_count: int = 60,
+    min_segment_count: int = 2,
+    max_gap: float = TTS_GROUP_MAX_GAP,
+    max_span: float = TTS_MAX_TAKE_SEC,
+    max_chars: int = TTS_MAX_TAKE_CHARS,
 ) -> List[Dict[str, Any]]:
-    """Reduce remote TTS calls for long clips by joining nearby translated cues."""
-    if len(segments) < min_segment_count:
-        return segments
-
-    grouped: List[Dict[str, Any]] = []
+    """Join only STT crumbs on the same shot. Long cues stay pinned to their picture."""
+    spoken = []
     for segment in segments:
         current = dict(segment)
         current["text"] = re.sub(r"\s+", " ", str(current.get("text") or "").strip())
+        if not _is_spoken_cue_text(current["text"]):
+            continue
+        spoken.append(current)
+    if len(spoken) < min_segment_count:
+        for index, segment in enumerate(spoken, start=1):
+            segment["index"] = index
+        return spoken
+
+    grouped: List[Dict[str, Any]] = []
+    for current in spoken:
         if not grouped:
             grouped.append(current)
             continue
 
         previous = grouped[-1]
         gap = float(current["start_time"]) - float(previous["end_time"])
+        prev_dur = float(previous["end_time"]) - float(previous["start_time"])
+        curr_dur = float(current.get("duration") or 0.0)
+        if curr_dur <= 0:
+            curr_dur = float(current["end_time"]) - float(current["start_time"])
         combined_span = float(current["end_time"]) - float(previous["start_time"])
-        combined_text = f"{previous.get('text', '').rstrip()} {current.get('text', '').lstrip()}".strip()
-        if gap <= 1.5 and combined_span <= 12.0 and len(combined_text) <= 180:
+        combined_text = join_spoken_cue_text(
+            str(previous.get("text") or ""),
+            str(current.get("text") or ""),
+            gap,
+        )
+        prev_incomplete = not bool(_TERMINAL_PUNCT_RE.search(str(previous.get("text") or "").rstrip()))
+        already_a_shot = prev_dur >= TTS_OWN_SHOT_SEC or curr_dur >= TTS_OWN_SHOT_SEC
+        continue_sentence = (
+            prev_incomplete
+            and gap <= TTS_CONTINUE_GAP
+            and combined_span <= TTS_SENTENCE_SPAN
+            and len(combined_text) <= TTS_SENTENCE_CHARS
+        )
+        glue_crumbs = (
+            not already_a_shot
+            and gap <= max_gap
+            and combined_span <= max_span
+            and len(combined_text) <= max_chars
+        )
+        if continue_sentence or glue_crumbs:
             previous["text"] = combined_text
             previous["end_time"] = float(current["end_time"])
             previous["duration"] = combined_span
@@ -282,8 +360,191 @@ def group_long_form_tts_segments(
 
     for index, segment in enumerate(grouped, start=1):
         segment["index"] = index
-    logger.info("Grouped %d subtitle cues into %d long-form TTS requests", len(segments), len(grouped))
+    if len(grouped) != len(spoken):
+        logger.info("Grouped %d subtitle cues into %d spoken takes", len(spoken), len(grouped))
     return grouped
+
+
+def trim_tts_silence(
+    input_path: str,
+    output_path: str,
+    *,
+    peak_ratio: float = 0.08,
+    pad_sec: float = 0.03,
+    min_keep_sec: float = 0.08,
+) -> bool:
+    """Drop leading/trailing TTS pad so the last word does not sit in silence."""
+    if not input_path or not os.path.exists(input_path):
+        return False
+    if input_path.lower().endswith(".wav"):
+        try:
+            import wave
+
+            with wave.open(input_path, "rb") as src:
+                nch = src.getnchannels()
+                sw = src.getsampwidth()
+                rate = src.getframerate()
+                nframes = src.getnframes()
+                frames = src.readframes(nframes)
+            if sw != 2 or nch < 1 or rate <= 0 or nframes <= 0:
+                return False
+            frame_size = nch * sw
+            total = nframes
+            peak = 1
+            for i in range(total):
+                off = i * frame_size
+                sample = int.from_bytes(frames[off:off + 2], "little", signed=True)
+                mag = abs(sample)
+                if mag > peak:
+                    peak = mag
+            thresh = max(int(peak * peak_ratio), 240)
+            first = 0
+            last = total - 1
+            while first < total:
+                off = first * frame_size
+                sample = abs(int.from_bytes(frames[off:off + 2], "little", signed=True))
+                if sample >= thresh:
+                    break
+                first += 1
+            while last > first:
+                off = last * frame_size
+                sample = abs(int.from_bytes(frames[off:off + 2], "little", signed=True))
+                if sample >= thresh:
+                    break
+                last -= 1
+            if first >= last:
+                return False
+            pad = int(rate * pad_sec)
+            first = max(0, first - pad)
+            last = min(total - 1, last + pad)
+            keep = last - first + 1
+            if keep / float(rate) < min_keep_sec:
+                return False
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+            with wave.open(output_path, "wb") as dest:
+                dest.setnchannels(nch)
+                dest.setsampwidth(sw)
+                dest.setframerate(rate)
+                dest.writeframes(frames[first * frame_size:(last + 1) * frame_size])
+            return os.path.getsize(output_path) > 256
+        except Exception as exc:
+            logger.debug("WAV silence trim skipped: %s", exc)
+            return False
+
+    from app.services.audio_service import find_ffmpeg_binary
+
+    ffmpeg_bin = find_ffmpeg_binary()
+    if not ffmpeg_bin:
+        return False
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+    cmd = [
+        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+        "-i", input_path,
+        "-af",
+        "silenceremove=start_periods=1:start_duration=0.02:start_threshold=-38dB:"
+        "stop_periods=1:stop_duration=0.05:stop_threshold=-38dB",
+        "-ar", "44100",
+        output_path,
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode != 0 or not os.path.exists(output_path):
+            return False
+        if get_audio_duration(output_path) < min_keep_sec:
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+            return False
+        return os.path.getsize(output_path) > 256
+    except Exception as exc:
+        logger.debug("FFmpeg silence trim skipped: %s", exc)
+        return False
+
+
+def limit_clip_to_duration(
+    input_path: str,
+    output_path: str,
+    max_dur: float,
+    fade_sec: float = 0.05,
+) -> bool:
+    """Hard-stop a take at the next shot so leftover words do not cover the new image."""
+    td = max(0.12, float(max_dur))
+    actual = get_audio_duration(input_path)
+    if actual <= td + 0.02:
+        return False
+    fade = min(max(0.02, fade_sec), td / 3.0)
+    if input_path.lower().endswith(".wav"):
+        try:
+            import wave
+
+            with wave.open(input_path, "rb") as src:
+                nch = src.getnchannels()
+                sw = src.getsampwidth()
+                rate = src.getframerate()
+                frames = src.readframes(src.getnframes())
+            if sw != 2 or rate <= 0:
+                return False
+            keep = min(len(frames) // (nch * sw), max(1, int(round(td * rate))))
+            fade_n = min(keep, max(1, int(round(fade * rate))))
+            frame_size = nch * sw
+            out = bytearray(frames[: keep * frame_size])
+            for i in range(fade_n):
+                scale = i / float(fade_n)
+                idx = keep - fade_n + i
+                off = idx * frame_size
+                for ch in range(nch):
+                    s_off = off + ch * sw
+                    sample = int.from_bytes(out[s_off:s_off + 2], "little", signed=True)
+                    sample = int(sample * scale)
+                    out[s_off:s_off + 2] = sample.to_bytes(2, "little", signed=True)
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+            with wave.open(output_path, "wb") as dest:
+                dest.setnchannels(nch)
+                dest.setsampwidth(sw)
+                dest.setframerate(rate)
+                dest.writeframes(bytes(out))
+            return os.path.getsize(output_path) > 256
+        except Exception as exc:
+            logger.debug("WAV shot trim skipped: %s", exc)
+
+    from app.services.audio_service import find_ffmpeg_binary
+
+    ffmpeg_bin = find_ffmpeg_binary()
+    if not ffmpeg_bin:
+        return False
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+    start_fade = max(0.0, td - fade)
+    cmd = [
+        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+        "-i", input_path,
+        "-af", f"afade=t=out:st={start_fade:.3f}:d={fade:.3f},atrim=0:{td:.3f},asetpts=PTS-STARTPTS",
+        "-ar", "44100",
+        output_path,
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        return res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 256
+    except Exception as exc:
+        logger.debug("FFmpeg shot trim skipped: %s", exc)
+        return False
+
+
+def place_consecutive_tts_clips(clips: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Pin each take to its shot time so speech does not slide onto the next image."""
+    previous_end = 0.0
+    ordered = sorted(clips, key=lambda c: float(c["segment"]["start_time"]))
+    for item in ordered:
+        desired_start = float(item["segment"]["start_time"])
+        duration = max(0.12, float(item.get("final_dur") or 0.0))
+        start = desired_start
+        if previous_end > 0 and start < previous_end + TTS_TAKE_BREATH:
+            start = previous_end + TTS_TAKE_BREATH
+        item["segment"]["start_time"] = start
+        item["segment"]["end_time"] = start + duration
+        item["segment"]["duration"] = duration
+        previous_end = start + duration
+    return ordered
 
 
 class TTSService:
@@ -531,8 +792,7 @@ class TTSService:
             }
             for seg in raw_segments
         ]
-        if engine_name == "edge-tts":
-            segments = group_long_form_tts_segments(segments)
+        segments = group_long_form_tts_segments(segments)
 
         if progress_callback:
             progress_callback(0, len(segments))
@@ -564,6 +824,12 @@ class TTSService:
                     )
                     return None
                 srt_dur = float(seg.get("duration") or 0.0)
+                if next_start is not None:
+                    shot_window = max(0.18, float(next_start) - float(seg["start_time"]) - 0.03)
+                    pin_to_shot = True
+                else:
+                    shot_window = max(0.18, srt_dur)
+                    pin_to_shot = False
                 emotion = seg.get("emotion", "neutral")
                 rate_val = "+0%"
                 pitch_val = "+0Hz"
@@ -612,39 +878,51 @@ class TTSService:
                 if not os.path.exists(raw_clip_path) or os.path.getsize(raw_clip_path) < 256:
                     logger.warning(f"Skipping empty TTS clip for segment {seg['index']}")
                     return None
+                trimmed_clip_path = os.path.join(temp_dir, f"seg_{seg['index']}_trim.wav")
+                if trim_tts_silence(raw_clip_path, trimmed_clip_path):
+                    raw_clip_path = trimmed_clip_path
 
+                audio_dur = get_audio_duration(raw_clip_path)
+                window = max(0.18, shot_window)
                 if lipsync_on:
                     from app.services.lipsync_service import fit_clip_to_window
-                    ok = fit_clip_to_window(raw_clip_path, scaled_clip_path, srt_dur)
+                    ok = fit_clip_to_window(raw_clip_path, scaled_clip_path, window)
                     clip_to_use = scaled_clip_path if ok else raw_clip_path
-                    clamped_speed = get_audio_duration(raw_clip_path) / max(0.18, srt_dur)
+                    clamped_speed = audio_dur / window
                 else:
-                    audio_dur = get_audio_duration(raw_clip_path)
-                    if preserve_natural_voice:
-                        # VieNeu keeps natural per-cue pacing, but the whole dub must
-                        # still follow the same global speed as the transformed video.
-                        speed_factor = speed
-                    elif srt_dur > 0.1 and audio_dur > 0.1:
-                        speed_factor = audio_dur / srt_dur
+                    # `speed` already moved cue times onto the output clock.
+                    # Do not rubberband the wav by that same factor — that made
+                    # VieNeu ~speed² vs the picture (1.30x video + 1.30x voice).
+                    if window > 0.1 and audio_dur > 0.1:
+                        speed_factor = audio_dur / window
                     else:
                         speed_factor = 1.0
-                    clamped_speed = (
-                        speed_factor
-                        if preserve_natural_voice
-                        else max(0.85, min(1.30, speed_factor))
-                    )
+                    if preserve_natural_voice:
+                        if audio_dur > window + 0.05:
+                            clamped_speed = min(speed_factor, TTS_MAX_FIT)
+                        else:
+                            clamped_speed = 1.0
+                    else:
+                        clamped_speed = max(0.85, min(1.30, speed_factor))
                     if abs(clamped_speed - 1.0) > (0.01 if preserve_natural_voice else 0.05):
                         success = scale_audio_speed_ffmpeg(raw_clip_path, scaled_clip_path, clamped_speed)
                         clip_to_use = scaled_clip_path if success else raw_clip_path
                     else:
                         clip_to_use = raw_clip_path
 
+                # VieNeu: never chop the last words. A slightly late next take is
+                # better than abandoning the sentence. Lip-sync engines still pin.
+                if pin_to_shot and not preserve_natural_voice:
+                    limited_path = os.path.join(temp_dir, f"seg_{seg['index']}_shot.wav")
+                    if limit_clip_to_duration(clip_to_use, limited_path, window):
+                        clip_to_use = limited_path
+
                 final_clip_dur = get_audio_duration(clip_to_use)
                 return {
                     "segment": {**seg, "text": text_to_speak, "duration": srt_dur},
                     "clip_path": clip_to_use,
-                    "audio_dur": get_audio_duration(raw_clip_path),
-                    "target_dur": srt_dur,
+                    "audio_dur": audio_dur,
+                    "target_dur": window,
                     "speed_factor": clamped_speed,
                     "final_dur": final_clip_dur
                 }
@@ -668,18 +946,7 @@ class TTSService:
                 if progress_callback:
                     progress_callback(min(i + len(batch), len(segments)), len(segments))
 
-            # Preserve every spoken word. When a translated sentence needs more
-            # room, move the following cue forward and use the same adjusted
-            # timing for both the audio and the burned subtitle.
-            previous_end = 0.0
-            for item in sorted(processed_clips, key=lambda c: float(c["segment"]["start_time"])):
-                desired_start = float(item["segment"]["start_time"])
-                start = max(desired_start, previous_end + (0.04 if previous_end > 0 else 0.0))
-                duration = max(0.12, float(item.get("final_dur") or 0.0))
-                item["segment"]["start_time"] = start
-                item["segment"]["end_time"] = start + duration
-                item["segment"]["duration"] = duration
-                previous_end = start + duration
+            place_consecutive_tts_clips(processed_clips)
 
             if processed_clips:
                 effective_total_duration = max(

@@ -105,6 +105,83 @@ def normalize_overlays(raw: Optional[Sequence[Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def _clamp_fill(raw: Any) -> float:
+    try:
+        t = float(raw or 0.0)
+    except (TypeError, ValueError):
+        t = 0.0
+    if t > 1.0:
+        t = t / 100.0
+    return max(0.0, min(1.0, t))
+
+
+def split_master_and_plate_overlays(
+    overlays: Optional[Sequence[Any]],
+    canvas_fill: float = 0.0,
+    src_w: int = 0,
+    src_h: int = 0,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """When 16:9 is letterboxed into 9:16 with extra bottom pad, banners leave the picture.
+
+    Landscape master + canvas_fill > 0 → logos/frames stay on the video; banners
+    go onto the 9:16 plate (contain, never covering the picture).
+    """
+    items = normalize_overlays(overlays)
+    t = _clamp_fill(canvas_fill)
+    landscape = int(src_w or 0) > 0 and int(src_h or 0) > 0 and int(src_w) >= int(src_h)
+    if t < 1e-4 or not landscape:
+        return items, []
+    master = [item for item in items if item.get("kind") != "banner"]
+    plate = [item for item in items if item.get("kind") == "banner"]
+    return master, plate
+
+
+def overlays_for_job(
+    cfg: Any,
+    src_w: int = 0,
+    src_h: int = 0,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Resolve caption-cover + overlays, then split banners onto the 9:16 plate when fill is on."""
+    from app.services.caption_cover import (
+        cover_band_height,
+        normalize_caption_cover,
+        resolve_caption_cover_image,
+    )
+
+    cover_kind = normalize_caption_cover(getattr(cfg, "caption_cover", "off"))
+    cover_img = resolve_caption_cover_image(
+        getattr(cfg, "caption_cover_image", None),
+        getattr(cfg, "caption_cover_url", None),
+    )
+    band = cover_band_height(
+        float(getattr(cfg, "subtitle_bottom_crop", 0.0) or 0.0),
+        cover_kind,
+    )
+    if cover_kind == "image" and cover_img:
+        items = ensure_caption_cover_banner(getattr(cfg, "overlays", None), cover_img, band)
+    else:
+        items = normalize_overlays(getattr(cfg, "overlays", None))
+    fill = _clamp_fill(getattr(cfg, "canvas_fill", 0.0))
+    if not _has_portrait_target(cfg):
+        return items, []
+    landscape = int(src_w or 0) > 0 and int(src_h or 0) > 0 and int(src_w) >= int(src_h)
+    if cover_kind == "image" and landscape and fill < 1e-4:
+        # Full leftover plate so the logo is full canvas width at its natural height.
+        fill = 1.0
+    return split_master_and_plate_overlays(items, canvas_fill=fill, src_w=src_w, src_h=src_h)
+
+
+def _has_portrait_target(cfg: Any) -> bool:
+    try:
+        from app.services.platform_export import PRESETS, normalize_platforms
+        wanted = normalize_platforms(getattr(cfg, "target_platforms", None))
+    except Exception:
+        return True
+    if not wanted:
+        return False
+    return any(int(PRESETS[p]["h"]) > int(PRESETS[p]["w"]) for p in wanted if p in PRESETS)
+
+
 def ensure_caption_cover_banner(
     overlays: Optional[Sequence[Any]],
     image_path: str,
@@ -202,6 +279,54 @@ def append_overlay_filter(
         prev = nxt
         paths.append(ov["image_path"])
         logger.info("overlay[%d] kind=%s band_h=%s path=%s", i, kind, ov.get("band_h"), ov["image_path"])
+
+    return fc + ";" + ";".join(parts), paths
+
+
+def append_plate_banner_filter(
+    filter_complex: str,
+    overlays: Sequence[Any],
+    first_overlay_index: int,
+    canvas_w: int,
+    canvas_h: int,
+    plate_y: int,
+    plate_h: int,
+) -> Tuple[str, List[str]]:
+    """Cover-fit banners into the bottom plate at full canvas width."""
+    items = [item for item in normalize_overlays(overlays) if item.get("kind") == "banner"]
+    ph = max(0, int(plate_h) // 2 * 2)
+    if not items or ph < 8:
+        return filter_complex, []
+    if "[v_out]" not in filter_complex:
+        logger.warning("append_plate_banner_filter: [v_out] label missing, overlays skipped")
+        return filter_complex, []
+
+    cw = max(2, int(canvas_w) // 2 * 2)
+    y = max(0, int(plate_y) // 2 * 2)
+    fc = filter_complex.replace("[v_out]", "[v_base]", 1)
+    prev = "v_base"
+    parts: List[str] = []
+    paths: List[str] = []
+    persist = "format=auto:eof_action=repeat:repeatlast=1"
+
+    for i, ov in enumerate(items):
+        in_idx = first_overlay_index + i
+        lg = f"lg{i}"
+        nxt = "v_out" if i == len(items) - 1 else f"vov{i}"
+        op = ov["opacity"]
+        parts.append(
+            f"[{in_idx}:v]format=rgba,scale={cw}:{ph}:force_original_aspect_ratio=increase,"
+            f"crop={cw}:{ph},colorchannelmixer=aa={op:.3f}[{lg}]"
+        )
+        parts.append(
+            f"[{prev}][{lg}]overlay=0:{y}:{persist}[{nxt}]"
+        )
+        prev = nxt
+        paths.append(ov["image_path"])
+        logger.info(
+            "plate-banner[%d] cover %sx%s y=%s canvas=%sx%s path=%s",
+            i, cw, ph, y, canvas_w, canvas_h, ov["image_path"],
+        )
 
     return fc + ";" + ";".join(parts), paths
 

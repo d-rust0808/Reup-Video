@@ -18,51 +18,34 @@ from pathlib import Path
 from typing import Callable, Dict, Any, Optional, List
 
 from app.modules.videotrans.runner import PyVideoTransRunner
+from app.services.vietsub_rules import (
+    CHUNK_SIZE,
+    PROMPT_VERSION,
+    contains_cjk,
+    is_invalid_translation,
+    merge_particles_and_shorts,
+    reflow_incomplete_sentences,
+    regroup_words_to_sentences,
+    resolve_vietsub_style,
+    split_long_cues,
+    VI_REFLOW_MAX_CHARS,
+    VI_REFLOW_MAX_DUR,
+    VI_REFLOW_MAX_GAP,
+    stt_hard_fail_reason,
+    translation_matches_target,
+    vietnamese_fail_reason,
+)
 
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODULE_VIDEOTRANS_PATH = str(PROJECT_ROOT / "app" / "modules" / "videotrans")
 _WHISPER_CACHE: Dict[str, Any] = {"model": None, "name": None, "device": None}
+_STT_DECODE_TAG = "b5c1"
 
-
-def _is_invalid_translation(text: Optional[str]) -> bool:
-    """Detects HTTP error responses, rate-limits, or HTML blobs leaked into translations."""
-    if not text or not isinstance(text, str):
-        return True
-    low = text.lower().strip()
-    if not low:
-        return True
-    error_patterns = [
-        "error 500",
-        "server error",
-        "that's an error",
-        "that’s an error",
-        "please try again later",
-        "too many requests",
-        "429 too many",
-        "<html",
-        "<!doctype",
-        "result-container",
-        "unsupported translate type",
-    ]
-    return any(p in low for p in error_patterns)
-
-
-def _contains_cjk(text: str) -> bool:
-    return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", text or ""))
-
-
-def _translation_matches_target(text: Optional[str], target_lang: str) -> bool:
-    """Reject source-language leakage before a translated cue reaches hardsub/TTS."""
-    if _is_invalid_translation(text):
-        return False
-    if not any(char.isalnum() for char in text or ""):
-        return False
-    lang = (target_lang or "").lower().split("-")[0]
-    if lang == "vi" and _contains_cjk(text or ""):
-        return False
-    return True
+_is_invalid_translation = is_invalid_translation
+_contains_cjk = contains_cjk
+_translation_matches_target = translation_matches_target
 
 
 def _is_ai_unavailable_error(reason: Optional[str]) -> bool:
@@ -83,69 +66,9 @@ def _is_ai_unavailable_error(reason: Optional[str]) -> bool:
     )
 
 
-_DETACHED_CJK_PARTICLES = {
-    "吗", "呢", "吧", "嘛", "么", "啊", "呀", "啦", "呗", "了", "的", "地", "得",
-}
-
-
 def _merge_fragmented_cues(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Join nearby ASR fragments into sentence-sized cues before translation/TTS."""
-    merged: List[Dict[str, Any]] = []
-    for segment in segments:
-        copied = dict(segment)
-        text = re.sub(r"\s+", " ", str(copied.get("text") or "").strip())
-        compact = re.sub(r"\s+", "", text)
-        cjk_only = "".join(char for char in compact if _contains_cjk(char))
-        has_spoken_content = any(char.isalnum() for char in text)
-        duration = max(
-            0.0,
-            float(copied.get("end_time") or 0.0) - float(copied.get("start_time") or 0.0),
-        )
-        is_fragment = (
-            not has_spoken_content
-            or cjk_only in _DETACHED_CJK_PARTICLES
-            or (bool(cjk_only) and len(cjk_only) <= 3 and duration <= 0.9)
-        )
-
-        if merged:
-            previous = merged[-1]
-            gap = float(copied.get("start_time") or 0.0) - float(previous.get("end_time") or 0.0)
-            previous_text = str(previous.get("text") or "").rstrip()
-            combined_duration = (
-                float(copied.get("end_time") or 0.0)
-                - float(previous.get("start_time") or 0.0)
-            )
-            combined_chars = len(re.sub(r"\s+", "", previous_text + text))
-            has_terminal = bool(re.search(r"[.!?。！？…]$", previous_text))
-            should_join_sentence = (
-                gap <= 0.12
-                and not has_terminal
-                and combined_duration <= 5.0
-                and combined_chars <= 42
-            )
-            if gap <= 0.35 and (is_fragment or should_join_sentence):
-                separator = ""
-                if has_spoken_content and not (_contains_cjk(previous_text[-1:]) and _contains_cjk(text[:1])):
-                    separator = " "
-                previous["text"] = f"{previous_text}{separator}{text}".strip()
-                previous["end_time"] = max(
-                    float(previous.get("end_time") or 0.0),
-                    float(copied.get("end_time") or 0.0),
-                )
-                previous["duration"] = max(
-                    0.0,
-                    float(previous["end_time"]) - float(previous.get("start_time") or 0.0),
-                )
-                continue
-
-        if not has_spoken_content:
-            continue
-        copied["text"] = text
-        merged.append(copied)
-
-    for index, segment in enumerate(merged, start=1):
-        segment["index"] = index
-    return merged
+    """Particle/short-fragment safety net. Sentence grouping happens at STT time."""
+    return merge_particles_and_shorts(segments)
 
 
 def subtitle_matches_target_language(srt_path: Optional[str], target_lang: str = "vi") -> bool:
@@ -361,6 +284,7 @@ class PyVideoTransService:
                 str(detect_lang or "auto"),
                 str(model_name or "base"),
                 str(max_seconds or ""),
+                _STT_DECODE_TAG,
             ]
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
@@ -381,6 +305,12 @@ class PyVideoTransService:
             cue_count = int(meta.get("cue_count") or 0)
             if cue_count <= 0:
                 cue_count = len(re.findall(r"^\d+\s*$", Path(dest_srt).read_text(encoding="utf-8"), re.M))
+            from app.services.tts_service import parse_srt_segments
+
+            split = split_long_cues(parse_srt_segments(dest_srt))
+            if split:
+                _cues_to_srt(split, dest_srt)
+                cue_count = len(split)
             return {
                 "status": "success",
                 "srt_path": dest_srt,
@@ -488,6 +418,41 @@ class PyVideoTransService:
                 f.write(f"{count}\n{t_s} --> {t_e}\n{text}\n\n")
         return count
 
+    def _write_cue_dicts(self, srt_path: str, cues: List[Dict[str, Any]]) -> int:
+        if not cues:
+            return 0
+        _cues_to_srt(cues, srt_path)
+        return len(cues)
+
+    def _stt_gate_result(
+        self,
+        srt_path: str,
+        detected: Optional[str],
+        model_name: str,
+        cue_count: int,
+    ) -> Dict[str, Any]:
+        from app.services.tts_service import parse_srt_segments
+
+        cues = parse_srt_segments(srt_path) if os.path.isfile(srt_path) else []
+        fail_reason = stt_hard_fail_reason(cues)
+        if fail_reason:
+            logger.warning(f"STT hard-fail ({fail_reason}): {len(cues)} cues -> skip Vietsub")
+            return {
+                "status": "needs_review",
+                "srt_path": None,
+                "detected_language": detected,
+                "model": model_name,
+                "cue_count": cue_count or len(cues),
+                "stt_fail_reason": fail_reason,
+            }
+        return {
+            "status": "success",
+            "srt_path": srt_path,
+            "detected_language": detected,
+            "model": model_name,
+            "cue_count": cue_count or len(cues),
+        }
+
     def speech_to_text(
         self,
         video_or_audio_path: str,
@@ -510,24 +475,29 @@ class PyVideoTransService:
         w_lang = self._normalize_whisper_lang(detect_lang)
         device, compute_type = self._whisper_device()
         requested = (model_name or "base").strip() or "base"
-        # tiny wrecks Chinese + BGM; small is too slow on CPU. Prefer cached base.
-        if requested == "tiny":
+        # tiny wrecks Chinese + BGM; small is never selected (SPEC: base only).
+        if requested in ("tiny", "small"):
             requested = "base"
-        model_candidates: List[str] = []
-        for name in (requested, "base", "small", "tiny"):
-            if name not in model_candidates:
-                model_candidates.append(name)
+        model_candidates: List[str] = ["base"]
 
         base_stem = os.path.splitext(os.path.basename(video_or_audio_path))[0]
         srt_path = os.path.join(target_dir, f"{base_stem}.srt")
         cache_key = self._stt_cache_key(video_or_audio_path, w_lang, requested, max_seconds)
         cached = self._stt_cache_load(cache_key, srt_path)
         if cached:
+            gated = self._stt_gate_result(
+                srt_path,
+                cached.get("detected_language"),
+                cached.get("model") or "cache",
+                int(cached.get("cue_count") or 0),
+            )
+            if gated["status"] != "success":
+                return gated
             emit_status(
                 on_status,
                 f"🎧 Dùng lại Whisper đã nhận trước đó ({cached.get('cue_count') or 0} câu) — bỏ qua nhận dạng lại.",
             )
-            return cached
+            return gated
 
         emit_status(on_status, "🎧 Đang tách audio WAV cho Whisper...")
         audio_for_stt = self._extract_stt_wav(video_or_audio_path, target_dir, max_seconds=max_seconds)
@@ -558,9 +528,9 @@ class PyVideoTransService:
                     audio_for_stt,
                     language=w_lang,
                     vad_filter=True,
-                    beam_size=1,
-                    best_of=1,
-                    condition_on_previous_text=False,
+                    beam_size=5,
+                    best_of=5,
+                    condition_on_previous_text=True,
                     word_timestamps=True,
                 )
                 # faster-whisper yields lazily; drain here so cancel/progress can run between cues.
@@ -598,14 +568,35 @@ class PyVideoTransService:
                             "end": float(getattr(w, "end", 0.0) or 0.0),
                         })
             if words:
-                from app.services.lipsync_service import regroup_words_to_cues, write_cues_srt
-                cues = regroup_words_to_cues(words)
-                count = write_cues_srt(srt_path, cues)
-                logger.info(f"STT lip-sync regrouped {len(words)} words -> {count} cues")
+                cues = regroup_words_to_sentences(words)
+                count = self._write_cue_dicts(srt_path, cues)
+                logger.info(f"STT sentence-regrouped {len(words)} words -> {count} cues")
             else:
-                count = self._write_srt(srt_path, seg_list)
+                raw_cues = []
+                for seg in seg_list:
+                    text = (getattr(seg, "text", None) or "").strip()
+                    text = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", text)
+                    if not text:
+                        continue
+                    start = float(getattr(seg, "start", 0.0) or 0.0)
+                    end = float(getattr(seg, "end", start + 0.5) or (start + 0.5))
+                    raw_cues.append({
+                        "start_time": start,
+                        "end_time": max(start + 0.35, end),
+                        "duration": max(0.35, end - start),
+                        "text": text,
+                    })
+                cues = split_long_cues(raw_cues)
+                if cues:
+                    count = self._write_cue_dicts(srt_path, cues)
+                    logger.info(f"STT split {len(raw_cues)} Whisper blobs -> {count} picture cues")
+                else:
+                    count = self._write_srt(srt_path, seg_list)
             detected = getattr(info, "language", None)
             if count > 0 and os.path.exists(srt_path) and os.path.getsize(srt_path) > 0:
+                gated = self._stt_gate_result(srt_path, detected, used_name, count)
+                if gated["status"] != "success":
+                    return gated
                 logger.info(f"STT wrote {count} cues ({detected}) -> {srt_path}")
                 self._stt_cache_store(
                     cache_key,
@@ -616,20 +607,20 @@ class PyVideoTransService:
                         "cue_count": count,
                     },
                 )
-                return {
-                    "status": "success",
-                    "srt_path": srt_path,
-                    "detected_language": detected,
-                    "model": used_name,
-                    "cue_count": count,
-                }
+                return gated
             if os.path.exists(srt_path):
                 try:
                     os.remove(srt_path)
                 except OSError:
                     pass
             logger.warning("STT produced zero cues (silent / music-only clip)")
-            return {"status": "empty", "srt_path": None, "detected_language": detected, "model": used_name}
+            return {
+                "status": "empty",
+                "srt_path": None,
+                "detected_language": detected,
+                "model": used_name,
+                "stt_fail_reason": "empty_audio",
+            }
         except Exception as e:
             logger.warning(f"faster_whisper STT failed: {e}")
             return {
@@ -645,21 +636,76 @@ class PyVideoTransService:
                     pass
 
     def _subtitle_translator_engine(self) -> str:
-        from app.config import settings
-
-        raw = (
-            os.getenv("SUBTITLE_TRANSLATOR")
-            or getattr(settings, "SUBTITLE_TRANSLATOR", "")
-            or "agy"
-        )
-        engine = str(raw).strip().lower()
-        if engine in ("ai", "llm", "api"):
-            return "deepseek"
-        if engine in ("agy", "antigravity", "gemini"):
-            return "agy"
-        if engine in ("google", "cli", "deepseek"):
-            return engine
         return "agy"
+
+    def _vietsub_cache_dir(self) -> str:
+        try:
+            from app.config import settings
+            root = settings.CACHE_DIR
+            if not os.path.isabs(root):
+                root = os.path.join(str(settings.BASE_DIR), root)
+            path = os.path.join(os.path.abspath(root), "vietsub")
+        except Exception:
+            path = os.path.abspath(os.path.join(PROJECT_ROOT, "data", "cache", "vietsub"))
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _vietsub_cache_key(
+        self,
+        cues: List[Dict[str, Any]],
+        target_lang: str,
+        style: str,
+        model: str,
+    ) -> str:
+        payload = json.dumps(
+            {
+                "cues": [
+                    {
+                        "i": int(c.get("index") or 0),
+                        "s": round(float(c.get("start_time") or 0.0), 3),
+                        "e": round(float(c.get("end_time") or 0.0), 3),
+                        "t": str(c.get("text") or ""),
+                    }
+                    for c in cues
+                ],
+                "lang": target_lang,
+                "style": style,
+                "model": model,
+                "prompt": PROMPT_VERSION,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+    def _vietsub_cache_load(self, key: str) -> Optional[List[str]]:
+        path = os.path.join(self._vietsub_cache_dir(), f"{key}.json")
+        if not os.path.isfile(path):
+            return None
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            lines = data.get("lines") if isinstance(data, dict) else None
+            if isinstance(lines, list) and all(isinstance(item, str) for item in lines):
+                return lines
+        except Exception as exc:
+            logger.warning(f"Vietsub cache load failed: {exc}")
+        return None
+
+    def _vietsub_cache_store(self, key: str, lines: List[str]) -> None:
+        path = os.path.join(self._vietsub_cache_dir(), f"{key}.json")
+        tmp = path + ".tmp"
+        try:
+            Path(tmp).write_text(
+                json.dumps({"lines": lines, "version": PROMPT_VERSION}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except Exception as exc:
+            logger.warning(f"Vietsub cache store failed: {exc}")
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
     def _translate_with_agy(
         self,
@@ -667,48 +713,83 @@ class PyVideoTransService:
         target_lang: str,
         target_dir: str,
         title: str = "",
+        style: str = "dub",
         on_status: Optional[Callable[[str], None]] = None,
     ) -> Optional[Dict[str, Any]]:
         from app.services import agy_cli_service
+        from app.services.activity import emit_status
         from app.services.tts_service import parse_srt_segments
 
         if not agy_cli_service.is_available():
-            return None
+            return {
+                "status": "failed",
+                "srt_path": None,
+                "provider": "agy",
+                "warning": "Chưa có agy",
+                "translate_fail_reason": "agy_missing",
+            }
         cues = _merge_fragmented_cues(parse_srt_segments(subtitle_file_path))
         texts = [str(cue.get("text") or "").strip() for cue in cues]
         if not any(texts):
-            return None
-        translated = agy_cli_service.translate_cues(
-            texts,
-            target_lang=target_lang,
-            title=title,
-            on_status=on_status,
-        )
-        if len(translated) != len(cues):
-            return None
-        kept: List[Dict[str, Any]] = []
-        skipped = 0
+            return {
+                "status": "failed",
+                "srt_path": None,
+                "provider": "agy",
+                "warning": "Không có câu nguồn để dịch",
+                "translate_fail_reason": "empty",
+            }
+        style_n = resolve_vietsub_style(style)
+        cache_key = self._vietsub_cache_key(cues, target_lang, style_n, agy_cli_service.default_model())
+        translated = self._vietsub_cache_load(cache_key)
+        if translated and len(translated) == len(cues):
+            emit_status(on_status, f"🌐 Dùng lại bản dịch AGY đã cache ({len(translated)} câu).")
+        else:
+            translated = agy_cli_service.translate_cues(
+                texts,
+                target_lang=target_lang,
+                title=title,
+                style=style_n,
+                on_status=on_status,
+                chunk_size=CHUNK_SIZE,
+            )
+        if not translated or len(translated) != len(cues):
+            return {
+                "status": "failed",
+                "srt_path": None,
+                "provider": "agy",
+                "warning": "AGY không trả đủ câu",
+                "translate_fail_reason": "count_mismatch",
+            }
+        fail_reason = vietnamese_fail_reason(translated, len(cues), target_lang)
+        if fail_reason:
+            return {
+                "status": "failed",
+                "srt_path": None,
+                "provider": "agy",
+                "warning": f"AGY không đạt ({fail_reason})",
+                "translate_fail_reason": fail_reason,
+            }
+        self._vietsub_cache_store(cache_key, list(translated))
+        kept = []
         for cue, text in zip(cues, translated):
-            if _translation_matches_target(text, target_lang):
-                item = dict(cue)
-                item["text"] = text.strip()
-                kept.append(item)
-            else:
-                skipped += 1
-        min_keep = max(1, int(len(cues) * 0.5)) if cues else 1
-        if not (kept and len(kept) >= min_keep):
-            return None
+            item = dict(cue)
+            item["text"] = text.strip()
+            kept.append(item)
+        kept = reflow_incomplete_sentences(
+            kept,
+            max_gap=VI_REFLOW_MAX_GAP,
+            max_duration=VI_REFLOW_MAX_DUR,
+            max_chars=VI_REFLOW_MAX_CHARS,
+        )
         base_stem = os.path.splitext(os.path.basename(subtitle_file_path))[0]
         out_srt = os.path.join(target_dir, f"{base_stem}_{target_lang}.srt")
         _cues_to_srt(kept, out_srt)
-        warning = ""
-        if skipped:
-            warning = f"Google CLI dịch được {len(kept)}/{len(cues)} câu; đã bỏ {skipped} câu còn tiếng gốc."
         return {
             "status": "success",
             "srt_path": out_srt,
             "provider": "agy",
-            "warning": warning or None,
+            "localized": True,
+            "warning": None,
         }
 
     def _translate_with_google(
@@ -858,65 +939,46 @@ class PyVideoTransService:
         duration: float = 0.0,
         on_status: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
-        """Translate subtitles. Default is local `agy` (Gemini 3.7 Flash), then Google CLI, then library."""
+        """Translate subtitles with local AGY only. No Google/DeepSeek/Grok fallback."""
         from app.services.activity import emit_status
 
+        del translate_provider, duration
         if not os.path.exists(subtitle_file_path):
             raise FileNotFoundError(f"Subtitle file not found: {subtitle_file_path}")
 
         target_dir = os.path.abspath(output_dir) if output_dir else os.path.dirname(os.path.abspath(subtitle_file_path))
         os.makedirs(target_dir, exist_ok=True)
-        engine = self._subtitle_translator_engine()
-        emit_status(on_status, f"🌐 Dịch kịch bản bằng {engine}...")
-
-        if engine == "deepseek":
-            try:
-                result = self._translate_with_deepseek(
-                    subtitle_file_path, target_lang, target_dir, style, title, on_status
-                )
-                if result:
-                    return result
-            except Exception as e:
-                logger.warning(f"DeepSeek subtitle translation failed: {e}")
-                emit_status(on_status, f"⚠️ DeepSeek lỗi: {e}. Chuyển Google CLI...")
-            emit_status(on_status, "⚠️ DeepSeek không ra kịch bản Việt hợp lệ. Chuyển Google CLI...")
-
-        if engine == "agy":
-            try:
-                result = self._translate_with_agy(
-                    subtitle_file_path, target_lang, target_dir, title, on_status
-                )
-                if result:
-                    return result
-            except Exception as e:
-                logger.warning(f"Antigravity CLI translation failed: {e}")
-                emit_status(on_status, f"⚠️ agy timeout/lỗi: {e}. Chuyển Google Translate (nhanh)...")
-
+        style_n = resolve_vietsub_style(style)
+        emit_status(on_status, f"🌐 Dịch kịch bản bằng agy (style={style_n})...")
         try:
-            result = self._translate_with_google(
-                subtitle_file_path, target_lang, target_dir, on_status
+            result = self._translate_with_agy(
+                subtitle_file_path,
+                target_lang,
+                target_dir,
+                title=title,
+                style=style_n,
+                on_status=on_status,
             )
-            if result:
-                return result
         except Exception as e:
-            logger.warning(f"Native deep_translator failed: {e}")
-            emit_status(on_status, f"⚠️ Google Translate lỗi: {e}")
-
-        try:
-            result = self._translate_with_cli(
-                subtitle_file_path, target_lang, target_dir, 0, output_dir, on_status
-            )
-            if result:
-                return result
-        except Exception as e:
-            logger.warning(f"CLI subtitle translation failed: {e}")
-            emit_status(on_status, f"⚠️ pyVideoTrans CLI lỗi: {e}")
-
-        logger.error("All subtitle translators failed target-language validation")
+            logger.warning(f"Antigravity CLI translation failed: {e}")
+            emit_status(on_status, f"⚠️ agy timeout/lỗi: {e}")
+            return {
+                "status": "failed",
+                "srt_path": None,
+                "provider": "agy",
+                "warning": str(e),
+                "translate_fail_reason": "agy_failed",
+            }
+        if result and result.get("status") == "success" and result.get("srt_path"):
+            return result
+        warning = (result or {}).get("warning") or f"Subtitle output is not fully translated to {target_lang}"
+        logger.error("AGY subtitle translation failed validation")
         return {
             "status": "failed",
             "srt_path": None,
-            "warning": f"Subtitle output is not fully translated to {target_lang}",
+            "provider": "agy",
+            "warning": warning,
+            "translate_fail_reason": (result or {}).get("translate_fail_reason") or "agy_failed",
         }
 
     def text_to_speech(

@@ -202,8 +202,10 @@ export async function fetchOutputs() {
   return res.json();
 }
 
-export function getStreamUrl(mediaId) {
-  return `${getApiBase()}/videos/stream/${mediaId}`;
+export function getStreamUrl(mediaId, cacheKey) {
+  const base = `${getApiBase()}/videos/stream/${encodeURIComponent(mediaId)}`;
+  const bust = cacheKey || mediaId;
+  return bust ? `${base}?v=${encodeURIComponent(String(bust))}` : base;
 }
 
 export function getSubtitleUrl(mediaId) {
@@ -450,6 +452,19 @@ export async function syncFacebookPages() {
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Đồng bộ Fanpage thất bại');
+  }
+  return res.json();
+}
+
+export async function importFacebookPage(page) {
+  const res = await fetch(`${getApiBase()}/facebook/pages/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ page }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Không thêm được Fanpage');
   }
   return res.json();
 }

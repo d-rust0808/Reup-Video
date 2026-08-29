@@ -10,7 +10,14 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.models.job import OverlayItem, ReupConfig
-from app.services.overlay_service import append_overlay_filter, normalize_overlays, overlay_input_args
+from app.services.overlay_service import (
+    append_overlay_filter,
+    append_plate_banner_filter,
+    normalize_overlays,
+    overlay_input_args,
+    overlays_for_job,
+    split_master_and_plate_overlays,
+)
 
 
 def _touch_png(path):
@@ -144,6 +151,65 @@ def test_ensure_caption_cover_banner_dedupes_logo(tmp_path):
     assert len(paths) == 1
     assert "overlay=0:H-h" in fc
     assert "crop=690:" in fc
+
+
+def test_split_defers_banners_to_plate_when_fill_and_landscape(tmp_path):
+    banner = _touch_png(tmp_path / "banner.png")
+    logo = _touch_png(tmp_path / "logo.png")
+    items = [
+        {"image_path": banner, "kind": "banner", "band_h": 0.30},
+        {"image_path": logo, "kind": "logo", "x": 0.1, "y": 0.1, "w": 0.2},
+    ]
+    master, plate = split_master_and_plate_overlays(items, canvas_fill=0.8, src_w=1920, src_h=1080)
+    assert [m["kind"] for m in master] == ["logo"]
+    assert [p["kind"] for p in plate] == ["banner"]
+
+    kept, empty = split_master_and_plate_overlays(items, canvas_fill=0, src_w=1920, src_h=1080)
+    assert empty == []
+    assert any(m["kind"] == "banner" for m in kept)
+
+    portrait, no_plate = split_master_and_plate_overlays(items, canvas_fill=1, src_w=1080, src_h=1920)
+    assert no_plate == []
+    assert any(m["kind"] == "banner" for m in portrait)
+
+
+def test_overlays_for_job_defers_caption_cover_image(tmp_path):
+    png = _touch_png(tmp_path / "cover.png")
+    cfg = ReupConfig(
+        caption_cover="image",
+        caption_cover_image=png,
+        subtitle_bottom_crop=0.30,
+        canvas_fill=0.7,
+        overlays=[],
+    )
+    master, plate = overlays_for_job(cfg, 1920, 1080)
+    assert master == []
+    assert len(plate) == 1
+    assert plate[0]["kind"] == "banner"
+
+    youtube_only = cfg.model_copy(update={"target_platforms": ["youtube"]})
+    kept, empty = overlays_for_job(youtube_only, 1920, 1080)
+    assert empty == []
+    assert len(kept) == 1
+    assert kept[0]["kind"] == "banner"
+
+    no_fill = cfg.model_copy(update={"canvas_fill": 0})
+    master0, plate0 = overlays_for_job(no_fill, 1920, 1080)
+    assert master0 == []
+    assert len(plate0) == 1
+
+
+def test_plate_banner_covers_full_canvas_width(tmp_path):
+    png = _touch_png(tmp_path / "banner.png")
+    items = normalize_overlays([{"image_path": png, "kind": "banner", "band_h": 0.30}])
+    fc, paths = append_plate_banner_filter(
+        "[0:v]null[v_out]", items, 1, 1080, 1920, plate_y=608, plate_h=1312
+    )
+    assert paths == [str(png)] or paths[0].endswith("banner.png")
+    assert "force_original_aspect_ratio=increase" in fc
+    assert "crop=1080:1312" in fc
+    assert "overlay=0:608" in fc
+    assert "(W-w)/2" not in fc
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")

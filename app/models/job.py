@@ -172,7 +172,7 @@ class ReupConfig(BaseModel):
     )
     vietsub_style: str = Field(
         default="dub",
-        description="dub (gốc) | narrator (kể chuyện) | funny (vui nhộn) | recap | auto",
+        description="dub (gốc) | narrator (kể chuyện) | funny (vui nhộn)",
     )
     text_cover_vf: str = Field(default="", description="Extra ffmpeg vf nodes to cover mid-frame source text")
     caption_cover: str = Field(
@@ -196,7 +196,7 @@ class ReupConfig(BaseModel):
     )
     burn_subtitles: bool = Field(default=True, description="Includes translated Vietnamese subtitles in the output")
     subtitle_mode: str = Field(
-        default="soft",
+        default="hard",
         description="Subtitle output mode: 'soft' (toggleable CC), 'hard' (burned in), or 'off'",
     )
     tts_voice: str = Field(default="vieneu:Trúc Ly", description="Voice model/role for TTS synthesis")
@@ -211,6 +211,113 @@ class ReupConfig(BaseModel):
         lt=0.5,
         description="Crop this fraction off the bottom to drop burned-in source subtitles (0.13 = 13%)",
     )
+    canvas_fill: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="0=centered letterbox. 1=keep picture size, shift up, extra bottom pad for logo.",
+    )
+    subtitle_y: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="0=auto. Else Vietsub center as a fraction from the top of the picture.",
+    )
+    cover_y: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Unused compat field. Color cover uses cover_pad from the picture bottom.",
+    )
+    cover_pad: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=0.40,
+        description="Color-cover gap from the picture bottom, as a fraction of min(width,height).",
+    )
+    subtitle_box_w: float = Field(
+        default=0.88,
+        ge=0.40,
+        le=1.0,
+        description="Vietsub background width as a fraction of the picture. Independent of cue length.",
+    )
+    subtitle_box_h: float = Field(
+        default=0.08,
+        ge=0.0,
+        le=0.22,
+        description="Vietsub background height as a fraction of the picture. 0 = no plate (outline text only).",
+    )
+
+    @field_validator("cover_y", "subtitle_y", mode="before")
+    @classmethod
+    def _normalize_subtitle_y(cls, v: Any) -> float:
+        if v is None or v == "":
+            return 0.0
+        try:
+            val = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        if val > 1.0:
+            val = val / 100.0
+        if val < 0.04:
+            return 0.0
+        return max(0.0, min(1.0, val))
+
+    @field_validator("subtitle_box_w", mode="before")
+    @classmethod
+    def _normalize_subtitle_box_w(cls, v: Any) -> float:
+        if v is None or v == "":
+            return 0.88
+        try:
+            val = float(v)
+        except (TypeError, ValueError):
+            return 0.88
+        if val > 1.0:
+            val = val / 100.0
+        if val <= 0:
+            return 0.88
+        return max(0.40, min(1.0, val))
+
+    @field_validator("subtitle_box_h", mode="before")
+    @classmethod
+    def _normalize_subtitle_box_h(cls, v: Any) -> float:
+        if v is None or v == "":
+            return 0.08
+        try:
+            val = float(v)
+        except (TypeError, ValueError):
+            return 0.08
+        if val > 1.0:
+            val = val / 100.0
+        if val < 0:
+            return 0.0
+        return max(0.0, min(0.22, val))
+
+    @field_validator("cover_pad", mode="before")
+    @classmethod
+    def _normalize_cover_pad(cls, v: Any) -> float:
+        if v is None or v == "":
+            return 0.0
+        try:
+            val = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        if val > 1.0:
+            val = val / 100.0
+        return max(0.0, min(0.40, val))
+
+    @field_validator("canvas_fill", mode="before")
+    @classmethod
+    def _normalize_canvas_fill(cls, v: Any) -> float:
+        if v is None or v == "":
+            return 0.0
+        try:
+            val = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        if val > 1.0:
+            val = val / 100.0
+        return max(0.0, min(1.0, val))
     trim_start_sec: float = Field(
         default=0.0,
         ge=0.0,
@@ -262,7 +369,7 @@ class ReupConfig(BaseModel):
     @model_validator(mode="after")
 
     def _apply_platform_presets(self) -> "ReupConfig":
-        subtitle_mode = (self.subtitle_mode or "soft").strip().lower()
+        subtitle_mode = (self.subtitle_mode or "hard").strip().lower()
         if not self.burn_subtitles or subtitle_mode == "off":
             self.burn_subtitles = False
             self.subtitle_mode = "off"
@@ -341,6 +448,8 @@ class JobStatus(BaseModel):
     reup_config: ReupConfig = Field(default_factory=ReupConfig, description="Reup transformation parameters")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Creation timestamp")
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Last update timestamp")
+    quality_status: str = Field(default="PENDING", description="PENDING | PASS | NEEDS_REVIEW")
+    quality_report: str = Field(default="{}", description="JSON quality report without secrets")
 
     def to_sqlite_dict(self) -> Dict[str, Any]:
         """Converts JobStatus to SQLite flat dict format with JSON-serialized configs and ISO datetimes."""
@@ -359,6 +468,8 @@ class JobStatus(BaseModel):
             "reup_config": self.reup_config.model_dump_json(),
             "created_at": created_str,
             "updated_at": updated_str,
+            "quality_status": self.quality_status,
+            "quality_report": self.quality_report,
         }
 
     @classmethod

@@ -95,6 +95,57 @@ def check_demucs_available() -> bool:
     return False
 
 
+def probe_audio_sample_rate(audio_path: str) -> Optional[int]:
+    """Return the first audio stream's sample rate, or None if it cannot be read."""
+    if not audio_path or not os.path.exists(audio_path):
+        return None
+    ffprobe_bin = find_ffprobe_binary()
+    if ffprobe_bin:
+        try:
+            cmd = [
+                ffprobe_bin, "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=sample_rate",
+                "-of", "csv=p=0",
+                audio_path,
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            raw = (res.stdout or "").strip().splitlines()
+            if res.returncode == 0 and raw and raw[0].isdigit():
+                rate = int(raw[0])
+                if 8000 <= rate <= 192000:
+                    return rate
+        except Exception as exc:
+            logger.warning(f"Failed to probe audio sample rate via ffprobe: {exc}")
+    return None
+
+
+def probe_stream_duration_sec(media_path: str, stream_spec: str = "v:0") -> float:
+    """Duration of one stream in seconds, or 0 if unknown."""
+    if not media_path or not os.path.exists(media_path):
+        return 0.0
+    ffprobe_bin = find_ffprobe_binary()
+    if not ffprobe_bin:
+        return 0.0
+    try:
+        cmd = [
+            ffprobe_bin, "-v", "error",
+            "-select_streams", stream_spec,
+            "-show_entries", "stream=duration",
+            "-of", "csv=p=0",
+            media_path,
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        raw = (res.stdout or "").strip().splitlines()
+        if res.returncode == 0 and raw:
+            duration = float(raw[0])
+            if duration > 0:
+                return duration
+    except Exception:
+        pass
+    return 0.0
+
+
 def probe_audio_channels(audio_path: str) -> int:
     """
     Probes audio file to determine number of channels (1 for mono, 2 for stereo).

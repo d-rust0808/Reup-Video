@@ -175,7 +175,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             original_vocal_volume: opts.original_vocal_volume ?? 0.10,
             enable_lipsync: opts.enable_lipsync !== false,
             burn_subtitles: opts.burn_subtitles !== false,
-            subtitle_mode: opts.burn_subtitles === false ? 'off' : (opts.subtitle_mode || 'soft'),
+            subtitle_mode: opts.burn_subtitles === false ? 'off' : (opts.subtitle_mode || 'hard'),
             target_platforms: opts.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
             bgm_path: opts.bgm_path || opts.bgm_id,
             bgm_volume: opts.bgm_volume ?? 0.85,
@@ -334,10 +334,21 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
           watermark: { method: opts.wm_method || 'auto', roi: [0, 0, 0, 0], radius: 5 },
           reup: {
             hflip: opts.hflip !== false,
-            speed_ratio: opts.speed_ratio || 1.03,
+            speed_ratio: Number(opts.speed_ratio) || 1.03,
+            speed_factor: Number(opts.speed_ratio) || 1.03,
             pitch_shift: opts.pitch_shift !== false,
             crop_percent: (Number(opts.crop_percent) || 2) / 100,
             subtitle_bottom_crop: (Number(opts.subtitle_bottom_crop) || 0) / 100,
+            canvas_fill: Math.max(0, Math.min(1, Number(opts.canvas_fill) || 0)),
+            subtitle_y: Math.max(0, Math.min(1, Number(opts.subtitle_y) || 0)),
+            subtitle_box_w: Math.max(0.40, Math.min(1, Number(opts.subtitle_box_w) || 0.88)),
+            subtitle_box_h: (() => {
+              const n = Number(opts.subtitle_box_h);
+              if (!Number.isFinite(n)) return 0.08;
+              const x = n > 1 ? n / 100 : n;
+              return Math.max(0, Math.min(0.22, x));
+            })(),
+            cover_pad: Math.max(0, Math.min(0.40, Number(opts.cover_pad || 0) / 100)),
             caption_cover: opts.caption_cover || 'off',
             caption_cover_image: opts.caption_cover_image || '',
             film_grain: opts.film_grain ?? 3,
@@ -350,7 +361,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             enable_lipsync: opts.enable_lipsync !== false,
             vietsub_style: opts.vietsub_style || 'dub',
             burn_subtitles: opts.burn_subtitles !== false,
-            subtitle_mode: opts.burn_subtitles === false ? 'off' : (opts.subtitle_mode || 'soft'),
+            subtitle_mode: opts.burn_subtitles === false ? 'off' : (opts.subtitle_mode || 'hard'),
             tts_voice: opts.tts_voice || 'vieneu:Trúc Ly',
             tts_engine: opts.tts_engine || 'vieneu',
             target_lang: 'vi',

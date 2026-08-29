@@ -90,6 +90,12 @@ class ReupPayload(BaseModel):
     bgm_volume: Optional[float] = 0.85
     target_platforms: Optional[List[str]] = None
     subtitle_bottom_crop: Optional[float] = 0.0
+    canvas_fill: Optional[float] = 0.0
+    subtitle_y: Optional[float] = 0.0
+    cover_y: Optional[float] = 0.0
+    cover_pad: Optional[float] = 0.0
+    subtitle_box_w: Optional[float] = 0.88
+    subtitle_box_h: Optional[float] = 0.08
     caption_cover: Optional[str] = "off"
     caption_cover_image: Optional[str] = ""
     caption_cover_url: Optional[str] = ""
@@ -97,6 +103,114 @@ class ReupPayload(BaseModel):
     original_vocal_volume: Optional[float] = 0.10
     trim_start_sec: Optional[float] = 0.0
     trim_end_sec: Optional[float] = 0.0
+
+
+def resolve_submitted_speed(req: "ProcessJobRequest") -> float:
+    """Pick the client speed without treating the ReupPayload default 1.03 as a lock."""
+    values = []
+    if req.reup is not None:
+        values.extend([req.reup.speed_factor, req.reup.speed_ratio])
+    values.append(getattr(req, "speed_ratio", None))
+    values.append(getattr(req, "speed_factor", None))
+    for raw in values:
+        if raw is None:
+            continue
+        try:
+            speed = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if 0.1 < speed <= 10.0:
+            return speed
+    return 1.03
+
+
+def resolve_submitted_canvas_fill(req: "ProcessJobRequest") -> float:
+    raw = None
+    if req.reup is not None and getattr(req.reup, "canvas_fill", None) is not None:
+        raw = req.reup.canvas_fill
+    elif getattr(req, "canvas_fill", None) is not None:
+        raw = req.canvas_fill
+    try:
+        val = float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if val > 1.0:
+        val = val / 100.0
+    return max(0.0, min(1.0, val))
+
+
+def _resolve_frac(req: "ProcessJobRequest", name: str) -> float:
+    raw = None
+    if req.reup is not None and getattr(req.reup, name, None) is not None:
+        raw = getattr(req.reup, name)
+    elif getattr(req, name, None) is not None:
+        raw = getattr(req, name)
+    try:
+        val = float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if val > 1.0:
+        val = val / 100.0
+    if val < 0.04:
+        return 0.0
+    return max(0.0, min(1.0, val))
+
+
+def resolve_submitted_subtitle_y(req: "ProcessJobRequest") -> float:
+    return _resolve_frac(req, "subtitle_y")
+
+
+def resolve_submitted_cover_y(req: "ProcessJobRequest") -> float:
+    return _resolve_frac(req, "cover_y")
+
+
+def _resolve_box_frac(
+    req: "ProcessJobRequest",
+    name: str,
+    default: float,
+    lo: float,
+    hi: float,
+    allow_zero: bool = False,
+) -> float:
+    raw = None
+    if req.reup is not None and getattr(req.reup, name, None) is not None:
+        raw = getattr(req.reup, name)
+    elif getattr(req, name, None) is not None:
+        raw = getattr(req, name)
+    try:
+        val = float(raw if raw is not None else default)
+    except (TypeError, ValueError):
+        return default
+    if val > 1.0:
+        val = val / 100.0
+    if val < 0:
+        return default
+    if val == 0:
+        return 0.0 if allow_zero else default
+    return max(lo, min(hi, val))
+
+
+def resolve_submitted_subtitle_box_w(req: "ProcessJobRequest") -> float:
+    return _resolve_box_frac(req, "subtitle_box_w", 0.88, 0.40, 1.0)
+
+
+def resolve_submitted_subtitle_box_h(req: "ProcessJobRequest") -> float:
+    return _resolve_box_frac(req, "subtitle_box_h", 0.08, 0.0, 0.22, allow_zero=True)
+
+
+def resolve_submitted_cover_pad(req: "ProcessJobRequest") -> float:
+    raw = None
+    if req.reup is not None and getattr(req.reup, "cover_pad", None) is not None:
+        raw = req.reup.cover_pad
+    elif getattr(req, "cover_pad", None) is not None:
+        raw = req.cover_pad
+    try:
+        val = float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if val > 1.0:
+        val = val / 100.0
+    return max(0.0, min(0.40, val))
 
 
 class ProcessJobRequest(BaseModel):
@@ -152,6 +266,12 @@ class ProcessJobRequest(BaseModel):
     bgm_volume: Optional[float] = 0.85
     target_platforms: Optional[List[str]] = None
     subtitle_bottom_crop: Optional[float] = 0.0
+    canvas_fill: Optional[float] = 0.0
+    subtitle_y: Optional[float] = 0.0
+    cover_y: Optional[float] = 0.0
+    cover_pad: Optional[float] = 0.0
+    subtitle_box_w: Optional[float] = 0.88
+    subtitle_box_h: Optional[float] = 0.08
     caption_cover: Optional[str] = "off"
     caption_cover_image: Optional[str] = ""
     caption_cover_url: Optional[str] = ""
@@ -262,9 +382,7 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
     )
 
     reup_hflip = req.reup.hflip if req.reup and req.reup.hflip is not None else req.hflip
-    reup_speed = (
-        req.reup.speed_ratio or req.reup.speed_factor if req.reup else req.speed_ratio
-    ) or 1.03
+    reup_speed = resolve_submitted_speed(req)
     reup_pitch = req.reup.pitch_shift if req.reup and req.reup.pitch_shift is not None else req.pitch_shift
     
     reup_crop = req.reup.crop_percent if req.reup and req.reup.crop_percent is not None else req.crop_percent
@@ -292,7 +410,7 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         reup_burn = req.reup.burn_subtitles
     elif getattr(req, "burn_subtitles", None) is not None:
         reup_burn = req.burn_subtitles
-    reup_subtitle_mode = "soft"
+    reup_subtitle_mode = "hard"
     if req.reup and getattr(req.reup, "subtitle_mode", None):
         reup_subtitle_mode = req.reup.subtitle_mode
     elif getattr(req, "subtitle_mode", None):
@@ -418,6 +536,12 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         pitch_shift=reup_pitch if reup_pitch is not None else True,
         crop_percent=reup_crop,
         subtitle_bottom_crop=reup_bottom_crop,
+        canvas_fill=resolve_submitted_canvas_fill(req),
+        subtitle_y=resolve_submitted_subtitle_y(req),
+        cover_y=resolve_submitted_cover_y(req),
+        cover_pad=resolve_submitted_cover_pad(req),
+        subtitle_box_w=resolve_submitted_subtitle_box_w(req),
+        subtitle_box_h=resolve_submitted_subtitle_box_h(req),
         caption_cover=(
             (req.reup.caption_cover if req.reup and getattr(req.reup, "caption_cover", None) else None)
             or getattr(req, "caption_cover", None)

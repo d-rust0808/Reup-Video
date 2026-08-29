@@ -7,7 +7,42 @@ import sqlite3
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.models.job import ReupConfig
-from app.services.platform_export import fit_vf, normalize_platforms, PRESETS
+from app.services.platform_export import (
+    build_variant_filters,
+    canvas_layout,
+    fit_vf,
+    normalize_platforms,
+    PRESETS,
+)
+
+
+def test_process_payload_keeps_canvas_fill():
+    from app.api.process import (
+        ProcessJobRequest,
+        ReupPayload,
+        resolve_submitted_canvas_fill,
+        resolve_submitted_subtitle_y,
+        resolve_submitted_cover_pad,
+        resolve_submitted_subtitle_box_w,
+        resolve_submitted_subtitle_box_h,
+    )
+
+    nested = ProcessJobRequest(reup=ReupPayload(canvas_fill=0.77, caption_cover="image", subtitle_y=0.72))
+    assert abs(resolve_submitted_canvas_fill(nested) - 0.77) < 1e-6
+    assert abs(resolve_submitted_subtitle_y(nested) - 0.72) < 1e-6
+    padded = ProcessJobRequest(reup=ReupPayload(cover_pad=0.12, caption_cover="black_solid"))
+    assert abs(resolve_submitted_cover_pad(padded) - 0.12) < 1e-6
+    percent = ProcessJobRequest(cover_pad=8)
+    assert abs(resolve_submitted_cover_pad(percent) - 0.08) < 1e-6
+    flat = ProcessJobRequest(canvas_fill=80)
+    assert abs(resolve_submitted_canvas_fill(flat) - 0.8) < 1e-6
+    missing = ProcessJobRequest()
+    assert resolve_submitted_canvas_fill(missing) == 0.0
+    boxed = ProcessJobRequest(reup=ReupPayload(subtitle_box_w=0.9, subtitle_box_h=0.12))
+    assert abs(resolve_submitted_subtitle_box_w(boxed) - 0.9) < 1e-6
+    assert abs(resolve_submitted_subtitle_box_h(boxed) - 0.12) < 1e-6
+    off_plate = ProcessJobRequest(reup=ReupPayload(subtitle_box_h=0))
+    assert resolve_submitted_subtitle_box_h(off_plate) == 0.0
 
 
 def test_normalize_platforms_aliases():
@@ -24,6 +59,84 @@ def test_fit_vf_is_contain_pad():
     vf = fit_vf(1080, 1920)
     assert "scale=1080:1920:force_original_aspect_ratio=decrease" in vf
     assert "pad=1080:1920" in vf
+
+
+def test_fit_vf_fill_keeps_contain_and_shifts_pad():
+    vf = fit_vf(1080, 1920, fill=1)
+    assert "force_original_aspect_ratio=decrease" in vf
+    assert "force_original_aspect_ratio=increase" not in vf
+    assert "crop=" not in vf
+    assert "pad=1080:1920" in vf
+    assert "(1-1.0000)" in vf
+
+
+def test_fit_vf_mid_fill_scales_then_pads():
+    vf = fit_vf(1080, 1920, fill=0.4)
+    assert "force_original_aspect_ratio=decrease" in vf
+    assert "pad=1080:1920" in vf
+    assert "0.4000" in vf
+    assert "crop=" not in vf
+
+
+def test_canvas_layout_fill_grows_plate_without_scaling_picture():
+    contain = canvas_layout(1920, 1080, 1080, 1920, 0)
+    tall = canvas_layout(1920, 1080, 1080, 1920, 1)
+    assert abs(tall["fitted_w"] - contain["fitted_w"]) < 0.5
+    assert abs(tall["fitted_h"] - contain["fitted_h"]) < 0.5
+    assert tall["pad_y"] < 1
+    assert tall["plate_h"] > contain["fitted_h"]
+
+
+def test_canvas_layout_caps_plate_to_logo_aspect():
+    contain = canvas_layout(1920, 1080, 1080, 1920, 0, logo_aspect=16 / 9)
+    over = canvas_layout(1920, 1080, 1080, 1920, 0.77, logo_aspect=16 / 9)
+    full = canvas_layout(1920, 1080, 1080, 1920, 1, logo_aspect=16 / 9)
+    rest = 1920 - contain["fitted_h"]
+    natural = contain["fitted_w"] / (16 / 9)
+    assert abs(over["fitted_h"] - contain["fitted_h"]) < 0.5
+    assert over["plate_h"] <= natural + 1
+    assert over["plate_h"] < rest * 0.77 - 10
+    assert abs(over["plate_h"] - full["plate_h"]) < 0.5
+    assert over["pad_y"] > 100
+    leftover = rest - over["plate_h"]
+    assert abs(over["pad_y"] - leftover / 2) < 1
+
+
+def test_build_variant_filters_caps_plate_to_banner_aspect(tmp_path):
+    from PIL import Image
+
+    banner = tmp_path / "wide.png"
+    Image.new("RGB", (1600, 900), (20, 20, 20)).save(banner)
+    spec = build_variant_filters(
+        1920, 1080, 1080, 1920, fill=0.77,
+        plate_banners=[{"image_path": str(banner), "kind": "banner", "band_h": 0.3}],
+    )
+    assert spec["mode"] == "complex"
+    layout = canvas_layout(1920, 1080, 1080, 1920, 0.77, logo_aspect=1600 / 900)
+    assert "force_original_aspect_ratio=increase" in spec["filter_complex"]
+    assert "crop=" in spec["filter_complex"]
+    assert "overlay=0:" in spec["filter_complex"]
+    assert layout["plate_h"] < (1920 - layout["fitted_h"]) * 0.77 - 10
+
+
+def test_build_variant_filters_plate_uses_full_width_cover(tmp_path):
+    banner = tmp_path / "logo.png"
+    banner.write_bytes(b"\x89PNG\r\n\x1a\n")
+    spec = build_variant_filters(
+        1920, 1080, 1080, 1920, fill=1,
+        plate_banners=[{"image_path": str(banner), "kind": "banner", "band_h": 0.3}],
+    )
+    assert spec["mode"] == "complex"
+    fc = spec["filter_complex"]
+    assert "force_original_aspect_ratio=increase" in fc
+    assert "crop=" in fc
+    assert "overlay=0:" in fc
+    landscape = build_variant_filters(
+        1920, 1080, 1920, 1080, fill=1,
+        plate_banners=[{"image_path": str(banner), "kind": "banner", "band_h": 0.3}],
+    )
+    assert landscape["mode"] == "complex"
+    assert "overlay=0:H-h" in landscape["filter_complex"]
 
 
 def test_reup_config_default_platforms():

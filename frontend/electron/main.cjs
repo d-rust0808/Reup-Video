@@ -111,6 +111,7 @@ if (process.platform === 'win32') {
 }
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 const ROOT_DIR = isDev
   ? path.resolve(__dirname, '..', '..')
   : (fs.existsSync(path.join(process.resourcesPath, 'app')) ? process.resourcesPath : path.resolve(__dirname, '..', '..'));

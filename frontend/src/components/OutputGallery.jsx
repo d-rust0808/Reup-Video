@@ -292,8 +292,13 @@ export function OutputGallery() {
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
           {outputList.map((item, idx) => {
             const jobId = item.job_id || item.filename;
+            const streamId = item.stream_job_id || jobId;
             const isSelected = selectedIds.includes(jobId);
-            const plat = (item.platform || (String(item.filename || jobId).match(/\.([a-z_]+)\.mp4$/i) || [])[1] || '').toLowerCase();
+            const plat = (
+              item.play_platform
+              || (String(item.filename || streamId).match(/\.([a-z_]+)\.mp4$/i) || [])[1]
+              || ''
+            ).toLowerCase();
             const platLabel = {
               tiktok: 'TikTok 9:16',
               youtube_shorts: 'YT Shorts 9:16',
@@ -313,9 +318,13 @@ export function OutputGallery() {
                     : 'clean-card clean-card-hover'
                 }`}
               >
-                <div className="rounded-xl overflow-hidden bg-slate-950 aspect-video">
+                <div
+                  className={`rounded-xl overflow-hidden bg-slate-950 ${
+                    platLabel && platLabel.includes('9:16') ? 'aspect-[9/16] max-h-72 mx-auto' : 'aspect-video'
+                  }`}
+                >
                   <video
-                    src={getStreamUrl(jobId)}
+                    src={getStreamUrl(streamId)}
                     muted
                     playsInline
                     preload="metadata"

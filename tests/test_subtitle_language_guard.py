@@ -182,29 +182,19 @@ def test_detached_question_particle_is_merged_into_previous_cue():
 
 
 def test_contiguous_asr_fragments_are_grouped_before_ai_translation():
-    merged = _merge_fragmented_cues([
-        {
-            "index": 1,
-            "start_time": 0.0,
-            "end_time": 1.8,
-            "duration": 1.8,
-            "text": "那一天我和父亲彻底决",
-        },
-        {
-            "index": 2,
-            "start_time": 1.8,
-            "end_time": 2.2,
-            "duration": 0.4,
-            "text": "裂了",
-        },
+    from app.services.vietsub_rules import regroup_words_to_sentences
+
+    merged = regroup_words_to_sentences([
+        {"text": "那一天我和父亲彻底决", "start": 0.0, "end": 1.8},
+        {"text": "裂了", "start": 1.8, "end": 2.2},
     ])
 
     assert len(merged) == 1
     assert merged[0]["text"] == "那一天我和父亲彻底决裂了"
 
 
-def test_deepseek_translation_is_localized_before_writing_srt(monkeypatch, tmp_path):
-    from app.services.ai_scriptwriter_service import ai_scriptwriter_service
+def test_agy_translation_merges_particles_before_writing_srt(monkeypatch, tmp_path):
+    from app.services import agy_cli_service
     from app.services.tts_service import parse_srt_segments
 
     source = tmp_path / "source.srt"
@@ -214,14 +204,16 @@ def test_deepseek_translation_is_localized_before_writing_srt(monkeypatch, tmp_p
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(ai_scriptwriter_service, "is_available", lambda: True)
-    monkeypatch.setenv("SUBTITLE_TRANSLATOR", "deepseek")
+    def fake_translate(texts, target_lang="vi", **kwargs):
+        assert texts == ["你这个月工资发下来了吗"]
+        assert kwargs.get("style") == "dub"
+        return ["Lương tháng này về chưa?"]
 
-    def fake_localize(segments, **_kwargs):
-        assert segments[0]["text"] == "你这个月工资发下来了吗"
-        return [{**segments[0], "translated_text": "Lương tháng này về chưa?"}]
-
-    monkeypatch.setattr(ai_scriptwriter_service, "localize_script", fake_localize)
+    monkeypatch.setattr(agy_cli_service, "is_available", lambda: True)
+    monkeypatch.setattr(agy_cli_service, "translate_cues", fake_translate)
+    monkeypatch.setattr(agy_cli_service, "default_model", lambda: "gemini-test")
+    monkeypatch.setattr(PyVideoTransService, "_vietsub_cache_load", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(PyVideoTransService, "_vietsub_cache_store", lambda *_args, **_kwargs: None)
 
     result = PyVideoTransService().translate_subtitles(
         str(source),
@@ -231,82 +223,85 @@ def test_deepseek_translation_is_localized_before_writing_srt(monkeypatch, tmp_p
     )
 
     output_segments = parse_srt_segments(result["srt_path"])
-    assert result["provider"] == "deepseek"
+    assert result["provider"] == "agy"
     assert result["localized"] is True
     assert [segment["text"] for segment in output_segments] == ["Lương tháng này về chưa?"]
     assert output_segments[0]["end_time"] == 2.2
 
 
-def test_invalid_deepseek_rewrite_falls_through_to_google(monkeypatch, tmp_path):
-    from app.services.ai_scriptwriter_service import ai_scriptwriter_service
+def test_invalid_agy_rewrite_does_not_fall_through_to_google(monkeypatch, tmp_path):
+    from app.services import agy_cli_service
 
     source = tmp_path / "source.srt"
     source.write_text(
         "1\n00:00:00,000 --> 00:00:01,000\n你好\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("SUBTITLE_TRANSLATOR", "deepseek")
-    monkeypatch.setattr(ai_scriptwriter_service, "is_available", lambda: True)
+    google_calls = {"n": 0}
+
+    class FakeTranslator:
+        def __init__(self, source, target):
+            google_calls["n"] += 1
+
+        def translate(self, text):
+            google_calls["n"] += 1
+            return "Xin chào"
+
+    monkeypatch.setattr(agy_cli_service, "is_available", lambda: True)
+    monkeypatch.setattr(agy_cli_service, "default_model", lambda: "gemini-test")
     monkeypatch.setattr(
-        ai_scriptwriter_service,
-        "localize_script",
-        lambda segments, **_kwargs: [{**segments[0], "translated_text": "?"}],
+        agy_cli_service,
+        "translate_cues",
+        lambda *_args, **_kwargs: ["?"],
     )
-
-    class FakeTranslator:
-        def __init__(self, source, target):
-            self.source = source
-            self.target = target
-
-        def translate(self, text):
-            return "Xin chào"
-
     monkeypatch.setattr("deep_translator.GoogleTranslator", FakeTranslator)
-    monkeypatch.setattr(PyVideoTransService, "_translate_with_cli", lambda *args, **kwargs: None)
     result = PyVideoTransService().translate_subtitles(
         str(source),
         target_lang="vi",
         output_dir=str(tmp_path),
     )
 
-    assert result["status"] == "success"
-    assert result["provider"] == "google"
-    assert "Xin chào" in Path(result["srt_path"]).read_text(encoding="utf-8")
+    assert result["status"] == "failed"
+    assert result["provider"] == "agy"
+    assert result.get("srt_path") is None
+    assert google_calls["n"] == 0
 
 
-def test_deepseek_rewrite_exception_blocks_machine_translation_fallback(monkeypatch, tmp_path):
-    from app.services.ai_scriptwriter_service import ai_scriptwriter_service
+def test_agy_exception_does_not_fall_through_to_google(monkeypatch, tmp_path):
+    from app.services import agy_cli_service
 
     source = tmp_path / "source.srt"
     source.write_text(
         "1\n00:00:00,000 --> 00:00:01,000\n你好\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("SUBTITLE_TRANSLATOR", "deepseek")
-    monkeypatch.setattr(ai_scriptwriter_service, "is_available", lambda: True)
-    def fail_localize(*_args, **_kwargs):
-        raise RuntimeError("temporary DeepSeek QA failure")
-
-    monkeypatch.setattr(ai_scriptwriter_service, "localize_script", fail_localize)
+    google_calls = {"n": 0}
 
     class FakeTranslator:
         def __init__(self, source, target):
-            self.source = source
-            self.target = target
+            google_calls["n"] += 1
 
         def translate(self, text):
+            google_calls["n"] += 1
             return "Xin chào"
 
+    monkeypatch.setattr(agy_cli_service, "is_available", lambda: True)
+    monkeypatch.setattr(agy_cli_service, "default_model", lambda: "gemini-test")
+
+    def fail_translate(*_args, **_kwargs):
+        raise RuntimeError("agy CLI timed out after 90s")
+
+    monkeypatch.setattr(agy_cli_service, "translate_cues", fail_translate)
     monkeypatch.setattr("deep_translator.GoogleTranslator", FakeTranslator)
-    monkeypatch.setattr(PyVideoTransService, "_translate_with_cli", lambda *args, **kwargs: None)
     result = PyVideoTransService().translate_subtitles(
         str(source),
         target_lang="vi",
         output_dir=str(tmp_path),
     )
 
-    assert result["status"] == "success"
-    assert result["provider"] == "google"
+    assert result["status"] == "failed"
+    assert result["provider"] == "agy"
+    assert google_calls["n"] == 0
 
 
 def test_mixed_vietnamese_srt_is_rejected(tmp_path):
@@ -346,55 +341,40 @@ def test_deepseek_billing_error_is_treated_as_unavailable():
     assert not _is_ai_unavailable_error("AI không tạo được kịch bản Việt hợp lệ")
 
 
-def test_deepseek_billing_error_allows_google_fallback(monkeypatch, tmp_path):
-    from app.services.ai_scriptwriter_service import ai_scriptwriter_service
+def test_missing_agy_does_not_use_google(monkeypatch, tmp_path):
+    from app.services import agy_cli_service
 
     source = tmp_path / "source.srt"
     source.write_text(
         "1\n00:00:00,000 --> 00:00:01,000\n你好\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(ai_scriptwriter_service, "is_available", lambda: True)
-
-    def fake_localize(segments, **_kwargs):
-        ai_scriptwriter_service.last_error = (
-            "DeepSeek API trả HTTP 402: tài khoản hoặc API key không còn quota/thanh toán."
-        )
-        return [{**segments[0], "translated_text": segments[0]["text"]}]
+    google_calls = {"n": 0}
 
     class FakeTranslator:
         def __init__(self, source, target):
-            self.source = source
-            self.target = target
+            google_calls["n"] += 1
 
         def translate(self, text):
-            mapping = {"你好": "Xin chào"}
-            if "\n" in str(text):
-                return "\n".join(mapping.get(part, "Xin chào") for part in str(text).split("\n"))
-            return mapping.get(str(text), "Xin chào")
+            google_calls["n"] += 1
+            return "Xin chào"
 
-    monkeypatch.setattr(ai_scriptwriter_service, "localize_script", fake_localize)
+    monkeypatch.setattr(agy_cli_service, "is_available", lambda: False)
     monkeypatch.setattr("deep_translator.GoogleTranslator", FakeTranslator)
-    monkeypatch.setattr(PyVideoTransService, "_translate_with_cli", lambda *args, **kwargs: None)
-    monkeypatch.setenv("SUBTITLE_TRANSLATOR", "google")
-
     result = PyVideoTransService().translate_subtitles(
         str(source),
         target_lang="vi",
         output_dir=str(tmp_path),
     )
 
-    assert result["status"] == "success"
-    assert result["srt_path"]
-    assert subtitle_matches_target_language(result["srt_path"], "vi") is True
-    assert "Xin chào" in Path(result["srt_path"]).read_text(encoding="utf-8")
+    assert result["status"] == "failed"
+    assert result["translate_fail_reason"] == "agy_missing"
+    assert google_calls["n"] == 0
 
 
-def test_default_translator_is_system_google_cli():
+def test_default_translator_is_agy_only():
     engine = PyVideoTransService()._subtitle_translator_engine()
-    assert engine in ("agy", "cli", "google")
-    from app.config import settings
-    assert (os.getenv("SUBTITLE_TRANSLATOR") or settings.SUBTITLE_TRANSLATOR) in ("agy", "cli", "google")
+    assert engine == "agy"
 
 
 def test_resolve_agy_skips_missing_configured_bin(monkeypatch, tmp_path):
@@ -530,8 +510,110 @@ def test_stt_cache_roundtrip(tmp_path, monkeypatch):
     assert "Xin chào" in dest.read_text(encoding="utf-8")
 
 
-def test_google_keeps_vietnamese_cues_and_drops_leftover_chinese(monkeypatch, tmp_path):
-    from app.services.ai_scriptwriter_service import ai_scriptwriter_service
+def test_translate_reflows_unfinished_vietnamese_across_slide_cuts(monkeypatch, tmp_path):
+    from app.services import agy_cli_service
+    from app.services.tts_service import parse_srt_segments
+
+    source = tmp_path / "source.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:02,200\n第一句还没完\n\n"
+        "2\n00:00:02,200 --> 00:00:04,400\n第二句才结束\n",
+        encoding="utf-8",
+    )
+    first = "Line A, still going"
+    second = "to the period."
+
+    monkeypatch.setattr(agy_cli_service, "is_available", lambda: True)
+    monkeypatch.setattr(agy_cli_service, "default_model", lambda: "gemini-test")
+    monkeypatch.setattr(
+        agy_cli_service,
+        "translate_cues",
+        lambda *_args, **_kwargs: [first, second],
+    )
+    monkeypatch.setattr(PyVideoTransService, "_vietsub_cache_load", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(PyVideoTransService, "_vietsub_cache_store", lambda *_args, **_kwargs: None)
+
+    result = PyVideoTransService().translate_subtitles(
+        str(source),
+        target_lang="vi",
+        output_dir=str(tmp_path),
+        style="dub",
+    )
+    segments = parse_srt_segments(result["srt_path"])
+    assert len(segments) == 1
+    assert segments[0]["text"] == f"{first} {second}"
+    assert segments[0]["end_time"] == 4.4
+
+
+def test_translate_reflows_broken_vietnamese_across_four_second_slices(monkeypatch, tmp_path):
+    from app.services import agy_cli_service
+    from app.services.tts_service import parse_srt_segments
+
+    source = tmp_path / "source.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:04,400\n我一直以為新能源汽車要么充電要么加油但最近你有沒有發現假\n\n"
+        "2\n00:00:04,400 --> 00:00:08,860\n存這個詞突然火了起來央視財經頻頻報導\n",
+        encoding="utf-8",
+    )
+    first = "Tôi cứ nghĩ xe năng lượng mới chỉ sạc điện hoặc đổ xăng, nhưng dạo này bạn có thấy từ"
+    second = '"methanol" bỗng nhiên gây sốt, CCTV liên tục đưa tin.'
+
+    monkeypatch.setattr(agy_cli_service, "is_available", lambda: True)
+    monkeypatch.setattr(agy_cli_service, "default_model", lambda: "gemini-test")
+    monkeypatch.setattr(
+        agy_cli_service,
+        "translate_cues",
+        lambda *_args, **_kwargs: [first, second],
+    )
+    monkeypatch.setattr(PyVideoTransService, "_vietsub_cache_load", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(PyVideoTransService, "_vietsub_cache_store", lambda *_args, **_kwargs: None)
+
+    result = PyVideoTransService().translate_subtitles(
+        str(source),
+        target_lang="vi",
+        output_dir=str(tmp_path),
+        style="dub",
+    )
+    segments = parse_srt_segments(result["srt_path"])
+    assert len(segments) == 1
+    assert "methanol" in segments[0]["text"]
+    assert segments[0]["text"].endswith("tin.")
+    assert segments[0]["start_time"] == 0.0
+    assert segments[0]["end_time"] == 8.86
+
+
+def test_translate_subtitles_forwards_narrator_style(monkeypatch, tmp_path):
+    from app.services import agy_cli_service
+
+    source = tmp_path / "source.srt"
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:02,000\n你好\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_translate(texts, target_lang="vi", **kwargs):
+        captured["style"] = kwargs.get("style")
+        return ["Lúc này nó chào."]
+
+    monkeypatch.setattr(agy_cli_service, "is_available", lambda: True)
+    monkeypatch.setattr(agy_cli_service, "default_model", lambda: "gemini-test")
+    monkeypatch.setattr(agy_cli_service, "translate_cues", fake_translate)
+    monkeypatch.setattr(PyVideoTransService, "_vietsub_cache_load", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(PyVideoTransService, "_vietsub_cache_store", lambda *_args, **_kwargs: None)
+
+    result = PyVideoTransService().translate_subtitles(
+        str(source),
+        target_lang="vi",
+        output_dir=str(tmp_path),
+        style="kechuyen",
+    )
+    assert result["status"] == "success"
+    assert captured["style"] == "narrator"
+
+
+def test_agy_leftover_chinese_rejects_entire_srt(monkeypatch, tmp_path):
+    from app.services import agy_cli_service
 
     source = tmp_path / "source.srt"
     source.write_text(
@@ -540,27 +622,14 @@ def test_google_keeps_vietnamese_cues_and_drops_leftover_chinese(monkeypatch, tm
         "3\n00:00:06,000 --> 00:00:08,000\n今天天气很好\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(ai_scriptwriter_service, "is_available", lambda: False)
-    monkeypatch.setattr("app.services.xai_media_service.is_available", lambda: False)
 
-    class FakeTranslator:
-        def __init__(self, source, target):
-            self.source = source
-            self.target = target
-
-        def translate(self, text):
-            mapping = {
-                "你好": "Xin chào",
-                "他自己闻不到吗": "他自己闻不到吗",
-                "今天天气很好": "Hôm nay thời tiết rất đẹp",
-            }
-            if "\n" in str(text):
-                return "\n".join(mapping.get(part, part) for part in str(text).split("\n"))
-            return mapping.get(str(text), str(text))
-
-    monkeypatch.setattr("deep_translator.GoogleTranslator", FakeTranslator)
-    monkeypatch.setattr(PyVideoTransService, "_translate_with_cli", lambda *args, **kwargs: None)
-    monkeypatch.setenv("SUBTITLE_TRANSLATOR", "google")
+    monkeypatch.setattr(agy_cli_service, "is_available", lambda: True)
+    monkeypatch.setattr(agy_cli_service, "default_model", lambda: "gemini-test")
+    monkeypatch.setattr(
+        agy_cli_service,
+        "translate_cues",
+        lambda texts, **_kwargs: ["Xin chào", "他自己闻不到吗", "Hôm nay thời tiết rất đẹp"],
+    )
 
     result = PyVideoTransService().translate_subtitles(
         str(source),
@@ -568,9 +637,6 @@ def test_google_keeps_vietnamese_cues_and_drops_leftover_chinese(monkeypatch, tm
         output_dir=str(tmp_path),
     )
 
-    assert result["status"] == "success"
-    body = Path(result["srt_path"]).read_text(encoding="utf-8")
-    assert "Xin chào" in body
-    assert "Hôm nay thời tiết rất đẹp" in body
-    assert "吗" not in body
-    assert subtitle_matches_target_language(result["srt_path"], "vi") is True
+    assert result["status"] == "failed"
+    assert result["translate_fail_reason"] == "cjk_or_invalid"
+    assert result.get("srt_path") is None

@@ -249,32 +249,10 @@ def recap_to_srt(lines: List[str], duration: float, srt_path: str) -> str:
     return srt_path
 
 
-def resolve_vietsub_style(style: str, duration: float) -> str:
-    raw = (style or "auto").lower().strip()
-    aliases = {
-        "goc": "dub",
-        "gốc": "dub",
-        "original": "dub",
-        "faithful": "dub",
-        "dub": "dub",
-        "kechuyen": "narrator",
-        "ke_chuyen": "narrator",
-        "kể chuyện": "narrator",
-        "story": "narrator",
-        "narrator": "narrator",
-        "vuinhon": "funny",
-        "vui": "funny",
-        "vui_nhon": "funny",
-        "funny": "funny",
-        "recap": "recap",
-    }
-    if raw in aliases:
-        return aliases[raw]
-    if duration >= 480:
-        return "recap"
-    if duration >= 180:
-        return "narrator"
-    return "dub"
+def resolve_vietsub_style(style: str, duration: float = 0.0) -> str:
+    from app.services.vietsub_rules import resolve_vietsub_style as _resolve
+
+    return _resolve(style, duration)
 
 
 LANG_DEFAULT_VOICE = {

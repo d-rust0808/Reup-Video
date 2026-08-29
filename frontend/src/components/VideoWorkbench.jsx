@@ -5,6 +5,7 @@ import { getStreamUrl, submitJob, uploadVideoFile, getMediaUrl } from '../servic
 import { loadSession, saveSession } from '../services/session';
 import { Video, AlertCircle, CheckCircle2, Upload, Loader2 } from 'lucide-react';
 import {
+  clampSubtitleBoxH,
   platformsHaveHorizontal,
   platformsHaveVertical,
   resolveCanvasAspect,
@@ -28,7 +29,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       speed_ratio: 1.03,
       pitch_shift: true,
       crop_percent: 2.0,
-      subtitle_bottom_crop: 18.0,
+      subtitle_bottom_crop: 22.0,
       caption_cover: 'off',
       caption_cover_image: '',
       caption_cover_url: '',
@@ -66,6 +67,11 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     publish_status: 'READY',
     target_platforms: ['tiktok', 'youtube_shorts', 'facebook'],
     preview_aspect: '9:16',
+    canvas_fill: 0,
+    subtitle_y: 0,
+    subtitle_box_w: 0.88,
+    subtitle_box_h: 0.08,
+    cover_pad: 0,
     bgm_path: '',
     bgm_id: '',
     bgm_volume: 0.85,
@@ -83,7 +89,8 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       merged.caption_cover = 'white_solid';
     }
     // Migrate the legacy crop that left the source caption band visible.
-    if (Number(merged.subtitle_bottom_crop || 0) > 0 && Number(merged.subtitle_bottom_crop) <= 7) {
+    const colorCoverOn = ['black_soft', 'white_soft', 'black_solid', 'white_solid'].includes(merged.caption_cover);
+    if (!colorCoverOn && Number(merged.subtitle_bottom_crop || 0) > 0 && Number(merged.subtitle_bottom_crop) <= 7) {
       merged.subtitle_bottom_crop = 18.0;
     }
     if (saved?.subtitle_mode === 'soft') {
@@ -138,6 +145,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
     const rate = Math.max(0.8, Math.min(1.5, Number(options.speed_ratio) || 1));
     const apply = () => {
       try {
+        video.defaultPlaybackRate = rate;
         video.playbackRate = rate;
       } catch {
         /* some browsers reject mid-load */
@@ -239,10 +247,16 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       },
       reup: {
         hflip: options.hflip,
-        speed_ratio: options.speed_ratio,
+        speed_ratio: Number(options.speed_ratio) || 1.03,
+        speed_factor: Number(options.speed_ratio) || 1.03,
         pitch_shift: options.pitch_shift,
         crop_percent: normCrop,
         subtitle_bottom_crop: Number(options.subtitle_bottom_crop || 0) / 100.0,
+        canvas_fill: Math.max(0, Math.min(1, Number(options.canvas_fill) || 0)),
+        subtitle_y: Math.max(0, Math.min(1, Number(options.subtitle_y) || 0)),
+        subtitle_box_w: Math.max(0.40, Math.min(1, Number(options.subtitle_box_w) || 0.88)),
+        subtitle_box_h: clampSubtitleBoxH(options.subtitle_box_h),
+        cover_pad: Math.max(0, Math.min(0.40, Number(options.cover_pad || 0) / 100)),
         caption_cover: options.caption_cover || 'off',
         caption_cover_image: options.caption_cover_image || '',
         caption_cover_url: options.caption_cover_url || '',
@@ -276,7 +290,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
         preserve_bgm: options.preserve_bgm !== false,
         enable_tts: options.enable_tts,
         enable_lipsync: options.enable_lipsync !== false,
-        vietsub_style: options.vietsub_style || 'auto',
+        vietsub_style: options.vietsub_style || 'dub',
         burn_subtitles: options.burn_subtitles !== false,
         subtitle_mode: options.burn_subtitles === false ? 'off' : (options.subtitle_mode || 'hard'),
         tts_voice: voice,
@@ -420,11 +434,17 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
           videoRef={videoRef}
           onRoiChange={setRoi}
           onCanvasAspect={(aspect) => setOptions((prev) => ({ ...prev, preview_aspect: aspect }))}
+          onCanvasFill={(fill) => setOptions((prev) => ({ ...prev, canvas_fill: fill }))}
+          onSubtitleY={(y) => setOptions((prev) => ({ ...prev, subtitle_y: y }))}
+          onSubtitleBoxW={(w) => setOptions((prev) => ({ ...prev, subtitle_box_w: w }))}
+          onSubtitleBoxH={(h) => setOptions((prev) => ({ ...prev, subtitle_box_h: h }))}
           preview={{
             cropPercent: Number(options.crop_percent) || 0,
             bottomCrop: Number(options.subtitle_bottom_crop) || 0,
             captionCover: options.caption_cover || 'off',
-            captionCoverUrl: options.caption_cover_url ? getMediaUrl(options.caption_cover_url) : '',
+            captionCoverUrl: options.caption_cover === 'image' && options.caption_cover_url
+              ? getMediaUrl(options.caption_cover_url)
+              : '',
             wmMethod: options.wm_method,
             hflip: Boolean(options.hflip),
             speedRatio: Number(options.speed_ratio) || 1,
@@ -432,6 +452,10 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
             contrast: Number(options.contrast) || 1,
             saturation: Number(options.saturation) || 1,
             canvasAspect: resolveCanvasAspect(options.target_platforms, options.preview_aspect),
+            canvasFill: Number(options.canvas_fill) || 0,
+            subtitleY: Number(options.subtitle_y) || 0,
+            subtitleBoxW: Number(options.subtitle_box_w) || 0.88,
+            subtitleBoxH: clampSubtitleBoxH(options.subtitle_box_h),
             hasVertical: platformsHaveVertical(options.target_platforms),
             hasHorizontal: platformsHaveHorizontal(options.target_platforms),
           }}

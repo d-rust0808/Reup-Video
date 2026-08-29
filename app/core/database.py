@@ -23,16 +23,17 @@ def get_db_connection(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
         abs_path = os.path.abspath(db_path)
         os.makedirs(os.path.dirname(abs_path), exist_ok=True)
     
-    conn = sqlite3.connect(db_path, timeout=10.0, check_same_thread=False)
+    conn = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     
-    # Configure WAL mode and 5s busy timeout for high concurrency
+    # Configure WAL mode and a long busy timeout so a catalog sync is not
+    # rolled back when the UI polls the same SQLite file.
     try:
         conn.execute("PRAGMA journal_mode=WAL;")
     except sqlite3.OperationalError:
         pass  # In-memory databases do not support WAL mode
         
-    conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute("PRAGMA busy_timeout=30000;")
     return conn
 
 
@@ -66,6 +67,14 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
             pass
         try:
             conn.execute("ALTER TABLE jobs ADD COLUMN logs TEXT NOT NULL DEFAULT '[]'")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE jobs ADD COLUMN quality_status TEXT NOT NULL DEFAULT 'PENDING'")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE jobs ADD COLUMN quality_report TEXT NOT NULL DEFAULT '{}'")
         except Exception:
             pass
 
@@ -305,6 +314,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
                 duration REAL NOT NULL DEFAULT 0,
                 posted INTEGER NOT NULL DEFAULT 0,
                 posted_at TEXT,
+                published_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE (channel_id, video_id)
@@ -312,6 +322,10 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_content_videos_channel ON content_videos(channel_id, posted)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_content_videos_native ON content_videos(video_id)")
+        try:
+            conn.execute("ALTER TABLE content_videos ADD COLUMN published_at TEXT")
+        except Exception:
+            pass
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS studio_state (

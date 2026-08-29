@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useLayoutEffect, useState, useCallback } from 'react';
 import { Crop } from 'lucide-react';
 import { getMediaUrl } from '../services/api';
-import { fitKeepIntoCanvas, formatPixelAspect, stageBoxStyle } from '../lib/previewCanvas';
+import { applyVideoSpeed, captionPlateBox, clampCanvasFill, clampCoverHeight, clampPreviewSpeed, clampSubtitleBoxH, clampSubtitleBoxW, fitKeepIntoCanvas, formatPixelAspect, previewSubtitleY, resolveCanvasFill, stageBoxStyle, subtitleBoxRect } from '../lib/previewCanvas';
 
 function getContentBox(video, canvas) {
   const rect = canvas.getBoundingClientRect();
@@ -50,17 +50,17 @@ function computeKeepRect(preview = {}) {
   const p = Math.max(0, Math.min(0.2, (Number(preview.cropPercent) || 0) / 100));
   const cropMode = preview.wmMethod === 'crop';
   const isImageCover = preview.captionCover === 'image';
-  const coverOn = isImageCover || (!cropMode && Boolean(preview.captionCover && preview.captionCover !== 'off'));
+  const coverOn = isImageCover || Boolean(preview.captionCover && preview.captionCover !== 'off');
   const rawBottom = Math.max(0, Math.min(0.45, (Number(preview.bottomCrop) || 0) / 100));
-  const cutBottom = coverOn ? 0 : rawBottom;
+  // Color plates paint the band. Custom logo still crops the hardsub strip.
+  const cutBottom = (coverOn && !isImageCover) ? 0 : rawBottom;
   const top = p * (1 - cutBottom);
   const bottom = cutBottom + p * (1 - cutBottom);
   const left = p;
   const right = p;
   let coverH = 0;
-  if (coverOn) {
-    coverH = rawBottom > 0 ? rawBottom : 0.18;
-    coverH = Math.max(0.10, Math.min(0.36, coverH));
+  if (coverOn && !isImageCover) {
+    coverH = clampCoverHeight(rawBottom);
   }
   return {
     left,
@@ -74,10 +74,11 @@ function computeKeepRect(preview = {}) {
   };
 }
 
-function PreviewTransport({ videoRef }) {
+function PreviewTransport({ videoRef, speedRatio }) {
   const [playing, setPlaying] = useState(false);
   const [t, setT] = useState(0);
   const [d, setD] = useState(0);
+  const rate = clampPreviewSpeed(speedRatio);
 
   useEffect(() => {
     const video = videoRef?.current;
@@ -104,6 +105,7 @@ function PreviewTransport({ videoRef }) {
   const toggle = () => {
     const video = videoRef?.current;
     if (!video) return;
+    applyVideoSpeed(video, speedRatio);
     if (video.paused) video.play().catch(() => {});
     else video.pause();
   };
@@ -135,9 +137,14 @@ function PreviewTransport({ videoRef }) {
         }}
         className="flex-1 accent-blue-400"
       />
-      <span className="text-[10px] font-mono text-white/80 w-16 text-right">
+      <span className="text-[10px] font-mono text-white/80 w-20 text-right">
         {fmt(t)}/{fmt(d)}
       </span>
+      {Math.abs(rate - 1) > 0.009 && (
+        <span className="text-[10px] font-black text-amber-300 whitespace-nowrap">
+          {rate.toFixed(2)}x → {fmt(d / rate)}
+        </span>
+      )}
     </div>
   );
 }
@@ -224,12 +231,12 @@ function OverlayPreviewLayer({ videoRef, overlays, contained = false }) {
   );
 }
 
-export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true, preview = null, onCanvasAspect }) {
+export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true, preview = null, onCanvasAspect, onCanvasFill, onSubtitleY, onSubtitleBoxW, onSubtitleBoxH }) {
   const canvasRef = useRef(null);
   const stageRef = useRef(null);
   const [roi, setRoi] = useState(null); // { x, y, w, h } normalized to VIDEO content (0 to 1)
   const [viewMode, setViewMode] = useState('after');
-  const [box, setBox] = useState({ offsetX: 0, offsetY: 0, contentW: 0, contentH: 0, videoW: 0, videoH: 0 });
+  const [box, setBox] = useState({ offsetX: 0, offsetY: 0, contentW: 0, contentH: 0, videoW: 0, videoH: 0, plateH: 0, bottomPad: 0 });
   const [srcSize, setSrcSize] = useState({ w: 0, h: 0 });
   const isDraggingRef = useRef(false);
   const startPosRef = useRef({ x: 0, y: 0 });
@@ -242,6 +249,58 @@ export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true,
   const bottomCrop = Number(preview?.bottomCrop) || 0;
   const captionCover = preview?.captionCover || 'off';
   const wmMethod = preview?.wmMethod;
+  const speedRatio = preview?.speedRatio;
+  const canvasFill = clampCanvasFill(preview?.canvasFill);
+  const fillDragRef = useRef(null);
+  const subDragRef = useRef(null);
+  const coverSrc = preview?.captionCover === 'image'
+    ? (preview?.captionCoverUrl
+      || overlaySrc((overlays || []).find((ov) => ov.kind === 'banner' || ov.kind === 'caption'))
+      || '')
+    : '';
+  const [logoAspect, setLogoAspect] = useState(0);
+
+  useEffect(() => {
+    if (!coverSrc) {
+      setLogoAspect(0);
+      return undefined;
+    }
+    const img = new Image();
+    img.onload = () => {
+      const w = img.naturalWidth || 0;
+      const h = img.naturalHeight || 0;
+      setLogoAspect(w > 0 && h > 0 ? w / h : 0);
+    };
+    img.onerror = () => setLogoAspect(0);
+    img.src = coverSrc;
+    return () => {
+      img.onload = null;
+      img.onerror = null;
+    };
+  }, [coverSrc]);
+
+  useEffect(() => {
+    const video = videoRef?.current;
+    if (!video) return undefined;
+    const apply = () => applyVideoSpeed(video, speedRatio);
+    apply();
+    video.addEventListener('loadedmetadata', apply);
+    video.addEventListener('play', apply);
+    video.addEventListener('playing', apply);
+    const onRate = () => {
+      const wanted = clampPreviewSpeed(speedRatio);
+      if (Math.abs((Number(video.playbackRate) || 0) - wanted) > 0.009) {
+        apply();
+      }
+    };
+    video.addEventListener('ratechange', onRate);
+    return () => {
+      video.removeEventListener('loadedmetadata', apply);
+      video.removeEventListener('play', apply);
+      video.removeEventListener('playing', apply);
+      video.removeEventListener('ratechange', onRate);
+    };
+  }, [videoRef, speedRatio]);
 
   const measureStage = useCallback(() => {
     const video = videoRef.current;
@@ -252,6 +311,9 @@ export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true,
     const vh = video.videoHeight || 0;
     if (vw && vh) setSrcSize((prev) => (prev.w === vw && prev.h === vh ? prev : { w: vw, h: vh }));
     if (!vw || !vh || rect.width <= 0 || rect.height <= 0) return;
+    const chrome = showAfter ? 48 : 0;
+    const fitW = rect.width;
+    const fitH = Math.max(1, rect.height - chrome);
     const keepNow = computeKeepRect({
       cropPercent,
       bottomCrop,
@@ -260,7 +322,8 @@ export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true,
     });
     const useCanvas = showAfter && (canvasAspect === '16:9' || canvasAspect === '9:16');
     if (useCanvas) {
-      const fit = fitKeepIntoCanvas(keepNow, vw, vh, rect.width, rect.height);
+      const fill = resolveCanvasFill(canvasFill, captionCover === 'image', logoAspect);
+      const fit = fitKeepIntoCanvas(keepNow, vw, vh, fitW, fitH, fill, logoAspect);
       setBox({
         offsetX: fit.padX,
         offsetY: fit.padY,
@@ -268,21 +331,23 @@ export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true,
         contentH: fit.fittedH,
         videoW: fit.videoW,
         videoH: fit.videoH,
+        plateH: fit.plateH || 0,
+        bottomPad: fit.bottomPad || 0,
       });
       return;
     }
-    const scale = Math.min(rect.width / vw, rect.height / vh);
+    const scale = Math.min(fitW / vw, fitH / vh);
     const contentW = vw * scale;
     const contentH = vh * scale;
     setBox({
-      offsetX: (rect.width - contentW) / 2,
-      offsetY: (rect.height - contentH) / 2,
+      offsetX: (fitW - contentW) / 2,
+      offsetY: (fitH - contentH) / 2,
       contentW,
       contentH,
       videoW: contentW,
       videoH: contentH,
     });
-  }, [videoRef, showAfter, canvasAspect, cropPercent, bottomCrop, captionCover, wmMethod]);
+  }, [videoRef, showAfter, canvasAspect, cropPercent, bottomCrop, captionCover, wmMethod, canvasFill, logoAspect]);
 
   const drawCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -374,6 +439,120 @@ export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true,
     measureStage();
   }, [measureStage]);
 
+  const canStretchHeight = Boolean(
+    showAfter && canvasAspect === '9:16' && srcSize.w > 0 && srcSize.h > 0 && srcSize.w >= srcSize.h,
+  );
+
+  useEffect(() => {
+    if (!canStretchHeight) return undefined;
+    const onMove = (ev) => {
+      const drag = fillDragRef.current;
+      const stage = stageRef.current;
+      const video = videoRef?.current;
+      if (!drag || !stage || !video) return;
+      const rect = stage.getBoundingClientRect();
+      const keepNow = computeKeepRect({
+        cropPercent,
+        bottomCrop,
+        captionCover,
+        wmMethod,
+      });
+      const contain = fitKeepIntoCanvas(
+        keepNow, video.videoWidth, video.videoHeight, rect.width, rect.height, 0, logoAspect,
+      );
+      const maxFit = fitKeepIntoCanvas(
+        keepNow, video.videoWidth, video.videoHeight, rect.width, rect.height, 1, logoAspect,
+      );
+      const videoBottom = contain.padY + contain.fittedH;
+      const room = Math.max(1, maxFit.plateH || (rect.height - videoBottom));
+      const y = ev.clientY - rect.top;
+      onCanvasFill?.(clampCanvasFill((y - videoBottom) / room));
+    };
+    const onUp = () => {
+      fillDragRef.current = null;
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+  }, [canStretchHeight, cropPercent, bottomCrop, captionCover, wmMethod, videoRef, onCanvasFill, logoAspect]);
+
+  useEffect(() => {
+    if (!showAfter) return undefined;
+    const onMove = (ev) => {
+      const mode = subDragRef.current;
+      if (!mode) return;
+      const stage = stageRef.current;
+      const video = videoRef?.current;
+      if (!stage || !video) return;
+      const rect = stage.getBoundingClientRect();
+      const vw = video.videoWidth || 0;
+      const vh = video.videoHeight || 0;
+      if (!vw || !vh || rect.height <= 0) return;
+      const chrome = 48;
+      const fitW = rect.width;
+      const fitH = Math.max(1, rect.height - chrome);
+      const keepNow = computeKeepRect({
+        cropPercent,
+        bottomCrop,
+        captionCover,
+        wmMethod,
+      });
+      const useCanvas = canvasAspect === '16:9' || canvasAspect === '9:16';
+      let top = 0;
+      let height = fitH;
+      let left = 0;
+      let width = fitW;
+      if (useCanvas) {
+        const fit = fitKeepIntoCanvas(
+          keepNow, vw, vh, fitW, fitH,
+          resolveCanvasFill(canvasFill, captionCover === 'image', logoAspect),
+          logoAspect,
+        );
+        top = fit.padY;
+        height = fit.fittedH;
+        left = fit.padX;
+        width = fit.fittedW;
+      } else {
+        const scale = Math.min(fitW / vw, fitH / vh);
+        height = vh * scale;
+        width = vw * scale;
+        top = (fitH - height) / 2;
+        left = (fitW - width) / 2;
+      }
+      if (height < 8 || width < 8) return;
+      const y = Math.max(0.04, Math.min(0.96, (ev.clientY - rect.top - top) / height));
+      const x = Math.max(0, Math.min(1, (ev.clientX - rect.left - left) / width));
+      if (mode === 'move') {
+        onSubtitleY?.(y);
+        return;
+      }
+      if (mode === 'n' || mode === 's') {
+        const cy = previewSubtitleY(preview?.subtitleY, keepNow.coverH, keepNow.coverOn);
+        onSubtitleBoxH?.(clampSubtitleBoxH(Math.abs(y - cy) * 2));
+        return;
+      }
+      if (mode === 'w' || mode === 'e') {
+        onSubtitleBoxW?.(clampSubtitleBoxW(Math.abs(x - 0.5) * 2));
+      }
+    };
+    const onUp = () => {
+      subDragRef.current = null;
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+  }, [showAfter, cropPercent, bottomCrop, captionCover, wmMethod, canvasAspect, canvasFill, logoAspect, videoRef, onSubtitleY, onSubtitleBoxW, onSubtitleBoxH, preview?.subtitleY]);
+
   const handleMouseDown = (e) => {
     const canvas = canvasRef.current;
     const video = videoRef.current;
@@ -457,7 +636,65 @@ export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true,
         width: keep.keepW * box.contentW,
         height: keep.keepH * box.contentH,
       };
-  const coverPxH = keep.coverH * keepPx.height;
+  const plateH = afterLayout ? (box.plateH || 0) : 0;
+  const bottomPad = afterLayout ? (box.bottomPad || 0) : 0;
+  const plateBannerOv = (overlays || []).find((ov) => ov.kind === 'banner' || ov.kind === 'caption');
+  const plateBannerSrc = preview?.captionCover === 'image'
+    ? (preview?.captionCoverUrl || overlaySrc(plateBannerOv))
+    : '';
+  const plateLogo = (plateH > 0.5 || bottomPad > 0.5) && Boolean(plateBannerSrc);
+  const coverBox = captionPlateBox(
+    afterLayout
+      ? {
+          offsetX: box.offsetX,
+          offsetY: box.offsetY,
+          contentW: box.contentW,
+          contentH: box.contentH,
+          plateH,
+          bottomPad,
+        }
+      : {
+          offsetX: keepPx.left,
+          offsetY: keepPx.top,
+          contentW: keepPx.width,
+          contentH: keepPx.height,
+          plateH: 0,
+        },
+    keep.coverH,
+    { image: Boolean(plateBannerSrc), logoAspect },
+  );
+  if (afterLayout && coverBox.overlap === false && coverBox.height > 0.5) {
+    keepPx.height += coverBox.height;
+  } else if (afterLayout && plateH) {
+    keepPx.height += plateH;
+  }
+  const pictureBox = afterLayout
+    ? {
+        offsetX: box.offsetX,
+        offsetY: box.offsetY,
+        contentW: box.contentW,
+        contentH: box.contentH,
+      }
+    : {
+        offsetX: keepPx.left,
+        offsetY: keepPx.top,
+        contentW: keepPx.width,
+        contentH: keepPx.height,
+      };
+  const subBox = subtitleBoxRect(
+    pictureBox,
+    preview?.subtitleY,
+    preview?.subtitleBoxW,
+    preview?.subtitleBoxH,
+    keep.coverH,
+    keep.coverOn,
+  );
+  const videoOverlays = (overlays || []).filter((ov) => {
+    const isBanner = ov.kind === 'banner' || ov.kind === 'caption';
+    if (!isBanner) return true;
+    if (plateLogo || preview?.captionCover === 'image') return false;
+    return true;
+  });
   const srcLabel = formatPixelAspect(srcSize.w, srcSize.h);
   const stageStyle = stageBoxStyle(showAfter, canvasAspect, srcSize.w, srcSize.h);
 
@@ -559,7 +796,7 @@ export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true,
                   transform: afterFlip,
                 }}
           />
-          <OverlayPreviewLayer videoRef={videoRef} overlays={overlays} contained={afterLayout} />
+          <OverlayPreviewLayer videoRef={videoRef} overlays={videoOverlays} contained={afterLayout} />
         </div>
 
         {simple && box.contentW > 0 && !afterLayout && (
@@ -621,6 +858,23 @@ export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true,
                 Khung sau crop
               </span>
             )}
+            {canStretchHeight && (
+              <>
+                <button
+                  type="button"
+                  aria-label="Kéo dài phần logo phía dưới"
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    fillDragRef.current = { edge: 'bottom' };
+                  }}
+                  className="absolute left-1/2 -bottom-1.5 z-20 h-3 w-14 -translate-x-1/2 cursor-ns-resize rounded-full border border-white/80 bg-blue-500 shadow"
+                />
+                <span className="absolute left-1/2 bottom-3 -translate-x-1/2 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-black text-white pointer-events-none">
+                  {canvasFill < 0.02 ? 'Kéo dài ô logo' : `Ô logo +${Math.round(canvasFill * 100)}%`}
+                </span>
+              </>
+            )}
           </div>
         )}
 
@@ -641,50 +895,107 @@ export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true,
           </div>
         )}
 
-        {simple && keep.coverOn && box.contentW > 0 && (coverStyle || preview?.captionCoverUrl) && (
+        {simple && showAfter && box.contentW > 0 && coverBox.height > 0.5 && (plateLogo || (keep.coverOn && (coverStyle || plateBannerSrc))) && (
           <>
             <div
-              className="absolute pointer-events-none z-[11] overflow-hidden"
+              className="absolute pointer-events-none z-[21] overflow-hidden border-t border-white/40"
               style={{
-                left: keepPx.left,
-                width: keepPx.width,
-                height: Math.max(28, coverPxH),
-                top: keepPx.top + keepPx.height - Math.max(28, coverPxH),
-                background: preview?.captionCoverUrl ? '#111' : coverStyle?.bg,
+                left: coverBox.left,
+                width: coverBox.width,
+                height: Math.max(coverBox.height, 36),
+                top: coverBox.top,
+                background: plateBannerSrc ? '#111' : (coverStyle?.bg || '#111'),
               }}
             >
-              {preview?.captionCoverUrl ? (
+              {plateBannerSrc ? (
                 <img
-                  src={preview.captionCoverUrl}
+                  src={plateBannerSrc}
                   alt=""
-                  className="absolute inset-0 w-full h-full object-cover"
+                  className="absolute inset-0 w-full h-full object-cover object-top"
                 />
-              ) : null}
-              {!preview?.captionCoverUrl && (
+              ) : (
                 <span
-                  className="absolute inset-x-2 bottom-2 text-center text-[10px] font-extrabold leading-tight"
+                  className="absolute inset-x-2 top-1.5 text-center text-[10px] font-black leading-tight"
                   style={{ color: coverStyle?.fg || '#fff' }}
                 >
-                  Vietsub mẫu
+                  Phủ {coverKey === 'white_solid' || coverKey === 'white_soft' ? 'trắng' : 'đen'} đáy
                 </span>
               )}
             </div>
-            {preview?.captionCoverUrl && showAfter && (
-              <div
-                className="absolute pointer-events-none z-[12] flex justify-center"
-                style={{
-                  left: keepPx.left,
-                  width: keepPx.width,
-                  top: keepPx.top + keepPx.height - Math.max(28, coverPxH) - 34,
-                  height: 28,
-                }}
-              >
-                <span className="rounded-md bg-black/70 px-2 py-1 text-[10px] font-bold text-white leading-none">
-                  Vietsub mẫu
-                </span>
-              </div>
-            )}
           </>
+        )}
+
+        {showAfter && box.contentW > 0 && (
+          <div
+            className="absolute z-[22] touch-none"
+            style={{
+              left: subBox.left,
+              top: subBox.top,
+              width: Math.max(36, subBox.width),
+              height: Math.max(subBox.plateOff ? 22 : 28, subBox.height),
+              background: subBox.plateOff ? 'transparent' : (coverStyle?.bg || 'rgba(0,0,0,0.82)'),
+              color: subBox.plateOff ? '#fff' : (coverStyle?.fg || '#fff'),
+              border: subBox.plateOff
+                ? '1.5px dashed rgba(255,255,255,0.8)'
+                : (coverStyle?.fg === '#111' ? '1px solid rgba(0,0,0,0.25)' : '1px solid rgba(255,255,255,0.35)'),
+              borderRadius: 8,
+              boxShadow: subBox.plateOff ? 'none' : '0 1px 8px rgba(0,0,0,0.25)',
+            }}
+          >
+            <button
+              type="button"
+              aria-label="Kéo vị trí Vietsub"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                subDragRef.current = 'move';
+              }}
+              className="absolute inset-0 cursor-ns-resize bg-transparent"
+            />
+            <span className="absolute inset-x-2 top-1/2 -translate-y-1/2 text-center text-[10px] font-black leading-tight pointer-events-none">
+              {subBox.plateOff ? 'Vietsub · không nền' : 'Vietsub · kéo / mép đổi size'}
+            </span>
+            <button
+              type="button"
+              aria-label="Đổi chiều cao nền Vietsub"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                subDragRef.current = 'n';
+              }}
+              className="absolute left-1/2 top-0 z-10 h-2.5 w-14 -translate-x-1/2 -translate-y-1/2 cursor-ns-resize rounded-full border border-white/80 bg-sky-400 shadow"
+            />
+            <button
+              type="button"
+              aria-label="Đổi chiều cao nền Vietsub"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                subDragRef.current = 's';
+              }}
+              className="absolute left-1/2 bottom-0 z-10 h-2.5 w-14 -translate-x-1/2 translate-y-1/2 cursor-ns-resize rounded-full border border-white/80 bg-sky-400 shadow"
+            />
+            <button
+              type="button"
+              aria-label="Đổi chiều rộng nền Vietsub"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                subDragRef.current = 'w';
+              }}
+              className="absolute left-0 top-1/2 z-10 h-10 w-2.5 -translate-x-1/2 -translate-y-1/2 cursor-ew-resize rounded-full border border-white/80 bg-sky-400 shadow"
+            />
+            <button
+              type="button"
+              aria-label="Đổi chiều rộng nền Vietsub"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                subDragRef.current = 'e';
+              }}
+              className="absolute right-0 top-1/2 z-10 h-10 w-2.5 translate-x-1/2 -translate-y-1/2 cursor-ew-resize rounded-full border border-white/80 bg-sky-400 shadow"
+            />
+          </div>
         )}
 
         <canvas
@@ -697,7 +1008,7 @@ export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true,
         />
         {showAfter && (
           <div className="absolute left-0 right-0 bottom-0 z-20">
-            <PreviewTransport videoRef={videoRef} />
+            <PreviewTransport videoRef={videoRef} speedRatio={speedRatio} />
           </div>
         )}
       </div>
@@ -706,12 +1017,20 @@ export function RoiCanvas({ videoRef, onRoiChange, overlays = [], simple = true,
         <p className="text-[11px] text-slate-500 font-medium px-1">
           {showAfter
             ? `Khung ${canvasAspect || srcLabel || 'nguồn'} · crop mép ${Number(preview?.cropPercent || 0).toFixed(1)}%`
-              + (keep.coverOn
-                ? ` · phủ ${(keep.coverH * 100).toFixed(0)}% đáy`
-                : ` · cắt đáy ${Number(preview?.bottomCrop || 0).toFixed(0)}%`)
+              + (preview?.captionCover === 'image'
+                ? ` · cắt đáy ${Number(preview?.bottomCrop || 0).toFixed(0)}% · logo dưới ảnh`
+                : (keep.coverOn
+                  ? (keep.coverH <= 0 ? ' · tắt phủ đáy' : ` · phủ ${(keep.coverH * 100).toFixed(0)}% đáy`)
+                  : ` · cắt đáy ${Number(preview?.bottomCrop || 0).toFixed(0)}%`))
+              + (subBox.plateOff ? ' · Vietsub không nền' : ' · kéo Vietsub / kéo mép để phủ chữ gốc')
               + (preview?.hflip ? ' · lật ngang' : '')
               + (Number(preview?.speedRatio) && Math.abs(Number(preview.speedRatio) - 1) > 0.009
                 ? ` · tốc độ ${Number(preview.speedRatio).toFixed(2)}x`
+                : '')
+              + (canStretchHeight
+                ? (canvasFill < 0.02
+                  ? ' · kéo chấm xanh dưới để hiện đủ logo dưới ảnh (khít ảnh, không dư đen)'
+                  : ` · ô logo dưới ảnh +${Math.round(canvasFill * 100)}%`)
                 : '')
               + '.'
             : 'Video gốc. Kéo slider crop / phủ chữ để xem khung sẽ ra.'}

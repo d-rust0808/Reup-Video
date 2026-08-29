@@ -168,7 +168,7 @@ class Settings(BaseModel):
     )
     SUBTITLE_TRANSLATOR: str = Field(
         default_factory=lambda: (os.getenv("SUBTITLE_TRANSLATOR", "agy") or "agy").strip().lower(),
-        description="Subtitle translator: agy (system Google Antigravity CLI, default). No API key required.",
+        description="Subtitle translator: agy only (Google Antigravity CLI). Other values are ignored.",
     )
     RAW_INPUT_DIR: str = Field(
         default_factory=lambda: os.getenv("RAW_INPUT_DIR", "data/input/raw"),

@@ -69,6 +69,7 @@ async ({sec, cursor, count}) => {
     aweme_id: String((item && (item.aweme_id || item.id)) || ''),
     desc: (item && (item.desc || item.title)) || '',
     mix_id: String((item && item.mix_info && item.mix_info.mix_id) || ''),
+    create_time: (item && (item.create_time || item.createTime)) || 0,
   }));
   return {
     ok: true,
@@ -147,7 +148,13 @@ def catalog_entries_from_awemes(items: Iterable[Any], **_kwargs: Any) -> List[Di
         seen.add(vid)
         title = str(raw.get("desc") or raw.get("title") or "").strip()
         url = str(raw.get("url") or "").strip() or f"https://www.douyin.com/video/{vid}"
-        entries.append({"video_id": vid, "title": title, "url": url})
+        published = raw.get("create_time") or raw.get("published_at") or raw.get("timestamp")
+        entries.append({
+            "video_id": vid,
+            "title": title,
+            "url": url,
+            "published_at": published,
+        })
     return entries
 
 

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Set
@@ -17,10 +18,44 @@ from app.scraper.channel import video_page_url
 logger = logging.getLogger(__name__)
 
 PLAYABLE_BYTES = 80_000
+_DL_CACHE: Dict[str, Any] = {"t": 0.0, "ids": set()}
+_DL_TTL_SEC = 2.0
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def coerce_published_at(raw: Any) -> str:
+    """Normalize YouTube/Douyin timestamps to UTC ISO-8601, or empty."""
+    if raw is None or raw == "":
+        return ""
+    if isinstance(raw, datetime):
+        dt = raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    if isinstance(raw, (int, float)) or (isinstance(raw, str) and re.fullmatch(r"\d{9,13}", str(raw).strip())):
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return ""
+        if value > 1e12:
+            value = value / 1000.0
+        if value <= 0:
+            return ""
+        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+    text = str(raw).strip()
+    if re.fullmatch(r"\d{8}", text):
+        try:
+            return datetime.strptime(text, "%Y%m%d").replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            return ""
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    except ValueError:
+        return ""
 
 
 def _tags_json(tags: Any) -> str:
@@ -49,12 +84,41 @@ def disk_file_for(video_id: str) -> str:
     return os.path.join(settings.RAW_INPUT_DIR, f"{video_id}.mp4")
 
 
-def is_downloaded(video_id: str) -> bool:
-    path = disk_file_for(video_id)
+def downloaded_native_ids() -> Set[str]:
+    """Cached set of playable files in the raw library (one directory scan)."""
+    now = time.monotonic()
+    cached_at = float(_DL_CACHE.get("t") or 0)
+    if now - cached_at < _DL_TTL_SEC:
+        return set(_DL_CACHE.get("ids") or set())
+    found: Set[str] = set()
+    root = settings.RAW_INPUT_DIR
     try:
-        return os.path.isfile(path) and os.path.getsize(path) >= PLAYABLE_BYTES
+        names = os.listdir(root)
     except OSError:
-        return False
+        names = []
+    for name in names:
+        lower = name.lower()
+        if not lower.endswith((".mp4", ".webm", ".mkv", ".mov")):
+            continue
+        path = os.path.join(root, name)
+        try:
+            if os.path.getsize(path) >= PLAYABLE_BYTES:
+                found.add(os.path.splitext(name)[0])
+        except OSError:
+            continue
+    _DL_CACHE["t"] = now
+    _DL_CACHE["ids"] = found
+    return set(found)
+
+
+def invalidate_download_cache() -> None:
+    _DL_CACHE["t"] = 0.0
+    _DL_CACHE["ids"] = set()
+
+
+def is_downloaded(video_id: str) -> bool:
+    native = str(video_id or "").strip()
+    return bool(native) and native in downloaded_native_ids()
 
 
 def native_ids_from_path(path: str) -> Set[str]:
@@ -162,8 +226,13 @@ def upsert_source_catalog(
     video_ids: Optional[Iterable[str]] = None,
     catalog: Optional[Iterable[Dict[str, Any]]] = None,
     tags: Any = None,
+    channel_id: Optional[str] = None,
 ) -> str:
-    """Create/update a source channel and merge its video catalog. Returns channel_id."""
+    """Create/update a source channel and merge its video catalog. Returns channel_id.
+
+    Pass ``channel_id`` when syncing an existing row so a changed handle/URL
+    cannot create a duplicate channel and drop the checklist the UI is showing.
+    """
     profile = profile or {}
     platform = (platform or profile.get("platform") or "").lower().strip()
     handle = str(
@@ -189,6 +258,12 @@ def upsert_source_catalog(
             "video_id": vid,
             "title": str((row or {}).get("title") or ""),
             "url": str((row or {}).get("url") or ""),
+            "published_at": coerce_published_at(
+                (row or {}).get("published_at")
+                or (row or {}).get("timestamp")
+                or (row or {}).get("upload_date")
+                or (row or {}).get("create_time")
+            ),
         })
     for vid in video_ids or []:
         text = str(vid or "").strip()
@@ -198,7 +273,18 @@ def upsert_source_catalog(
         entries.append({"video_id": text, "title": "", "url": ""})
 
     with get_db_connection(db_path) as conn:
-        channel_id = _find_existing(conn, platform=platform, handle=handle, url=url)
+        wanted = str(channel_id or "").strip()
+        found = None
+        if wanted:
+            row = conn.execute(
+                "SELECT channel_id FROM content_channels WHERE channel_id = ? LIMIT 1",
+                (wanted,),
+            ).fetchone()
+            if row:
+                found = row["channel_id"]
+        if not found:
+            found = _find_existing(conn, platform=platform, handle=handle, url=url)
+        channel_id = found
         if channel_id:
             conn.execute(
                 """
@@ -222,7 +308,7 @@ def upsert_source_catalog(
                     (_tags_json(tags), channel_id),
                 )
         else:
-            channel_id = f"src_{uuid.uuid4().hex[:10]}"
+            channel_id = wanted if wanted.startswith("src_") else f"src_{uuid.uuid4().hex[:10]}"
             conn.execute(
                 """
                 INSERT INTO content_channels (
@@ -244,17 +330,24 @@ def upsert_source_catalog(
             if not item_url:
                 item_url = video_page_url(vid, platform)[:500]
             row_id = f"srcv_{uuid.uuid4().hex[:12]}"
+            published_at = coerce_published_at(item.get("published_at"))
             conn.execute(
                 """
                 INSERT INTO content_videos (
-                    id, channel_id, video_id, title, url, duration, posted, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
+                    id, channel_id, video_id, title, url, duration, posted,
+                    published_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
                 ON CONFLICT(channel_id, video_id) DO UPDATE SET
                     title = CASE WHEN excluded.title != '' THEN excluded.title ELSE content_videos.title END,
                     url = CASE WHEN excluded.url != '' THEN excluded.url ELSE content_videos.url END,
+                    published_at = CASE
+                        WHEN excluded.published_at IS NOT NULL AND excluded.published_at != ''
+                        THEN excluded.published_at
+                        ELSE content_videos.published_at
+                    END,
                     updated_at = excluded.updated_at
                 """,
-                (row_id, channel_id, vid, title, item_url, now, now),
+                (row_id, channel_id, vid, title, item_url, published_at or None, now, now),
             )
 
         count = conn.execute(
@@ -319,15 +412,53 @@ def load_channel_videos(db_path: str, channel_id: str) -> List[Dict[str, Any]]:
             """
             SELECT * FROM content_videos
             WHERE channel_id = ?
-            ORDER BY created_at DESC, title COLLATE NOCASE
+            ORDER BY COALESCE(published_at, created_at) ASC, created_at ASC, title COLLATE NOCASE
             """,
             (channel_id,),
         ).fetchall()
     return [_decorate_video(dict(row), published) for row in rows]
 
 
+def _stats_by_channel(db_path: str) -> Dict[str, Dict[str, int]]:
+    downloaded = downloaded_native_ids()
+    published = published_native_ids(db_path)
+    buckets: Dict[str, List[tuple]] = {}
+    with get_db_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT channel_id, video_id, posted FROM content_videos"
+        ).fetchall()
+    for row in rows:
+        buckets.setdefault(row["channel_id"], []).append(
+            (str(row["video_id"] or ""), int(row["posted"] or 0))
+        )
+    stats: Dict[str, Dict[str, int]] = {}
+    for cid, items in buckets.items():
+        posted = 0
+        dl = 0
+        for vid, flag in items:
+            if flag or vid in published:
+                posted += 1
+            if vid in downloaded:
+                dl += 1
+        total = len(items)
+        stats[cid] = {
+            "video_count": total,
+            "posted_count": posted,
+            "unposted_count": max(0, total - posted),
+            "downloaded_count": dl,
+        }
+    return stats
+
+
 def list_channels(db_path: str) -> List[Dict[str, Any]]:
     sync_posted_from_jobs(db_path)
+    stats = _stats_by_channel(db_path)
+    empty = {
+        "video_count": 0,
+        "posted_count": 0,
+        "unposted_count": 0,
+        "downloaded_count": 0,
+    }
     with get_db_connection(db_path) as conn:
         rows = [dict(r) for r in conn.execute(
             "SELECT * FROM content_channels ORDER BY updated_at DESC"
@@ -336,7 +467,7 @@ def list_channels(db_path: str) -> List[Dict[str, Any]]:
     for raw in rows:
         d = dict(raw)
         d["tags"] = _tags_list(d.get("tags"))
-        d.update(stats_from_videos(load_channel_videos(db_path, d["channel_id"])))
+        d.update(stats.get(d["channel_id"], empty))
         out.append(d)
     return out
 

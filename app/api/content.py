@@ -133,13 +133,17 @@ async def api_add_channel(req: AddChannelRequest):
         catalog=catalog,
         tags=req.tags,
     )
+    inventory = channel_inventory(settings.DB_PATH, channel_id, status="all")
     channels = [c for c in list_channels(settings.DB_PATH) if c["channel_id"] == channel_id]
+    saved = inventory["video_count"]
     return {
         "channel": channels[0] if channels else get_channel(settings.DB_PATH, channel_id),
         "video_ids": video_ids,
-        "count": len(video_ids),
+        "videos": inventory["videos"],
+        "count": saved,
+        "video_count": saved,
         "message": (
-            f"Đã lưu kênh «{profile.get('nickname') or platform}» với {len(video_ids)} video. "
+            f"Đã lưu kênh «{profile.get('nickname') or platform}» với {saved} video. "
             "Bấm vào kênh để xem checklist đã đăng / chưa đăng."
         ),
     }
@@ -194,35 +198,53 @@ async def api_sync_channel(channel_id: str):
     url = (channel.get("url") or "").strip()
     if not url:
         raise HTTPException(status_code=400, detail="Kênh chưa có link để đồng bộ")
-    try:
+
+    async def _run() -> Dict[str, Any]:
         collected = await _collect(url, max_videos=500)
+        profile = dict(collected.get("profile") or {})
+        # Keep the name the user set in Sửa kênh; scrape nickname is only a fallback.
+        if channel.get("name"):
+            profile["nickname"] = channel.get("name")
+        else:
+            profile.setdefault("nickname", channel.get("name"))
+        platform = (collected.get("platform") or channel.get("platform") or "").lower()
+        upsert_source_catalog(
+            settings.DB_PATH,
+            profile=profile,
+            platform=platform,
+            url=collected.get("channel_url") or url,
+            video_ids=collected.get("video_ids") or [],
+            catalog=collected.get("catalog") or [],
+            channel_id=channel_id,
+        )
+        return {
+            "collected_count": len(collected.get("video_ids") or []) or len(collected.get("catalog") or []),
+            "hint": collected.get("hint") or "",
+            **channel_inventory(settings.DB_PATH, channel_id, status="all"),
+        }
+
+    try:
+        inventory = await asyncio.shield(_run())
     except Exception as e:
         logger.exception("content sync failed")
         raise HTTPException(status_code=400, detail=f"Không đồng bộ được kênh: {e}") from e
-    profile = dict(collected.get("profile") or {})
-    # Keep the name the user set in Sửa kênh; scrape nickname is only a fallback.
-    if channel.get("name"):
-        profile["nickname"] = channel.get("name")
-    else:
-        profile.setdefault("nickname", channel.get("name"))
-    platform = (collected.get("platform") or channel.get("platform") or "").lower()
-    upsert_source_catalog(
-        settings.DB_PATH,
-        profile=profile,
-        platform=platform,
-        url=collected.get("channel_url") or url,
-        video_ids=collected.get("video_ids") or [],
-        catalog=collected.get("catalog") or [],
-    )
-    inventory = channel_inventory(settings.DB_PATH, channel_id, status="all")
+    count = inventory["video_count"]
+    fetched = inventory.get("collected_count") or count
+    hint = inventory.get("hint") or ""
+    message = f"Đã lưu {count} video của kênh vào danh sách."
+    if hint and count <= 1:
+        message = hint
+    elif fetched and fetched < count:
+        message = f"Đã lưu {count} video (thêm {fetched} video mới từ lần đồng bộ này)."
     return {
         "channel_id": channel_id,
-        "count": inventory["video_count"],
-        "video_count": inventory["video_count"],
+        "count": count,
+        "video_count": count,
         "posted_count": inventory["posted_count"],
         "unposted_count": inventory["unposted_count"],
         "downloaded_count": inventory["downloaded_count"],
-        "message": f"Đã đồng bộ {inventory['video_count']} video từ kênh.",
+        "videos": inventory["videos"],
+        "message": message,
     }
 
 

@@ -2,9 +2,24 @@ import React, { useEffect, useRef, useState } from 'react';
 import { X, Download, ShieldCheck, Film, Captions } from 'lucide-react';
 import { getStreamUrl, getSubtitleUrl, getDownloadUrl } from '../services/api';
 
+const VERTICAL_PLATS = ['tiktok', 'youtube_shorts', 'facebook', 'instagram', 'douyin'];
+
+function looksPortraitMedia(video) {
+  const streamId = String(video?.stream_job_id || video?.job_id || video?.filename || '');
+  const plat = String(video?.play_platform || '').toLowerCase();
+  if (VERTICAL_PLATS.includes(plat) && plat !== 'douyin') return true;
+  return VERTICAL_PLATS.some((p) => streamId.includes(`.${p}`));
+}
+
 export function VideoModal({ isOpen, onClose, video }) {
   const videoRef = useRef(null);
   const [captionsOn, setCaptionsOn] = useState(false);
+  const [portrait, setPortrait] = useState(() => looksPortraitMedia(video));
+  const mediaId = video?.job_id || video?.video_id || video?.filename;
+  const streamId = video?.stream_job_id || mediaId;
+  const streamCacheKey = [streamId, video?.output_md5, video?.updated_at, video?.file_size, 'p2'].filter(Boolean).join('-');
+  const streamUrl = streamId ? getStreamUrl(streamId, streamCacheKey) : '';
+  const downloadUrl = streamId ? getDownloadUrl(streamId) : '';
 
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -24,13 +39,27 @@ export function VideoModal({ isOpen, onClose, video }) {
 
   useEffect(() => {
     setCaptionsOn(false);
-  }, [video?.job_id, video?.video_id, video?.filename]);
+    setPortrait(looksPortraitMedia(video));
+  }, [video?.job_id, video?.video_id, video?.filename, video?.stream_job_id, video?.play_platform]);
+
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el) return undefined;
+    const unmute = () => {
+      el.muted = false;
+      if (el.volume === 0) el.volume = 1;
+    };
+    unmute();
+    el.addEventListener('loadeddata', unmute);
+    el.addEventListener('play', unmute);
+    return () => {
+      el.removeEventListener('loadeddata', unmute);
+      el.removeEventListener('play', unmute);
+    };
+  }, [streamUrl]);
 
   if (!isOpen || !video) return null;
 
-  const mediaId = video.job_id || video.video_id || video.filename;
-  const streamUrl = getStreamUrl(mediaId);
-  const downloadUrl = getDownloadUrl(mediaId);
   const title = video.title || video.filename || `Video Thành Phẩm (${mediaId})`;
   const hasToggleableSubtitles = video.subtitle_mode === 'soft';
 
@@ -48,7 +77,9 @@ export function VideoModal({ isOpen, onClose, video }) {
       onClick={onClose}
     >
       <div
-        className="bg-white rounded-3xl max-w-4xl w-full overflow-hidden shadow-2xl border border-slate-200 flex flex-col max-h-[90vh] animate-scale-up"
+        className={`bg-white rounded-3xl w-full overflow-hidden shadow-2xl border border-slate-200 flex flex-col max-h-[90vh] animate-scale-up ${
+          portrait ? 'max-w-sm' : 'max-w-4xl'
+        }`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Modal Header */}
@@ -75,23 +106,36 @@ export function VideoModal({ isOpen, onClose, video }) {
         </div>
 
         {/* Video Player Container */}
-        <div className="bg-slate-950 flex items-center justify-center relative aspect-video w-full max-h-[60vh]">
+        <div
+          className={`bg-slate-950 flex items-center justify-center relative w-full min-h-0 ${
+            portrait ? 'aspect-[9/16] max-h-[min(72vh,640px)] mx-auto' : 'aspect-video max-h-[60vh]'
+          }`}
+        >
           <video
+            key={streamUrl}
             ref={videoRef}
             src={streamUrl}
             controls
             autoPlay
             playsInline
-            preload="metadata"
-            type="video/mp4"
+            muted={false}
+            preload="auto"
+            onLoadedMetadata={() => {
+              const el = videoRef.current;
+              if (!el) return;
+              setPortrait((el.videoHeight || 0) > (el.videoWidth || 0));
+              el.play?.().catch(() => {});
+            }}
             className="w-full h-full object-contain"
           >
-            <track
-              kind="subtitles"
-              src={getSubtitleUrl(mediaId)}
-              srcLang="vi"
-              label="Vietsub"
-            />
+            {hasToggleableSubtitles && (
+              <track
+                kind="subtitles"
+                src={getSubtitleUrl(mediaId)}
+                srcLang="vi"
+                label="Vietsub"
+              />
+            )}
             Trình duyệt của bạn không hỗ trợ phát video HTML5.
           </video>
           {hasToggleableSubtitles && (

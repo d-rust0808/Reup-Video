@@ -401,6 +401,11 @@ class YoutubeScraper(BaseScraper):
                             "video_id": eid,
                             "title": title,
                             "url": watch_url_for_id(eid),
+                            "published_at": (
+                                (entry.get("timestamp") if isinstance(entry, dict) else None)
+                                or (entry.get("release_timestamp") if isinstance(entry, dict) else None)
+                                or (entry.get("upload_date") if isinstance(entry, dict) else None)
+                            ),
                         })
                     if len(video_ids) >= max_videos:
                         break

@@ -23,6 +23,7 @@ import {
   Play,
   Square,
   ImagePlus,
+  X,
 } from 'lucide-react';
 
 import { fetchChannels, fetchChannelGroups, fetchBgmLibrary, previewVoice, uploadStudioOverlay, getMediaUrl } from '../services/api';
@@ -31,6 +32,10 @@ import {
   VERTICAL_TOGGLE,
   platformsHaveHorizontal,
   platformsHaveVertical,
+  previewSubtitleY,
+  clampCoverHeight,
+  clampSubtitleBoxW,
+  clampSubtitleBoxH,
 } from '../lib/previewCanvas';
 
 const VOICE_OPTIONS = {
@@ -173,7 +178,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
       onChange({
         ...options,
         preset_id: 'clean_keep_bgm',
-        subtitle_bottom_crop: 18.0,
+        subtitle_bottom_crop: 22.0,
         enable_vocal_mute: false,
         preserve_bgm: true,
         vocal_mute_strategy: 'auto',
@@ -184,7 +189,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
       onChange({
         ...options,
         preset_id: 'clean_duck_vocals',
-        subtitle_bottom_crop: 18.0,
+        subtitle_bottom_crop: 22.0,
         enable_vocal_mute: true,
         preserve_bgm: true,
         vocal_mute_strategy: 'demucs_duck',
@@ -196,7 +201,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
       onChange({
         ...options,
         preset_id: 'clean_mute_all',
-        subtitle_bottom_crop: 18.0,
+        subtitle_bottom_crop: 22.0,
         enable_vocal_mute: true,
         preserve_bgm: false,
         vocal_mute_strategy: 'mute_all',
@@ -466,12 +471,33 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                 min="0.80"
                 max="1.50"
                 step="0.01"
-                value={options.speed_ratio}
+                value={Number(options.speed_ratio || 1.03)}
                 onChange={(e) => handleChange('speed_ratio', parseFloat(e.target.value))}
                 className="w-full accent-blue-600 bg-slate-200 rounded-lg cursor-pointer"
               />
               <p className="text-[10px] text-slate-500 font-medium">
-                Preview phát ngay tốc độ này. File encode cũng ngắn/dài đúng hệ số (1.30x ≈ ngắn 23%).
+                Bấm phát trên preview để nghe đúng hệ số. File encode ngắn/dài theo tốc độ (1.30x ≈ ngắn 23%).
+              </p>
+            </div>
+
+            <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-2">
+              <div className="flex justify-between text-xs">
+                <span className="font-bold text-slate-700">Kéo dài ô logo 9:16</span>
+                <span className="font-mono text-blue-600 font-bold">
+                  {Math.round((Number(options.canvas_fill) || 0) * 100)}%
+                </span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                value={Math.max(0, Math.min(1, Number(options.canvas_fill) || 0))}
+                onChange={(e) => handleChange('canvas_fill', parseFloat(e.target.value))}
+                className="w-full accent-blue-600 bg-slate-200 rounded-lg cursor-pointer"
+              />
+              <p className="text-[10px] text-slate-500 font-medium">
+                0% = ảnh 16:9 như cũ. 100% = hiện đủ logo dưới video, khít theo tỉ lệ ảnh — không zoom, không đè, không dư đen.
               </p>
             </div>
 
@@ -497,7 +523,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
               <div>
                 <span className="text-xs font-extrabold text-slate-800 block">Phủ chữ gốc</span>
                 <span className="text-[10px] text-slate-500">
-                  Ảnh tuỳ chỉnh che dải đáy, giữ khung 9:16 — không cắt trống. Nền đen → chữ trắng, nền trắng → chữ đen.
+                  Phủ màu dính đáy hình. Chỉ kéo Vietsub để đè chữ gốc. Ảnh logo vẫn nằm dưới video 9:16.
                 </span>
               </div>
               <div className="grid grid-cols-2 gap-1.5 min-w-0">
@@ -542,73 +568,203 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                   );
                 })}
               </div>
-              <label className={`flex items-center gap-2 rounded-xl border px-2.5 py-2 cursor-pointer min-w-0 ${
+              <div className={`flex items-center gap-1 rounded-xl border min-w-0 ${
                 (options.caption_cover || 'off') === 'image'
                   ? 'border-slate-900 bg-white shadow-xs'
                   : 'border-slate-200 bg-white/70 hover:border-slate-300'
               }`}>
-                <span className="w-8 h-8 rounded-md border border-slate-300 shrink-0 overflow-hidden bg-slate-100 flex items-center justify-center">
-                  {options.caption_cover_url ? (
-                    <img src={getMediaUrl(options.caption_cover_url)} alt="" className="w-full h-full object-cover" />
-                  ) : (
-                    <ImagePlus className="w-4 h-4 text-slate-500" />
-                  )}
-                </span>
-                <span className="min-w-0">
-                  <span className="block text-[10px] font-bold text-slate-800 leading-snug">Ảnh tuỳ chỉnh</span>
-                  <span className="block text-[9px] text-slate-500 leading-snug">
-                    {options.caption_cover_name || 'Chọn PNG/JPG phủ dải đáy'}
+                <label className="flex flex-1 items-center gap-2 px-2.5 py-2 cursor-pointer min-w-0">
+                  <span className="w-8 h-8 rounded-md border border-slate-300 shrink-0 overflow-hidden bg-slate-100 flex items-center justify-center">
+                    {options.caption_cover_url ? (
+                      <img src={getMediaUrl(options.caption_cover_url)} alt="" className="w-full h-full object-cover" />
+                    ) : (
+                      <ImagePlus className="w-4 h-4 text-slate-500" />
+                    )}
                   </span>
-                </span>
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp"
-                  className="hidden"
-                  onChange={async (e) => {
-                    const file = e.target.files?.[0];
-                    e.target.value = '';
-                    if (!file) return;
-                    try {
-                      const res = await uploadStudioOverlay(file, { kind: 'logo', x: 0, y: 0.78, w: 1 });
+                  <span className="min-w-0">
+                    <span className="block text-[10px] font-bold text-slate-800 leading-snug">Ảnh tuỳ chỉnh</span>
+                    <span className="block text-[9px] text-slate-500 leading-snug">
+                      {options.caption_cover_name || 'Chọn PNG/JPG logo dưới video'}
+                    </span>
+                  </span>
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (!file) return;
+                      try {
+                        const res = await uploadStudioOverlay(file, { kind: 'logo', x: 0, y: 0.78, w: 1 });
+                        onChange({
+                          ...options,
+                          caption_cover: 'image',
+                          caption_cover_image: res.image_path,
+                          caption_cover_url: res.url,
+                          caption_cover_name: res.filename || file.name,
+                        });
+                      } catch (err) {
+                        console.error(err);
+                      }
+                    }}
+                  />
+                </label>
+                {Boolean(options.caption_cover_url || options.caption_cover_image) && (
+                  <button
+                    type="button"
+                    aria-label="Xoá ảnh logo"
+                    title="Xoá ảnh logo"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
                       onChange({
                         ...options,
-                        caption_cover: 'image',
-                        caption_cover_image: res.image_path,
-                        caption_cover_url: res.url,
-                        caption_cover_name: res.filename || file.name,
+                        caption_cover: options.caption_cover === 'image' ? 'off' : options.caption_cover,
+                        caption_cover_image: '',
+                        caption_cover_url: '',
+                        caption_cover_name: '',
                       });
-                    } catch (err) {
-                      console.error(err);
-                    }
-                  }}
-                />
-              </label>
+                    }}
+                    className="shrink-0 mr-1.5 w-7 h-7 rounded-lg border border-slate-200 bg-white hover:bg-rose-50 hover:border-rose-200 hover:text-rose-600 text-slate-500 flex items-center justify-center"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Bottom Subtitle Crop / cover height */}
             <div className="p-3.5 bg-amber-50/70 rounded-2xl border border-amber-200/80 space-y-2">
               <div className="flex justify-between text-xs">
                 <span className="font-bold text-amber-950">
-                  {options.caption_cover && options.caption_cover !== 'off'
-                    ? 'Độ cao dải phủ'
-                    : 'Cắt mép đáy (bỏ chữ gốc)'}
+                  {options.caption_cover === 'image'
+                    ? 'Cắt mép đáy (bỏ chữ gốc)'
+                    : options.caption_cover && options.caption_cover !== 'off'
+                      ? 'Độ cao dải phủ đáy'
+                      : 'Cắt mép đáy (bỏ chữ gốc)'}
                 </span>
-                <span className="font-mono text-amber-700 font-bold">{options.subtitle_bottom_crop || 0}%</span>
+                <span className="font-mono text-amber-700 font-bold">
+                  {options.caption_cover && options.caption_cover !== 'off' && options.caption_cover !== 'image'
+                    && Number(options.subtitle_bottom_crop || 0) <= 0
+                    ? 'Tắt'
+                    : `${options.subtitle_bottom_crop || 0}%`}
+                </span>
               </div>
               <input
                 type="range"
-                min="0.0"
-                max="36.0"
+                min="0"
+                max="36"
                 step="0.5"
-                value={options.subtitle_bottom_crop || 0}
+                value={
+                  options.caption_cover && options.caption_cover !== 'off' && options.caption_cover !== 'image'
+                    ? clampCoverHeight((Number(options.subtitle_bottom_crop) || 0) / 100) * 100
+                    : (options.subtitle_bottom_crop || 0)
+                }
                 onChange={(e) => handleChange('subtitle_bottom_crop', parseFloat(e.target.value))}
                 className="w-full accent-amber-600 bg-amber-200/70 rounded-lg cursor-pointer"
               />
               <span className="text-[10px] text-amber-800 font-medium block">
-                {options.caption_cover && options.caption_cover !== 'off'
-                  ? 'Chiều cao dải phủ (ảnh hoặc màu). Giữ nguyên 9:16, không để khung trống.'
-                  : 'Cắt hẳn dải dưới. Để tránh khung trống, chọn Ảnh tuỳ chỉnh ở mục phủ chữ.'}
+                {options.caption_cover === 'image'
+                  ? 'Cắt dải chữ gốc ở đáy video. Logo nằm dưới khung 9:16, không đè hình.'
+                  : options.caption_cover && options.caption_cover !== 'off'
+                    ? '0% = tắt khoảng trắng. Kéo 6–36% chiều cao hình (22% = mặc định). Vietsub kéo riêng.'
+                    : 'Cắt hẳn dải dưới. Logo: chọn Ảnh tuỳ chỉnh rồi kéo dài ô logo 9:16.'}
               </span>
+              {options.caption_cover && options.caption_cover !== 'off' && options.caption_cover !== 'image' && (
+                <button
+                  type="button"
+                  onClick={() => handleChange(
+                    'subtitle_bottom_crop',
+                    Number(options.subtitle_bottom_crop || 0) <= 0 ? 22 : 0,
+                  )}
+                  className={`w-full rounded-xl border px-2.5 py-1.5 text-[11px] font-extrabold transition ${
+                    Number(options.subtitle_bottom_crop || 0) <= 0
+                      ? 'border-amber-600 bg-amber-600 text-white'
+                      : 'border-amber-200 bg-white text-amber-950 hover:border-amber-400'
+                  }`}
+                >
+                  {Number(options.subtitle_bottom_crop || 0) <= 0 ? 'Bật lại dải phủ đáy' : 'Tắt dải phủ đáy'}
+                </button>
+              )}
+            </div>
+
+            <div className="p-3.5 bg-sky-50/80 rounded-2xl border border-sky-200/80 space-y-2">
+              <div className="flex justify-between text-xs">
+                <span className="font-bold text-sky-950">Vị trí Vietsub trên video</span>
+                <span className="font-mono text-sky-700 font-bold">
+                  {Number(options.subtitle_y) > 0.04
+                    ? `${Math.round(previewSubtitleY(options.subtitle_y) * 100)}%`
+                    : 'Tự động đáy'}
+                </span>
+              </div>
+              <input
+                type="range"
+                min="0.08"
+                max="0.94"
+                step="0.01"
+                value={previewSubtitleY(
+                  options.subtitle_y,
+                  clampCoverHeight((Number(options.subtitle_bottom_crop) || 0) / 100),
+                  Boolean(options.caption_cover && options.caption_cover !== 'off' && options.caption_cover !== 'image'),
+                )}
+                onChange={(e) => handleChange('subtitle_y', parseFloat(e.target.value))}
+                className="w-full accent-sky-600 bg-sky-200/70 rounded-lg cursor-pointer"
+              />
+              <div className="flex justify-between text-[10px] font-bold text-sky-800">
+                <span>Đỉnh hình</span>
+                <span>Giữa</span>
+                <span>Đáy hình</span>
+              </div>
+              <span className="text-[10px] text-sky-800 font-medium block">
+                Kéo hộp Vietsub để đè chữ gốc. Cao nền 0% = tắt khoảng trắng (chỉ chữ + viền).
+              </span>
+              <div className="flex justify-between text-xs pt-1">
+                <span className="font-bold text-sky-950">Rộng nền Vietsub</span>
+                <span className="font-mono text-sky-700 font-bold">
+                  {Math.round(clampSubtitleBoxW(options.subtitle_box_w) * 100)}%
+                </span>
+              </div>
+              <input
+                type="range"
+                min="0.40"
+                max="1"
+                step="0.01"
+                value={clampSubtitleBoxW(options.subtitle_box_w)}
+                onChange={(e) => handleChange('subtitle_box_w', parseFloat(e.target.value))}
+                className="w-full accent-sky-600 bg-sky-200/70 rounded-lg cursor-pointer"
+              />
+              <div className="flex justify-between text-xs">
+                <span className="font-bold text-sky-950">Cao nền Vietsub</span>
+                <span className="font-mono text-sky-700 font-bold">
+                  {clampSubtitleBoxH(options.subtitle_box_h) <= 0
+                    ? 'Tắt'
+                    : `${Math.round(clampSubtitleBoxH(options.subtitle_box_h) * 100)}%`}
+                </span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="0.22"
+                step="0.005"
+                value={clampSubtitleBoxH(options.subtitle_box_h)}
+                onChange={(e) => handleChange('subtitle_box_h', parseFloat(e.target.value))}
+                className="w-full accent-sky-600 bg-sky-200/70 rounded-lg cursor-pointer"
+              />
+              <button
+                type="button"
+                onClick={() => handleChange(
+                  'subtitle_box_h',
+                  clampSubtitleBoxH(options.subtitle_box_h) <= 0 ? 0.08 : 0,
+                )}
+                className={`w-full rounded-xl border px-2.5 py-1.5 text-[11px] font-extrabold transition ${
+                  clampSubtitleBoxH(options.subtitle_box_h) <= 0
+                    ? 'border-sky-600 bg-sky-600 text-white'
+                    : 'border-sky-200 bg-white text-sky-950 hover:border-sky-400'
+                }`}
+              >
+                {clampSubtitleBoxH(options.subtitle_box_h) <= 0 ? 'Bật lại nền Vietsub' : 'Tắt khoảng trắng'}
+              </button>
             </div>
 
             {/* Video Trimming (Cut Start/End Seconds) */}
@@ -876,7 +1032,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                   ].map((mode) => {
                     const selectedMode = options.burn_subtitles === false
                       ? 'off'
-                      : (options.subtitle_mode || 'soft');
+                      : (options.subtitle_mode || 'hard');
                     const active = selectedMode === mode.id;
                     return (
                       <button
@@ -913,13 +1069,13 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                       id: 'dub',
                       icon: Captions,
                       title: 'Gốc',
-                      desc: 'Dịch sát nghĩa gốc.',
+                      desc: 'Tiếng Việt nói, sát ý, sửa lỗi nghe.',
                     },
                     {
                       id: 'narrator',
                       icon: BookOpen,
                       title: 'Kể chuyện',
-                      desc: 'Tóm tắt ngôi thứ ba.',
+                      desc: 'Ngôi 3, kể lại đúng cảnh đang xảy ra.',
                     },
                     {
                       id: 'funny',

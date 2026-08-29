@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   BookOpen,
   CheckSquare,
@@ -43,6 +43,14 @@ function platformLabel(p) {
   return p || 'Kênh';
 }
 
+function formatPublishedAt(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const dt = new Date(text);
+  if (Number.isNaN(dt.getTime())) return '';
+  return dt.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
 function parseTags(text) {
   return String(text || '')
     .split(/[,;#]+/)
@@ -63,6 +71,12 @@ export function ContentManager({ onSelectForWorkbench }) {
   const [name, setName] = useState('');
   const [tags, setTags] = useState('');
   const [editing, setEditing] = useState(null);
+  const openIdRef = useRef(null);
+  const videosSeq = useRef(0);
+
+  useEffect(() => {
+    openIdRef.current = openId;
+  }, [openId]);
 
   const loadChannels = useCallback(async () => {
     const data = await fetchContentChannels();
@@ -103,14 +117,17 @@ export function ContentManager({ onSelectForWorkbench }) {
   }, []);
 
   const loadVideos = useCallback(async (channelId, status = filter) => {
+    const seq = ++videosSeq.current;
     const data = await fetchContentVideos(channelId, status);
+    if (seq !== videosSeq.current) return data.videos || [];
+    if (openIdRef.current && openIdRef.current !== channelId) return data.videos || [];
     setVideos(data.videos || []);
     applyChannelStats(channelId, data);
     return data.videos || [];
   }, [filter, applyChannelStats]);
 
   useEffect(() => {
-    if (!openId) return undefined;
+    if (!openId || busy) return undefined;
     const refresh = () => {
       loadChannels().catch(() => {});
       loadVideos(openId, filter).catch(() => {});
@@ -121,26 +138,33 @@ export function ContentManager({ onSelectForWorkbench }) {
       window.removeEventListener('reup:channels-changed', refresh);
       window.clearInterval(timer);
     };
-  }, [openId, filter, loadChannels, loadVideos]);
+  }, [openId, filter, loadChannels, loadVideos, busy]);
 
   const openChannel = async (channel) => {
     const id = channel.channel_id;
     if (openId === id) {
+      videosSeq.current += 1;
       setOpenId(null);
       setVideos([]);
       return;
     }
+    videosSeq.current += 1;
     setOpenId(id);
+    setFilter('all');
+    setVideos([]);
     setBusy(`open-${id}`);
     setError('');
     try {
-      let list = [];
       if (!channel.video_count) {
-        await syncContentChannel(id);
+        const res = await syncContentChannel(id);
+        if (Array.isArray(res.videos)) setVideos(res.videos);
+        applyChannelStats(id, res);
         await loadChannels();
+        if (openIdRef.current !== id) return;
+        if (!res.videos?.length) await loadVideos(id, 'all');
+        return;
       }
-      list = await loadVideos(id, filter);
-      setVideos(list);
+      await loadVideos(id, 'all');
     } catch (err) {
       setError(err.message || 'Không mở được danh sách video');
     } finally {
@@ -172,7 +196,14 @@ export function ContentManager({ onSelectForWorkbench }) {
       if (created) {
         const ch = list.find((c) => c.channel_id === created) || res.channel;
         setOpenId(created);
-        await loadVideos(created, filter);
+        setFilter('all');
+        if (Array.isArray(res.videos) && res.videos.length) {
+          videosSeq.current += 1;
+          setVideos(res.videos);
+          applyChannelStats(created, res);
+        } else {
+          await loadVideos(created, 'all');
+        }
         setChannels((prev) => prev.map((c) => (c.channel_id === created ? { ...c, ...ch } : c)));
       }
     } catch (err) {
@@ -185,12 +216,19 @@ export function ContentManager({ onSelectForWorkbench }) {
   const handleSync = async (channelId) => {
     setBusy(`sync-${channelId}`);
     setError('');
+    setMessage('Đang đồng bộ danh sách — Douyin có thể mất khoảng 1 phút, đừng đóng kênh.');
     try {
       const res = await syncContentChannel(channelId);
       setMessage(res.message || 'Đã đồng bộ');
       applyChannelStats(channelId, res);
+      if (Array.isArray(res.videos) && openIdRef.current === channelId) {
+        videosSeq.current += 1;
+        setVideos(res.videos);
+      }
       await loadChannels();
-      if (openId === channelId) await loadVideos(channelId, filter);
+      if (openIdRef.current === channelId && !res.videos?.length) {
+        await loadVideos(channelId, filter);
+      }
     } catch (err) {
       setError(err.message || 'Đồng bộ thất bại');
     } finally {
@@ -559,7 +597,13 @@ export function ContentManager({ onSelectForWorkbench }) {
                   <div className="max-h-[520px] overflow-y-auto rounded-2xl border border-slate-200 bg-white divide-y divide-slate-100">
                     {visibleVideos.length === 0 && busy !== `open-${ch.channel_id}` && (
                       <p className="p-4 text-xs text-slate-500 font-medium">
-                        Chưa có video. Bấm «Đồng bộ danh sách» để lấy catalog từ kênh.
+                        {busy === `sync-${ch.channel_id}`
+                          ? 'Đang đồng bộ và ghi danh sách vào database...'
+                          : filter !== 'all'
+                            ? 'Không có video trong bộ lọc này.'
+                            : ch.video_count
+                              ? 'Checklist đang tải. Nếu chưa thấy, bấm lại «Đồng bộ danh sách».'
+                              : 'Chưa có video. Bấm «Đồng bộ danh sách» để lấy catalog từ kênh.'}
                       </p>
                     )}
                     {visibleVideos.map((vid) => (
@@ -593,6 +637,9 @@ export function ContentManager({ onSelectForWorkbench }) {
                               <span className="text-slate-400">Chưa tải</span>
                             )}
                             {vid.posted_auto ? <span className="text-emerald-600">· đã lên Fanpage</span> : null}
+                            {formatPublishedAt(vid.published_at) ? (
+                              <span title={vid.published_at}>Đăng {formatPublishedAt(vid.published_at)}</span>
+                            ) : null}
                           </p>
                         </div>
                         <div className="flex items-center gap-1 shrink-0">

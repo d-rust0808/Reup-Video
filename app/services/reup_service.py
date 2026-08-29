@@ -7,6 +7,7 @@ video (hflip, setpts, crop, scale, eq, hue, unsharp) and audio (atempo, asetrate
 Target Path: app/services/reup_service.py
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -177,10 +178,11 @@ def build_reup_filtergraph(
     cfg: ReupConfig,
     target_width: int = 1920,
     target_height: int = 1080,
-    audio_sample_rate: int = 44100,
+    audio_sample_rate: int = 0,
     has_audio: bool = True,
     burn_srt_path: Optional[str] = None,
     speech_intervals: Optional[List[Tuple[float, float]]] = None,
+    frame_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[str, bool, str, str]:
     """
     Constructs unified single-pass complex filtergraph string alongside individual
@@ -191,11 +193,13 @@ def build_reup_filtergraph(
     """
     from app.services.caption_cover import (
         caption_cover_drawbox,
+        clamp_subtitle_box_h,
         cover_band_height,
         drop_delogo_nodes,
         normalize_caption_cover,
         should_crop_bottom,
         subtitle_force_style,
+        subtitle_plate_drawbox,
     )
 
     vf_nodes = []
@@ -210,6 +214,7 @@ def build_reup_filtergraph(
     bottom = float(getattr(cfg, "subtitle_bottom_crop", 0.0) or 0.0)
     force_crop = bool(getattr(cfg, "force_bottom_crop", False))
     cover_h = cover_band_height(bottom, cover)
+    cover_pad = float(getattr(cfg, "cover_pad", 0.0) or 0.0)
     # Image banner keeps 9:16 (no empty letterbox). Color plate paints. Crop cuts pixels.
     do_bottom_crop = should_crop_bottom(cover, force_crop, bottom)
     if do_bottom_crop:
@@ -227,15 +232,38 @@ def build_reup_filtergraph(
     vf_nodes.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
 
     if cover != "off":
-        bar = caption_cover_drawbox(cover, cover_h)
+        bar = caption_cover_drawbox(cover, bottom, cover_pad=cover_pad)
         if bar:
             vf_nodes.append(bar)
 
     # Burn Vietsub on original timestamps BEFORE setpts so SRT does not need rescaling
     if burn_srt_path and os.path.exists(burn_srt_path):
-        style = subtitle_force_style(cover, cover_h)
-        sub_path = _ffmpeg_subtitles_path(burn_srt_path)
-        vf_nodes.append(f"subtitles='{sub_path}':force_style='{style}'")
+        if frame_size and len(frame_size) == 2:
+            frame_w, frame_h = int(frame_size[0] or target_width), int(frame_size[1] or target_height)
+        else:
+            frame_w, frame_h = int(target_width or 1920), int(target_height or 1080)
+        cue_y = float(getattr(cfg, "subtitle_y", 0.0) or 0.0)
+        box_h = clamp_subtitle_box_h(getattr(cfg, "subtitle_box_h", 0.08))
+        plate = subtitle_plate_drawbox(
+            cover,
+            float(getattr(cfg, "subtitle_box_w", 0.88) or 0.88),
+            box_h,
+            subtitle_y=cue_y,
+            band_h=cover_h if cover == "image" else bottom,
+            video_w=frame_w,
+            video_h=frame_h,
+        )
+        if plate:
+            vf_nodes.append(plate)
+        style = subtitle_force_style(
+            cover,
+            cover_h if cover == "image" else bottom,
+            video_w=frame_w, video_h=frame_h,
+            subtitle_y=cue_y,
+            cover_pad=cover_pad,
+            subtitle_box_h=box_h,
+        )
+        vf_nodes.append(_subtitles_filter(burn_srt_path, style, frame_w, frame_h))
 
     # Cinematic border — printed onto every frame (after picture, under/with subs)
     if getattr(cfg, "frame_enabled", False):
@@ -251,8 +279,8 @@ def build_reup_filtergraph(
                 f"drawbox=x={thick}:y={thick}:w=iw-{thick*2}:h=ih-{thick*2}:t={inner}:color=white@0.88"
             )
 
-    s_ratio = cfg.speed_factor
-    if s_ratio != 1.0:
+    s_ratio = float(cfg.speed_factor or 1.0)
+    if abs(s_ratio - 1.0) > 1e-3:
         vf_nodes.append(f"setpts=PTS/{s_ratio:.4f}")
         vf_nodes.append("fps=30")
 
@@ -298,15 +326,20 @@ def build_reup_filtergraph(
             # Bound pitch ratio between 0.97 and 1.03 to preserve human voice timbre & natural formants
             raw_p_ratio = cfg.pitch_factor if cfg.pitch_factor != 1.0 else s_ratio
             p_ratio = max(0.97, min(1.03, raw_p_ratio))
-            if abs(p_ratio - 1.0) > 1e-4:
-                af_nodes.append(f"asetrate={audio_sample_rate}*{p_ratio:.4f},aresample={audio_sample_rate}")
-
-            remaining_speed = s_ratio / p_ratio if p_ratio != 0 else s_ratio
+            src_rate = int(audio_sample_rate or 0)
+            applied_pitch = False
+            if src_rate >= 8000 and abs(p_ratio - 1.0) > 1e-4:
+                # asetrate must use THIS file's rate. A fixed 44100 on 48 kHz
+                # Opus (YouTube) left audio longer than the sped video.
+                af_nodes.append(f"asetrate={src_rate}*{p_ratio:.4f},aresample={src_rate}")
+                applied_pitch = True
+            remaining_speed = (
+                (s_ratio / p_ratio) if (applied_pitch and p_ratio) else s_ratio
+            )
             if abs(remaining_speed - 1.0) > 1e-4:
                 af_nodes.extend(_build_atempo_nodes(remaining_speed))
-        else:
-            if abs(s_ratio - 1.0) > 1e-4:
-                af_nodes.extend(_build_atempo_nodes(s_ratio))
+        elif abs(s_ratio - 1.0) > 1e-4:
+            af_nodes.extend(_build_atempo_nodes(s_ratio))
 
     vf_str = ",".join(vf_nodes) if vf_nodes else ""
     af_str = ",".join(af_nodes) if af_nodes else ""
@@ -334,11 +367,11 @@ def build_reup_filtergraph(
 
 
 def apply_vietnamese_dubbing(video_path: str, text_to_translate: str, output_path: Optional[str] = None) -> bool:
-    """Translates text to Vietnamese, generates Edge-TTS speech audio, and replaces video audio stream."""
+    """Translates text to Vietnamese via AGY only, generates Edge-TTS, and replaces video audio."""
     import asyncio
     try:
-        from app.services.ai_scriptwriter_service import ai_scriptwriter_service
-        from app.services.pyvideotrans_service import _is_invalid_translation
+        from app.services import agy_cli_service
+        from app.services.vietsub_rules import is_invalid_translation
         import edge_tts
 
         tts_file = video_path + ".vi_voice.mp3"
@@ -346,22 +379,20 @@ def apply_vietnamese_dubbing(video_path: str, text_to_translate: str, output_pat
         
         async def _gen_tts_and_translate():
             nonlocal vi_text
-            if ai_scriptwriter_service.is_available():
-                vi_text = await asyncio.to_thread(
-                    lambda: ai_scriptwriter_service.translate_text(text_to_translate, target_lang="vi")
-                )
-            if not vi_text or _is_invalid_translation(vi_text):
+            if agy_cli_service.is_available():
                 try:
-                    from deep_translator import GoogleTranslator
-                    raw_res = await asyncio.to_thread(
-                        lambda: GoogleTranslator(source="auto", target="vi").translate(text_to_translate)
+                    lines = await asyncio.to_thread(
+                        lambda: agy_cli_service.translate_cues(
+                            [text_to_translate],
+                            target_lang="vi",
+                            style="dub",
+                        )
                     )
-                    if raw_res and not _is_invalid_translation(raw_res):
-                        vi_text = raw_res
+                    vi_text = (lines or [""])[0]
                 except Exception:
-                    pass
-            if not vi_text or _is_invalid_translation(vi_text):
-                vi_text = text_to_translate
+                    vi_text = ""
+            if not vi_text or is_invalid_translation(vi_text):
+                raise RuntimeError("AGY did not produce Vietnamese dubbing text")
 
             communicator = edge_tts.Communicate(vi_text, "vi-VN-HoaiMyNeural")
             await communicator.save(tts_file)
@@ -405,6 +436,16 @@ def _ffmpeg_subtitles_path(path: str) -> str:
     return p
 
 
+def _subtitles_filter(srt_path: str, style: str, video_w: int, video_h: int) -> str:
+    """libass burn with PlayRes matching the actual frame so MarginV is in pixels."""
+    sub_path = _ffmpeg_subtitles_path(srt_path)
+    width = max(2, int(video_w or 1920))
+    height = max(2, int(video_h or 1080))
+    return (
+        f"subtitles='{sub_path}':original_size={width}x{height}:force_style='{style}'"
+    )
+
+
 def _find_subtitle_font() -> str:
     """Pick a Latin-extended font that can render Vietnamese diacritics."""
     candidates = [
@@ -420,6 +461,21 @@ def _find_subtitle_font() -> str:
         if os.path.exists(p):
             return p
     return ""
+
+
+def drop_audio_chains(filter_complex: str) -> str:
+    """Keep video/overlay chains when replacing the audio with looped BGM."""
+    kept: List[str] = []
+    for part in (filter_complex or "").split(";"):
+        item = part.strip()
+        if not item:
+            continue
+        if item.endswith("[a_out]") or item.endswith("[a_muted]"):
+            continue
+        if item.startswith("[0:a]") or item.startswith("[a_muted]") or item.startswith("[1:a]"):
+            continue
+        kept.append(item)
+    return ";".join(kept)
 
 
 def scale_srt_timestamps(srt_path: str, factor: float, output_path: Optional[str] = None) -> str:
@@ -459,10 +515,12 @@ def prepare_output_subtitle(srt_path: str, output_path: str, speed_factor: float
         return None
     sidecar = os.path.splitext(output_path)[0] + ".vi.srt"
     try:
+        from app.services.vietsub_rules import write_display_srt
+
+        display = write_display_srt(srt_path, sidecar)
         if abs(float(speed_factor or 1.0) - 1.0) > 1e-3:
-            return scale_srt_timestamps(srt_path, speed_factor, sidecar)
-        shutil.copy2(srt_path, sidecar)
-        return sidecar
+            return scale_srt_timestamps(display, speed_factor, sidecar)
+        return display
     except Exception as e:
         logger.warning(f"Could not prepare output Vietsub sidecar: {e}")
         return None
@@ -506,18 +564,38 @@ def mux_toggleable_subtitle(video_path: str, srt_path: str, output_path: Optiona
 
 
 def _probe_video_size(path: str) -> Tuple[int, int]:
-    """Return (w, h) via ffprobe, defaulting to 1080x1920 on failure."""
+    """Return display (w, h) via ffprobe, swapping axes when the stream is rotated."""
     from app.services.audio_service import find_ffprobe_binary
     probe = find_ffprobe_binary()
     if probe:
         try:
             res = subprocess.run(
-                [probe, "-v", "error", "-select_streams", "v:0",
-                 "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", path],
+                [
+                    probe, "-v", "error", "-select_streams", "v:0",
+                    "-show_entries", "stream=width,height",
+                    "-show_entries", "stream_tags=rotate",
+                    "-show_entries", "stream_side_data=rotation",
+                    "-of", "json", path,
+                ],
                 capture_output=True, text=True, check=False,
             )
-            w, h = res.stdout.strip().split("x")
-            return int(w), int(h)
+            stream = ((json.loads(res.stdout or "{}") or {}).get("streams") or [{}])[0]
+            width = int(stream.get("width") or 0)
+            height = int(stream.get("height") or 0)
+            rotate = (stream.get("tags") or {}).get("rotate")
+            if rotate is None:
+                for side in stream.get("side_data_list") or []:
+                    if side.get("rotation") is not None:
+                        rotate = side.get("rotation")
+                        break
+            try:
+                angle = abs(int(float(rotate))) % 360
+            except (TypeError, ValueError):
+                angle = 0
+            if angle in (90, 270):
+                width, height = height, width
+            if width > 0 and height > 0:
+                return width, height
         except Exception:
             pass
     return 1080, 1920
@@ -543,15 +621,31 @@ def _filtered_video_size(path: str, cfg: ReupConfig) -> Tuple[int, int]:
     return max(2, width // 2 * 2), max(2, height // 2 * 2)
 
 
-def _burn_hardsub_overlay(ffmpeg_bin: str, video_path: str, srt_path: str, output_path: str) -> bool:
+def _burn_hardsub_overlay(
+    ffmpeg_bin: str,
+    video_path: str,
+    srt_path: str,
+    output_path: str,
+    cfg: Optional[ReupConfig] = None,
+) -> bool:
     """libass-free hardsub: render cues to PNGs (Pillow) and composite via overlay."""
     import tempfile
+    from app.services.caption_cover import clamp_subtitle_box_h
     from app.services.subtitle_overlay import render_srt_to_overlays, build_overlay_filter
 
     w, h = _probe_video_size(video_path)
     tmp_dir = tempfile.mkdtemp(prefix="visub_ovl_")
     try:
-        overlays = render_srt_to_overlays(srt_path, w, h, tmp_dir)
+        box_h = clamp_subtitle_box_h(getattr(cfg, "subtitle_box_h", 0.08)) if cfg else 0.08
+        overlays = render_srt_to_overlays(
+            srt_path, w, h, tmp_dir,
+            cover_kind=str(getattr(cfg, "caption_cover", "off") or "off") if cfg else "off",
+            cover_band=float(getattr(cfg, "subtitle_bottom_crop", 0.0) or 0.0) if cfg else 0.0,
+            subtitle_y=float(getattr(cfg, "subtitle_y", 0.0) or 0.0) if cfg else 0.0,
+            cover_pad=float(getattr(cfg, "cover_pad", 0.0) or 0.0) if cfg else 0.0,
+            subtitle_box_w=float(getattr(cfg, "subtitle_box_w", 0.88) or 0.88) if cfg else 0.88,
+            subtitle_box_h=box_h,
+        )
         if not overlays:
             logger.warning("Subtitle overlay produced no cues; leaving video unchanged")
             return False
@@ -574,7 +668,13 @@ def _burn_hardsub_overlay(ffmpeg_bin: str, video_path: str, srt_path: str, outpu
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def burn_vietnamese_hardsub(video_path: str, srt_path: str, output_path: str, speed_factor: float = 1.0) -> bool:
+def burn_vietnamese_hardsub(
+    video_path: str,
+    srt_path: str,
+    output_path: str,
+    speed_factor: float = 1.0,
+    cfg: Optional[ReupConfig] = None,
+) -> bool:
     """Burns a Vietnamese SRT onto video as hardsub. Returns True on success.
     Uses native libass `subtitles=` when available, else a Pillow PNG overlay."""
     if not os.path.exists(video_path) or not os.path.exists(srt_path):
@@ -585,16 +685,25 @@ def burn_vietnamese_hardsub(video_path: str, srt_path: str, output_path: str, sp
 
     work_srt = srt_path
     scaled = None
+    try:
+        from app.services.vietsub_rules import write_display_srt
+
+        display = srt_path + ".display.srt"
+        work_srt = write_display_srt(srt_path, display)
+        scaled = display
+    except Exception as e:
+        logger.warning(f"Display SRT split skipped ({e}); burning original cues")
+        work_srt = srt_path
     if abs(speed_factor - 1.0) > 1e-3:
         try:
             scaled = video_path + ".vi.scaled.srt"
-            work_srt = scale_srt_timestamps(srt_path, speed_factor, scaled)
+            work_srt = scale_srt_timestamps(work_srt, speed_factor, scaled)
         except Exception as e:
             logger.warning(f"SRT time-scale failed ({e}); burning original timings")
             work_srt = srt_path
 
     if not ffmpeg_supports_libass(ffmpeg_bin):
-        ok = _burn_hardsub_overlay(ffmpeg_bin, video_path, work_srt, output_path)
+        ok = _burn_hardsub_overlay(ffmpeg_bin, video_path, work_srt, output_path, cfg=cfg)
         if scaled and os.path.exists(scaled) and scaled != srt_path:
             try:
                 os.remove(scaled)
@@ -602,18 +711,35 @@ def burn_vietnamese_hardsub(video_path: str, srt_path: str, output_path: str, sp
                 pass
         return ok
 
-    fontfile = _find_subtitle_font()
-    from app.services.caption_cover import subtitle_force_style
-    style = subtitle_force_style("off")
-    sub_path = _ffmpeg_subtitles_path(work_srt)
-    if fontfile:
-        font_esc = _ffmpeg_subtitles_path(fontfile)
-        vf = f"subtitles='{sub_path}':fontsdir='{os.path.dirname(fontfile).replace(chr(92), '/')}':force_style='{style}'"
-        # fontsdir + FontName is more portable than fontfile= on older ffmpeg
-        vf = f"subtitles='{sub_path}':force_style='{style}'"
-        _ = font_esc  # keep helper used for path safety
-    else:
-        vf = f"subtitles='{sub_path}':force_style='{style}'"
+    from app.services.caption_cover import (
+        clamp_subtitle_box_h,
+        cover_band_height,
+        normalize_caption_cover,
+        subtitle_force_style,
+        subtitle_plate_drawbox,
+    )
+    frame_w, frame_h = _probe_video_size(video_path)
+    cover = normalize_caption_cover(getattr(cfg, "caption_cover", "off") if cfg else "off")
+    bottom = float(getattr(cfg, "subtitle_bottom_crop", 0.0) or 0.0) if cfg else 0.0
+    cue_y = float(getattr(cfg, "subtitle_y", 0.0) or 0.0) if cfg else 0.0
+    box_h = clamp_subtitle_box_h(getattr(cfg, "subtitle_box_h", 0.08)) if cfg else 0.08
+    band = cover_band_height(bottom, cover)
+    plate = subtitle_plate_drawbox(
+        cover,
+        float(getattr(cfg, "subtitle_box_w", 0.88) or 0.88) if cfg else 0.88,
+        box_h,
+        subtitle_y=cue_y,
+        band_h=band if cover == "image" else bottom,
+        video_w=frame_w,
+        video_h=frame_h,
+    )
+    style = subtitle_force_style(
+        cover, band if cover == "image" else bottom,
+        video_w=frame_w, video_h=frame_h, subtitle_y=cue_y,
+        cover_pad=float(getattr(cfg, "cover_pad", 0.0) or 0.0) if cfg else 0.0,
+        subtitle_box_h=box_h,
+    )
+    vf = ",".join([p for p in (plate, _subtitles_filter(work_srt, style, frame_w, frame_h)) if p])
 
     tmp_out = output_path + ".hardsub.tmp.mp4"
     encode_args = browser_safe_encode_args(ffmpeg_bin)
@@ -928,19 +1054,27 @@ def process_reup_video(
         # into this stem. Later TTS overlay must not re-apply those gains.
         graph_cfg = cfg.model_copy(update={"enable_vocal_mute": False}) if demucs_bgm_path else cfg
         audio_speech_intervals = None if cfg.enable_vocal_mute else speech_intervals
+        main_size = _filtered_video_size(input_path, cfg)
+        from app.services.audio_service import probe_audio_sample_rate, probe_stream_duration_sec
+
+        source_audio_rate = probe_audio_sample_rate(input_path) or 0
+        if demucs_bgm_path:
+            source_audio_rate = probe_audio_sample_rate(demucs_bgm_path) or source_audio_rate
         filter_complex, includes_audio, vf_str, af_str = build_reup_filtergraph(
             graph_cfg,
             has_audio=has_audio,
+            audio_sample_rate=source_audio_rate,
             burn_srt_path=srt_override if libass_hardsub else None,
             speech_intervals=audio_speech_intervals,
+            frame_size=main_size,
         )
         from app.services.overlay_service import (
             append_overlay_filter,
-            ensure_caption_cover_banner,
-            normalize_overlays,
             overlay_input_args,
+            overlays_for_job,
         )
         from app.services.caption_cover import (
+            clamp_subtitle_box_h,
             cover_band_height,
             normalize_caption_cover,
             resolve_caption_cover_image,
@@ -954,18 +1088,19 @@ def process_reup_video(
             float(getattr(cfg, "subtitle_bottom_crop", 0.0) or 0.0),
             cover_kind,
         )
+        overlay_items, plate_banners = overlays_for_job(cfg, main_size[0], main_size[1])
         if cover_kind == "image" and cover_img:
-            overlay_items = ensure_caption_cover_banner(
-                getattr(cfg, "overlays", None), cover_img, band
+            logger.info(
+                "Caption cover banner path=%s band_h=%.2f plate=%d",
+                cover_img, band, len(plate_banners),
             )
-            logger.info("Caption cover banner path=%s band_h=%.2f", cover_img, band)
-            _report(0.93, f"🖼️ Phủ dải đáy bằng ảnh ({int(round(band * 100))}%) — giữ khung 9:16")
-        else:
-            overlay_items = normalize_overlays(getattr(cfg, "overlays", None))
+            if plate_banners:
+                _report(0.93, "🖼️ Logo đặt dưới khung 9:16 — không zoom, không đè video")
+            else:
+                _report(0.93, f"🖼️ Phủ dải đáy bằng ảnh ({int(round(band * 100))}%) — giữ khung 9:16")
         overlay_paths: List[str] = []
         extra_audio = bool(lib_bgm_path) or bool(demucs_bgm_path and os.path.exists(demucs_bgm_path))
         first_ov = 2 if extra_audio else 1
-        main_size = _filtered_video_size(input_path, cfg)
         if overlay_items:
             filter_complex, overlay_paths = append_overlay_filter(
                 filter_complex, overlay_items, first_overlay_index=first_ov, main_size=main_size
@@ -973,18 +1108,21 @@ def process_reup_video(
         subtitle_input_args: List[str] = []
         if wants_hardsub and not libass_hardsub and not getattr(cfg, "dynamic_motion", False):
             from app.services.subtitle_overlay import (
-                append_timed_subtitle_filter,
+                inject_timed_overlay_before_speed,
                 render_srt_to_apng,
             )
 
             subtitle_track_dir = tempfile.mkdtemp(prefix="visub_track_")
             timed_srt = srt_override
-            if abs(float(cfg.speed_factor or 1.0) - 1.0) > 1e-3:
-                timed_srt = scale_srt_timestamps(
+            try:
+                from app.services.vietsub_rules import write_display_srt
+
+                timed_srt = write_display_srt(
                     srt_override,
-                    cfg.speed_factor,
-                    os.path.join(subtitle_track_dir, "timed.srt"),
+                    os.path.join(subtitle_track_dir, "display.srt"),
                 )
+            except Exception as e:
+                logger.warning(f"Display SRT split skipped ({e})")
             subtitle_track = render_srt_to_apng(
                 timed_srt,
                 main_size[0],
@@ -992,10 +1130,14 @@ def process_reup_video(
                 os.path.join(subtitle_track_dir, "subtitles.png"),
                 cover_band=band if cover_kind != "off" else 0.0,
                 cover_kind=cover_kind,
+                subtitle_y=float(getattr(cfg, "subtitle_y", 0.0) or 0.0),
+                cover_pad=float(getattr(cfg, "cover_pad", 0.0) or 0.0),
+                subtitle_box_w=float(getattr(cfg, "subtitle_box_w", 0.88) or 0.88),
+                subtitle_box_h=clamp_subtitle_box_h(getattr(cfg, "subtitle_box_h", 0.08)),
             )
             if subtitle_track:
                 subtitle_index = first_ov + len(overlay_paths)
-                filter_complex = append_timed_subtitle_filter(filter_complex, subtitle_index)
+                filter_complex = inject_timed_overlay_before_speed(filter_complex, subtitle_index)
                 subtitle_input_args = ["-i", subtitle_track]
                 burn_in_graph = True
         input_md5 = calculate_file_md5(input_path)
@@ -1012,12 +1154,13 @@ def process_reup_video(
                 cmd = [ffmpeg_bin, "-y", "-threads", "0", "-i", input_path]
                 if lib_bgm_path and os.path.exists(lib_bgm_path):
                     from app.services.tts_service import get_audio_duration
+                    source_audio_rate = probe_audio_sample_rate(lib_bgm_path) or source_audio_rate
                     in_dur = get_audio_duration(input_path) or 8.0
                     speed = float(getattr(cfg, "speed_factor", 1.0) or 1.0)
                     out_dur = max(0.4, in_dur / max(0.5, speed))
                     vol = float(getattr(cfg, "bgm_volume", 0.85) or 0.85)
-                    vf_part = filter_complex.split(";")[0]
-                    fc = f"{vf_part};[1:a]volume={vol:.3f},aresample=44100,aformat=channel_layouts=stereo[a_out]"
+                    vf_part = drop_audio_chains(filter_complex)
+                    fc = f"{vf_part};[1:a]volume={vol:.3f},aformat=channel_layouts=stereo[a_out]"
                     includes_audio = True
                     cmd.extend(["-stream_loop", "-1", "-t", f"{out_dur:.3f}", "-i", lib_bgm_path])
                 elif demucs_bgm_path and os.path.exists(demucs_bgm_path):
@@ -1031,10 +1174,20 @@ def process_reup_video(
 
                 cmd.extend(["-map", "[v_out]"])
                 cmd.extend(encode_args)
+                if abs(float(cfg.speed_factor or 1.0) - 1.0) > 1e-3:
+                    cmd.extend(["-fps_mode", "cfr", "-r", "30"])
                 if includes_audio:
-                    cmd.extend(["-map", "[a_out]", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"])
+                    cmd.extend(["-map", "[a_out]", "-c:a", "aac", "-b:a", "128k", "-ac", "2"])
+                    if source_audio_rate >= 8000:
+                        cmd.extend(["-ar", str(source_audio_rate)])
                 else:
                     cmd.extend(["-an"])
+                video_dur = probe_stream_duration_sec(input_path, "v:0")
+                if video_dur <= 0:
+                    video_dur = probe_stream_duration_sec(input_path, "a:0")
+                if video_dur > 0.2:
+                    speed = max(0.5, float(cfg.speed_factor or 1.0))
+                    cmd.extend(["-t", f"{video_dur / speed:.3f}"])
                 cmd.append(output_path)
 
                 from app.services.activity import heartbeat
@@ -1076,8 +1229,10 @@ def process_reup_video(
                         filter_complex, includes_audio, vf_str, af_str = build_reup_filtergraph(
                             graph_cfg,
                             has_audio=has_audio,
+                            audio_sample_rate=source_audio_rate,
                             burn_srt_path=srt_override if burn_in_graph else None,
                             speech_intervals=audio_speech_intervals,
+                            frame_size=main_size,
                         )
                         cmd[cmd.index("-filter_complex") + 1] = filter_complex
                         res2 = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -1123,7 +1278,7 @@ def process_reup_video(
     burned_sub = bool(burn_in_graph)
     if (not burned_sub) and srt_override and os.path.exists(srt_override) and subtitle_mode == "hard":
         burned_sub = burn_vietnamese_hardsub(
-            output_path, srt_override, output_path, speed_factor=cfg.speed_factor
+            output_path, srt_override, output_path, speed_factor=cfg.speed_factor, cfg=cfg
         )
     subtitle_sidecar = None
     softsub_embedded = False
@@ -1326,6 +1481,12 @@ class ReupService:
         """
         cfg = config or ReupConfig()
         stage_callback = kwargs.get("stage_progress_callback")
+        quality_out = kwargs.get("quality_out")
+        if not isinstance(quality_out, dict):
+            quality_out = {}
+            kwargs["quality_out"] = quality_out
+        quality_out.setdefault("status", "PENDING")
+        quality_out.setdefault("report", {})
 
         def report_stage(progress: float, message: str) -> None:
             if not callable(stage_callback):
@@ -1362,6 +1523,8 @@ class ReupService:
             from app.services.pyvideotrans_service import subtitle_matches_target_language
             if subtitle_matches_target_language(preset_srt, cfg.target_lang):
                 translated_srt = preset_srt
+                quality_out["status"] = "PASS"
+                quality_out["report"]["preset_srt"] = True
                 logger.info(f"Using pre-built SRT: {translated_srt}")
             else:
                 logger.warning(f"Rejected mixed/untranslated pre-built SRT: {preset_srt}")
@@ -1371,6 +1534,10 @@ class ReupService:
 
         subtitle_mode = subtitle_output_mode(cfg)
         want_subs = bool(subtitle_mode != "off" or cfg.enable_tts)
+        if not want_subs:
+            quality_out["status"] = "PASS"
+            quality_out["report"]["skipped"] = True
+            quality_out["report"]["reason"] = "subtitle_off"
         if want_subs and not translated_srt:
             try:
                 from app.services.pyvideotrans_service import (
@@ -1382,11 +1549,13 @@ class ReupService:
                 pyvideotrans = PyVideoTransService()
 
                 src_lang = cfg.source_lang or "auto"
-                from app.services.xai_media_service import resolve_vietsub_style, LANG_DEFAULT_VOICE
+                from app.services.vietsub_rules import resolve_vietsub_style, review_label
+                from app.services.xai_media_service import LANG_DEFAULT_VOICE
                 from app.services.tts_service import get_audio_duration
                 vid_dur = get_audio_duration(video_path)
-                style = resolve_vietsub_style(getattr(cfg, "vietsub_style", "auto") or "auto", vid_dur or 0)
+                style = resolve_vietsub_style(getattr(cfg, "vietsub_style", "dub") or "dub")
                 cfg.vietsub_style = style
+                quality_out["report"]["style"] = style
                 lang = (cfg.target_lang or "vi").lower()
                 voice = cfg.tts_voice or ""
                 if lang != "vi" and (
@@ -1395,7 +1564,7 @@ class ReupService:
                     cfg.tts_voice = LANG_DEFAULT_VOICE.get(lang, voice)
                     cfg.tts_engine = "edge-tts"
 
-                stt_max = 90.0 if style == "recap" and (vid_dur or 0) > 180 else None
+                stt_max = None
                 with report_busy(
                     0.76,
                     "🎧 Bắt đầu nhận dạng lời thoại gốc (Whisper)...",
@@ -1409,14 +1578,22 @@ class ReupService:
                         on_status=lambda msg: report_stage(0.76, msg),
                     )
                 srt_path = stt_res.get("srt_path")
-                is_fallback = stt_res.get("status") in ("fallback", "empty")
+                stt_status = stt_res.get("status")
+                is_unusable = stt_status in ("fallback", "empty", "needs_review")
                 cue_count = int(stt_res.get("cue_count") or 0)
                 detected = stt_res.get("detected_language") or src_lang or "auto"
                 used_model = stt_res.get("model") or "base"
-                if is_fallback or not (isinstance(srt_path, str) and os.path.exists(srt_path)):
+                quality_out["report"]["stt_model"] = used_model
+                quality_out["report"]["cue_count_in"] = cue_count
+                if is_unusable or not (isinstance(srt_path, str) and os.path.exists(srt_path)):
+                    fail_reason = stt_res.get("stt_fail_reason") or (
+                        "empty_audio" if stt_status in ("empty", "fallback") else "looped_phrases"
+                    )
+                    quality_out["status"] = "NEEDS_REVIEW"
+                    quality_out["report"]["stt_fail_reason"] = fail_reason
                     report_stage(
                         0.80,
-                        f"⚠️ Whisper không bắt được lời thoại (model={used_model}, lang={detected})",
+                        f"⚠️ {review_label(fail_reason)} — bỏ vietsub/TTS, giữ video gốc.",
                     )
                 else:
                     report_stage(
@@ -1424,7 +1601,7 @@ class ReupService:
                         f"✅ Whisper xong: {cue_count} câu · model {used_model} · lang {detected}. Chuẩn bị dịch kịch bản...",
                     )
 
-                if isinstance(srt_path, str) and os.path.exists(srt_path) and not is_fallback:
+                if isinstance(srt_path, str) and os.path.exists(srt_path) and not is_unusable:
                     with report_busy(
                         0.82,
                         f"🌐 Đang dịch {cue_count} câu sang tiếng Việt...",
@@ -1446,7 +1623,10 @@ class ReupService:
                         and subtitle_matches_target_language(raw_trans_srt, cfg.target_lang)
                     ):
                         translated_srt = raw_trans_srt
-                        provider = (trans_res or {}).get("provider") or "dịch máy"
+                        provider = (trans_res or {}).get("provider") or "agy"
+                        quality_out["status"] = "PASS"
+                        quality_out["report"]["agy_model"] = provider
+                        quality_out["report"]["cue_count_out"] = cue_count
                         report_stage(
                             0.85,
                             f"✅ Dịch tiếng Việt xong ({provider}, {cue_count} câu); bắt đầu tổng hợp giọng đọc...",
@@ -1454,41 +1634,20 @@ class ReupService:
                         logger.info(f"Vietsub SRT ready: {translated_srt}")
                     else:
                         translated_srt = None
+                        fail_reason = (trans_res or {}).get("translate_fail_reason") or "agy_failed"
                         tts_warning = (trans_res or {}).get("warning") or (
                             "Dịch phụ đề chưa hoàn tất; đã chặn bản trộn ngôn ngữ khỏi video."
                         )
+                        quality_out["status"] = "NEEDS_REVIEW"
+                        quality_out["report"]["translate_fail_reason"] = fail_reason
                         logger.error(tts_warning)
-                        report_stage(0.84, f"⚠️ {tts_warning}")
-                    if style == "recap" and translated_srt:
-                        try:
-                            from app.services.xai_media_service import build_recap_lines, recap_to_srt
-                            from app.services.tts_service import parse_srt_segments
-                            segs = parse_srt_segments(translated_srt)
-                            lines = build_recap_lines(
-                                title=getattr(cfg, "post_title", "") or "",
-                                texts=[s.get("text") or "" for s in segs],
-                                target_lang=cfg.target_lang,
-                                n=8,
-                            )
-                            if lines:
-                                recap_path = os.path.splitext(translated_srt)[0] + ".recap.srt"
-                                translated_srt = recap_to_srt(lines, vid_dur or 60.0, recap_path)
-                                logger.info(f"Recap narrator SRT: {translated_srt}")
-                        except Exception as e:
-                            logger.warning(f"Recap rewrite skipped: {e}")
-                else:
-                    # Sidecar next to the source (e.g. douyin_123.vi.srt) so demo clips still get hardsub
-                    base_noext = os.path.splitext(video_path)[0]
-                    for cand in (f"{base_noext}.vi.srt", f"{os.path.splitext(os.path.basename(video_path))[0]}.vi.srt"):
-                        if os.path.exists(cand):
-                            translated_srt = cand
-                            logger.info(f"Using sidecar Vietsub SRT: {translated_srt}")
-                            tts_warning = None
-                            break
-                    if not translated_srt:
-                        tts_warning = "STT không nhận được lời thoại (whisper fallback). Bỏ qua vietsub/lồng tiếng."
-                        logger.warning(tts_warning)
-                        report_stage(0.84, f"⚠️ {tts_warning}")
+                        report_stage(0.84, f"⚠️ {review_label(fail_reason)}: {tts_warning}")
+                elif quality_out.get("status") != "NEEDS_REVIEW":
+                    tts_warning = "STT không nhận được lời thoại. Bỏ qua vietsub/lồng tiếng."
+                    quality_out["status"] = "NEEDS_REVIEW"
+                    quality_out["report"]["stt_fail_reason"] = "empty_audio"
+                    logger.warning(tts_warning)
+                    report_stage(0.84, f"⚠️ {tts_warning}")
 
                 if cfg.enable_tts and not synced_tts_audio and translated_srt and os.path.exists(translated_srt):
                     from app.config import Settings
@@ -1536,16 +1695,18 @@ class ReupService:
 
                     if os.path.exists(tts_out_path) and os.path.getsize(tts_out_path) > 2048:
                         synced_tts_audio = tts_out_path
+                        from app.services.vietsub_rules import prefer_speech_timed_srt
+
+                        translated_srt = prefer_speech_timed_srt(tts_result, translated_srt)
                         report_stage(0.93, "✅ Thuyết minh tiếng Việt đã sẵn sàng; bắt đầu render...")
-                        aligned_srt = (tts_result or {}).get("aligned_srt_path")
-                        if aligned_srt and os.path.exists(aligned_srt):
-                            translated_srt = aligned_srt
                     else:
                         tts_warning = (tts_warning or "") + " TTS tạo file rỗng/im lặng — giữ audio gốc."
                         logger.warning(tts_warning)
                         report_stage(0.90, f"⚠️ {tts_warning.strip()}")
             except Exception as e:
                 tts_warning = f"Pipeline vietsub/TTS thất bại: {e}"
+                quality_out["status"] = "NEEDS_REVIEW"
+                quality_out["report"]["translate_fail_reason"] = "agy_failed"
                 logger.warning(tts_warning)
                 report_stage(0.86, f"⚠️ {tts_warning}")
 
@@ -1595,9 +1756,9 @@ class ReupService:
 
                 if os.path.exists(tts_out_path) and os.path.getsize(tts_out_path) > 2048:
                     synced_tts_audio = tts_out_path
-                    aligned_srt = (tts_result or {}).get("aligned_srt_path")
-                    if aligned_srt and os.path.exists(aligned_srt):
-                        translated_srt = aligned_srt
+                    from app.services.vietsub_rules import prefer_speech_timed_srt
+
+                    translated_srt = prefer_speech_timed_srt(tts_result, translated_srt)
             except Exception as e:
                 logger.warning(f"Preset-SRT TTS synthesis failed: {e}")
 
@@ -1647,7 +1808,10 @@ class ReupService:
                 report_stage(0.99, f"⚠️ Render xong nhưng vietsub/TTS chưa đủ: {tts_warning}")
             else:
                 report_stage(0.99, "✅ Render video biến đổi hoàn tất")
-
+            if quality_out.get("status") == "PENDING":
+                quality_out["status"] = "PASS" if translated_srt else "NEEDS_REVIEW"
+            res["quality_status"] = quality_out.get("status")
+            res["quality_report"] = quality_out.get("report") or {}
             return res["output_path"]
         finally:
             if is_temp_trimmed and os.path.exists(effective_video_path):
