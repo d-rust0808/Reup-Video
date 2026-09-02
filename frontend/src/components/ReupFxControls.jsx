@@ -192,7 +192,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
         subtitle_bottom_crop: 22.0,
         enable_vocal_mute: true,
         preserve_bgm: true,
-        vocal_mute_strategy: 'demucs_duck',
+        vocal_mute_strategy: 'auto',
         original_vocal_volume: options.original_vocal_volume ?? 0.10,
         hflip: false,
         crop_percent: 2.0,
@@ -312,7 +312,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
               id: 'clean_duck_vocals',
               icon: Volume2,
               label: 'Giảm lời Trung + Giữ âm nền',
-              desc: 'Tách giọng nói, giữ nhạc và hiệu ứng; lời Trung chỉ còn nghe nhỏ.',
+              desc: 'Giữ nhạc, tiếng hành động và động vật; chỉ hạ lời thoại gốc khi có giọng Việt.',
             },
             {
               id: 'clean_mute_all',
@@ -991,7 +991,7 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
                         preset_id: 'clean_duck_vocals',
                         enable_vocal_mute: true,
                         preserve_bgm: true,
-                        vocal_mute_strategy: 'demucs_duck',
+                        vocal_mute_strategy: 'auto',
                         subtitle_mode: 'hard',
                         original_vocal_volume: options.original_vocal_volume ?? 0.10,
                       });

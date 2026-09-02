@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { fetchOutputs, getDownloadUrl, getStreamUrl, getSubtitleUrl, downloadBatchZip, deleteOutput, deleteBatchOutputs, clearAllOutputs } from '../services/api';
+import { fetchOutputs, getDownloadUrl, getStreamUrl, getSubtitleUrl, downloadBatchZip, deleteOutput, deleteBatchOutputs, clearAllOutputs, cleanupReuppedVideos } from '../services/api';
 import { ConfirmModal } from './ConfirmModal';
 import { Toast } from './Toast';
 import { VideoModal } from './VideoModal';
-import { FolderDown, Download, CheckSquare, Square, FileVideo, Loader2, Trash2, RefreshCw, ShieldCheck, Play, FolderOpen } from 'lucide-react';
+import { FolderDown, Download, CheckSquare, Square, FileVideo, Loader2, Trash2, RefreshCw, ShieldCheck, Play, FolderOpen, HardDrive } from 'lucide-react';
 
 export function OutputGallery() {
   const [outputs, setOutputs] = useState([]);
@@ -13,6 +13,8 @@ export function OutputGallery() {
   const [deleteTarget, setDeleteTarget] = useState(null); // jobId to delete
   const [batchDeleteTarget, setBatchDeleteTarget] = useState(false);
   const [clearAllTarget, setClearAllTarget] = useState(false);
+  const [cleanupReupTarget, setCleanupReupTarget] = useState(false);
+  const [cleaningReup, setCleaningReup] = useState(false);
   const [toast, setToast] = useState(null); // { type, title, message }
   const [search, setSearch] = useState('');
   const [previewVideo, setPreviewVideo] = useState(null);
@@ -154,6 +156,32 @@ export function OutputGallery() {
     }
   };
 
+  const confirmCleanupReupped = async () => {
+    setCleanupReupTarget(false);
+    setCleaningReup(true);
+    try {
+      const res = await cleanupReuppedVideos();
+      setOutputs([]);
+      setSelectedIds([]);
+      const gb = ((res.bytes_freed || 0) / (1024 ** 3)).toFixed(2);
+      setToast({
+        type: 'success',
+        title: 'Đã dọn video đã reup',
+        message: res.message || `Đã giải phóng ${gb} GB. Job đang chạy và video chưa reup được giữ lại.`,
+      });
+      window.dispatchEvent(new Event('reup:library-changed'));
+      loadOutputs();
+    } catch (err) {
+      setToast({
+        type: 'error',
+        title: 'Dọn video đã reup thất bại',
+        message: err.message || 'Không dọn được ổ đĩa',
+      });
+    } finally {
+      setCleaningReup(false);
+    }
+  };
+
   const outputList = (Array.isArray(outputs) ? outputs : []).filter((item) => {
     const q = search.trim().toLowerCase();
     if (!q) return true;
@@ -194,6 +222,16 @@ export function OutputGallery() {
         onConfirm={confirmClearAll}
         onCancel={() => setClearAllTarget(false)}
         confirmText="Xác Nhận Xóa Toàn Bộ"
+        cancelText="Hủy Bỏ"
+      />
+
+      <ConfirmModal
+        isOpen={cleanupReupTarget}
+        title="Dọn video đã reup"
+        message="Xóa thành phẩm + video gốc + file TTS của các job đã xong để giải phóng ổ đĩa. Video chưa reup, clip mẫu, và job đang chạy được giữ lại. Không hoàn tác được."
+        onConfirm={confirmCleanupReupped}
+        onCancel={() => setCleanupReupTarget(false)}
+        confirmText="Xóa video đã reup"
         cancelText="Hủy Bỏ"
       />
 
@@ -256,6 +294,16 @@ export function OutputGallery() {
           >
             <Trash2 className="w-4 h-4 text-rose-600" />
             <span>Xóa Tất Cả</span>
+          </button>
+
+          <button
+            onClick={() => setCleanupReupTarget(true)}
+            disabled={cleaningReup}
+            className="bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-bold px-3.5 py-2.5 rounded-xl transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+            title="Xóa thành phẩm + video gốc của job đã reup xong để giải phóng ổ đĩa"
+          >
+            {cleaningReup ? <Loader2 className="w-4 h-4 animate-spin" /> : <HardDrive className="w-4 h-4" />}
+            <span>{cleaningReup ? 'Đang dọn…' : 'Dọn video đã reup'}</span>
           </button>
 
           {isDesktopApp && (

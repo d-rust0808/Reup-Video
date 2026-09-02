@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   createChannelGroup,
   deleteChannelGroup,
@@ -7,6 +7,7 @@ import {
   getMediaUrl,
   updateChannelGroup,
 } from '../services/api';
+import { ConfirmModal } from './ConfirmModal';
 import { Edit3, ExternalLink, FolderPlus, Loader2, NotebookPen, Plus, ScrollText, Trash2 } from 'lucide-react';
 
 export function ChannelGroupsPanel({ channels = [], onToast }) {
@@ -17,16 +18,27 @@ export function ChannelGroupsPanel({ channels = [], onToast }) {
   const [notes, setNotes] = useState('');
   const [picked, setPicked] = useState([]);
   const [editingId, setEditingId] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const loadGen = useRef(0);
 
   const facebookChannels = channels.filter((c) => String(c.platform || '').toLowerCase() === 'facebook');
 
-  const load = useCallback(async (quiet = false) => {
+  const load = useCallback(async (quiet = false, groupsOnly = false) => {
+    const gen = ++loadGen.current;
     try {
-      const [g, p] = await Promise.all([fetchChannelGroups(), fetchPublishLog(60)]);
+      const g = await fetchChannelGroups();
+      if (gen !== loadGen.current) return;
       setGroups(g.groups || []);
-      setLog(p.events || []);
     } catch (err) {
       if (!quiet) onToast?.({ type: 'error', title: 'Lỗi', message: err.message });
+    }
+    if (groupsOnly) return;
+    try {
+      const p = await fetchPublishLog(60);
+      if (gen !== loadGen.current) return;
+      setLog(p.events || []);
+    } catch (err) {
+      if (!quiet) onToast?.({ type: 'error', title: 'Lỗi nhật ký', message: err.message });
     }
   }, [onToast]);
 
@@ -35,7 +47,7 @@ export function ChannelGroupsPanel({ channels = [], onToast }) {
   useEffect(() => {
     const tick = () => { load(true); };
     window.addEventListener('reup:channels-changed', tick);
-    const id = window.setInterval(tick, 8000);
+    const id = window.setInterval(tick, 20000);
     return () => {
       window.removeEventListener('reup:channels-changed', tick);
       window.clearInterval(id);
@@ -57,32 +69,45 @@ export function ChannelGroupsPanel({ channels = [], onToast }) {
   };
 
   const save = async () => {
-    if (!name.trim()) return;
+    if (!name.trim() || busy === 'save') return;
     setBusy('save');
     try {
       const payload = { name: name.trim(), notes, channel_ids: picked };
-      if (editingId) await updateChannelGroup(editingId, payload);
-      else await createChannelGroup(payload);
+      const res = editingId
+        ? await updateChannelGroup(editingId, payload)
+        : await createChannelGroup(payload);
+      const saved = res?.group;
+      if (saved?.group_id) {
+        setGroups((prev) => {
+          const rest = prev.filter((g) => g.group_id !== saved.group_id);
+          return [saved, ...rest];
+        });
+      }
       onToast?.({ type: 'success', title: 'Đã lưu', message: editingId ? 'Đã cập nhật nhóm' : 'Đã tạo nhóm Fanpage' });
       resetForm();
-      await load();
-      window.dispatchEvent(new Event('reup:channels-changed'));
     } catch (err) {
       onToast?.({ type: 'error', title: 'Lỗi', message: err.message });
     } finally {
       setBusy('');
     }
+    load(true, true);
   };
 
   const remove = async (groupId) => {
+    if (!groupId || busy) return;
+    setDeleteTarget(null);
     setBusy(groupId);
+    loadGen.current += 1;
+    setGroups((prev) => prev.filter((g) => g.group_id !== groupId));
+    if (editingId === groupId) resetForm();
     try {
       await deleteChannelGroup(groupId);
-      if (editingId === groupId) resetForm();
-      await load();
+      onToast?.({ type: 'success', title: 'Đã xóa nhóm', message: 'Nhóm Fanpage đã được xóa.' });
       window.dispatchEvent(new Event('reup:channels-changed'));
+      await load(true);
     } catch (err) {
-      onToast?.({ type: 'error', title: 'Lỗi', message: err.message });
+      onToast?.({ type: 'error', title: 'Không xóa được nhóm', message: err.message });
+      await load(false);
     } finally {
       setBusy('');
     }
@@ -94,6 +119,15 @@ export function ChannelGroupsPanel({ channels = [], onToast }) {
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <ConfirmModal
+        isOpen={!!deleteTarget}
+        title="Xóa nhóm Fanpage"
+        message={`Xóa nhóm “${deleteTarget?.name || ''}”? Các Fanpage vẫn giữ nguyên, chỉ bỏ nhóm.`}
+        onConfirm={() => remove(deleteTarget?.group_id)}
+        onCancel={() => setDeleteTarget(null)}
+        confirmText="Xóa nhóm"
+        cancelText="Hủy Bỏ"
+      />
       <section className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs space-y-3">
         <div className="flex items-center justify-between">
           <h3 className="text-xs font-extrabold uppercase tracking-wider text-slate-800 flex items-center gap-2">
@@ -178,7 +212,17 @@ export function ChannelGroupsPanel({ channels = [], onToast }) {
                   >
                     <Edit3 className="w-3 h-3" /> Sửa
                   </button>
-                  <button type="button" onClick={() => remove(g.group_id)} className="p-1 text-slate-400 hover:text-rose-600">
+                  <button
+                    type="button"
+                    title="Xóa nhóm"
+                    disabled={!!busy}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setDeleteTarget(g);
+                    }}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 disabled:opacity-40"
+                  >
                     {busy === g.group_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
                   </button>
                 </div>

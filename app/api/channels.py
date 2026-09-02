@@ -251,6 +251,8 @@ async def delete_channel(channel_id: str):
         )
         conn.execute("DELETE FROM channel_destinations WHERE channel_id = ?", (channel_id,))
         conn.execute("DELETE FROM channel_videos WHERE channel_id = ?", (channel_id,))
+        conn.execute("DELETE FROM channel_growth_snapshots WHERE channel_id = ?", (channel_id,))
+        conn.execute("DELETE FROM channel_growth_posts WHERE channel_id = ?", (channel_id,))
         conn.execute("DELETE FROM channels WHERE channel_id = ?", (channel_id,))
         conn.commit()
 
@@ -618,19 +620,28 @@ def _load_group(conn, group_id: str) -> Optional[Dict[str, Any]]:
 
 def _replace_group_members(conn, group_id: str, channel_ids: Optional[List[str]]) -> None:
     conn.execute("DELETE FROM channel_group_members WHERE group_id = ?", (group_id,))
+    ordered: List[str] = []
     seen = set()
     for raw in channel_ids or []:
         cid = str(raw or "").strip()
         if not cid or cid in seen:
             continue
-        exists = conn.execute("SELECT 1 FROM channels WHERE channel_id = ?", (cid,)).fetchone()
-        if not exists:
-            continue
         seen.add(cid)
-        conn.execute(
-            "INSERT INTO channel_group_members (group_id, channel_id) VALUES (?, ?)",
-            (group_id, cid),
-        )
+        ordered.append(cid)
+    if not ordered:
+        return
+    placeholders = ",".join("?" * len(ordered))
+    valid = {
+        str(row["channel_id"])
+        for row in conn.execute(
+            f"SELECT channel_id FROM channels WHERE channel_id IN ({placeholders})",
+            ordered,
+        ).fetchall()
+    }
+    conn.executemany(
+        "INSERT INTO channel_group_members (group_id, channel_id) VALUES (?, ?)",
+        [(group_id, cid) for cid in ordered if cid in valid],
+    )
 
 
 def expand_group_channel_ids(db_path: str, group_ids: List[str]) -> Dict[str, Dict[str, str]]:
@@ -723,11 +734,19 @@ async def list_channel_groups():
         rows = conn.execute(
             "SELECT * FROM channel_groups ORDER BY created_at DESC"
         ).fetchall()
-        groups = []
-        for row in rows:
-            item = _load_group(conn, row["group_id"])
-            if item:
-                groups.append(item)
+        member_rows = conn.execute(
+            "SELECT group_id, channel_id FROM channel_group_members ORDER BY channel_id"
+        ).fetchall()
+    by_group: Dict[str, List[str]] = {}
+    for row in member_rows:
+        by_group.setdefault(str(row["group_id"]), []).append(str(row["channel_id"]))
+    groups = []
+    for row in rows:
+        data = dict(row)
+        members = by_group.get(str(data.get("group_id") or ""), [])
+        data["channel_ids"] = members
+        data["member_count"] = len(members)
+        groups.append(data)
     return {"groups": groups, "total": len(groups)}
 
 
@@ -783,11 +802,20 @@ async def update_channel_group(group_id: str, req: ChannelGroupUpdateRequest):
 
 @router.delete("/channel-groups/{group_id}")
 async def delete_channel_group(group_id: str):
+    safe_id = str(group_id or "").strip()
+    if not safe_id:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhóm")
     with get_db_connection(settings.DB_PATH) as conn:
-        conn.execute("DELETE FROM channel_group_members WHERE group_id = ?", (group_id,))
-        conn.execute("DELETE FROM channel_groups WHERE group_id = ?", (group_id,))
+        existed = conn.execute(
+            "SELECT 1 FROM channel_groups WHERE group_id = ?",
+            (safe_id,),
+        ).fetchone()
+        conn.execute("DELETE FROM channel_group_members WHERE group_id = ?", (safe_id,))
+        conn.execute("DELETE FROM channel_groups WHERE group_id = ?", (safe_id,))
         conn.commit()
-    return {"group_id": group_id, "message": "Đã xóa nhóm"}
+    if not existed:
+        raise HTTPException(status_code=404, detail="Nhóm không tồn tại")
+    return {"group_id": safe_id, "deleted": True, "message": "Đã xóa nhóm"}
 
 
 @router.get("/publish-log")

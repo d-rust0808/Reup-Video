@@ -334,6 +334,45 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
                 updated_at TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS channel_growth_snapshots (
+                channel_id TEXT NOT NULL,
+                snapshot_date TEXT NOT NULL,
+                page_id TEXT NOT NULL DEFAULT '',
+                followers INTEGER NOT NULL DEFAULT 0,
+                fans INTEGER NOT NULL DEFAULT 0,
+                likes INTEGER NOT NULL DEFAULT 0,
+                comments INTEGER NOT NULL DEFAULT 0,
+                views INTEGER NOT NULL DEFAULT 0,
+                posts INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'live',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (channel_id, snapshot_date)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_growth_snapshots_date "
+            "ON channel_growth_snapshots(snapshot_date)"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS channel_growth_posts (
+                post_id TEXT PRIMARY KEY,
+                channel_id TEXT NOT NULL,
+                page_id TEXT NOT NULL DEFAULT '',
+                created_time TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                permalink TEXT NOT NULL DEFAULT '',
+                likes INTEGER NOT NULL DEFAULT 0,
+                comments INTEGER NOT NULL DEFAULT 0,
+                views INTEGER NOT NULL DEFAULT 0,
+                shares INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_growth_posts_channel "
+            "ON channel_growth_posts(channel_id, created_time)"
+        )
         conn.commit()
 
     logger.info(f"Database initialized successfully at: {db_path}")

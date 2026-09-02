@@ -8,12 +8,20 @@ export const isDesktop =
   typeof window !== 'undefined' &&
   (!!window.electronAPI?.isDesktop || window.location.protocol === 'file:');
 
+function isLoopbackHost() {
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname;
+  return host === '127.0.0.1' || host === 'localhost';
+}
+
 export const getApiBase = () => {
   if (typeof window === 'undefined') return '/api/v1';
+  const port = String(window.location.port || '');
+  // Vite already proxies /api → :6000. Stay same-origin so Chromium does not
+  // treat 6001→6000 as a private-network fetch (Failed to fetch).
+  if (isLoopbackHost() && port === '6001') return '/api/v1';
   const desktop = !!window.electronAPI?.isDesktop || window.location.protocol === 'file:';
-  const onBackend =
-    (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost') &&
-    String(window.location.port || '') === '6000';
+  const onBackend = isLoopbackHost() && port === '6000';
   if (desktop && !onBackend) {
     return `${DESKTOP_BACKEND_ORIGIN}/api/v1`;
   }
@@ -120,9 +128,15 @@ export async function submitJob(payload) {
 }
 
 export async function fetchJobs() {
-  const res = await fetch(`${getApiBase()}/jobs`);
-  if (!res.ok) throw new Error('Failed to fetch jobs');
-  return res.json();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const res = await fetch(`${getApiBase()}/jobs`, { signal: ctrl.signal });
+    if (!res.ok) throw new Error('Failed to fetch jobs');
+    return res.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function fetchJobLogs(jobId) {
@@ -265,6 +279,17 @@ export async function clearAllOutputs() {
   return res.json();
 }
 
+export async function cleanupReuppedVideos() {
+  const res = await fetch(`${getApiBase()}/outputs/cleanup-reupped`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Không dọn được video đã reup');
+  }
+  return res.json();
+}
+
 export async function fetchVoices() {
   const res = await fetch(`${getApiBase()}/voices`);
   if (!res.ok) throw new Error('Failed to fetch voices list');
@@ -371,7 +396,7 @@ export async function updateChannelVideo(videoId, payload) {
 }
 
 export async function fetchChannelGroups() {
-  const res = await fetch(`${getApiBase()}/channel-groups`);
+  const res = await fetch(`${getApiBase()}/channel-groups`, { cache: 'no-store' });
   if (!res.ok) throw new Error('Không tải được nhóm kênh');
   return res.json();
 }
@@ -403,7 +428,13 @@ export async function updateChannelGroup(groupId, payload) {
 }
 
 export async function deleteChannelGroup(groupId) {
-  const res = await fetch(`${getApiBase()}/channel-groups/${groupId}`, { method: 'DELETE' });
+  const res = await fetch(`${getApiBase()}/channel-groups/${encodeURIComponent(groupId)}`, {
+    method: 'DELETE',
+    cache: 'no-store',
+  });
+  if (res.status === 404) {
+    return { group_id: groupId, deleted: true, missing: true };
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Không xóa được nhóm');
@@ -412,7 +443,7 @@ export async function deleteChannelGroup(groupId) {
 }
 
 export async function fetchPublishLog(limit = 80) {
-  const res = await fetch(`${getApiBase()}/publish-log?limit=${limit}`);
+  const res = await fetch(`${getApiBase()}/publish-log?limit=${limit}`, { cache: 'no-store' });
   if (!res.ok) throw new Error('Không tải được nhật ký đăng');
   return res.json();
 }
@@ -795,5 +826,35 @@ export async function markContentVideoPosted(videoPk, posted) {
     body: JSON.stringify({ posted }),
   });
   if (!res.ok) throw new Error(await readError(res, 'Không đánh dấu được video'));
+  return res.json();
+}
+
+export async function fetchChannelGrowth(days = 30) {
+  const res = await fetch(`${getApiBase()}/growth/channels?days=${encodeURIComponent(days)}`, {
+    cache: 'no-store',
+  });
+  if (res.status === 404) {
+    throw new Error('API tăng trưởng chưa nạp trên server đang chạy. Đợi job hiện tại xong rồi khởi động lại app.');
+  }
+  if (!res.ok) throw new Error(await readError(res, 'Không tải được dashboard tăng trưởng'));
+  return res.json();
+}
+
+export async function fetchChannelGrowthDetail(channelId, days = 30) {
+  const res = await fetch(
+    `${getApiBase()}/growth/channels/${encodeURIComponent(channelId)}?days=${encodeURIComponent(days)}`,
+    { cache: 'no-store' },
+  );
+  if (!res.ok) throw new Error(await readError(res, 'Không tải được số liệu kênh'));
+  return res.json();
+}
+
+export async function refreshChannelGrowth(channelId = '', days = 90) {
+  const res = await fetch(`${getApiBase()}/growth/refresh`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel_id: channelId || null, days }),
+  });
+  if (!res.ok) throw new Error(await readError(res, 'Không kéo được số liệu Facebook'));
   return res.json();
 }

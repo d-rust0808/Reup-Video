@@ -99,7 +99,7 @@ class ReupPayload(BaseModel):
     caption_cover: Optional[str] = "off"
     caption_cover_image: Optional[str] = ""
     caption_cover_url: Optional[str] = ""
-    vocal_mute_strategy: Optional[str] = "demucs"
+    vocal_mute_strategy: Optional[str] = "auto"
     original_vocal_volume: Optional[float] = 0.10
     trim_start_sec: Optional[float] = 0.0
     trim_end_sec: Optional[float] = 0.0
@@ -275,7 +275,7 @@ class ProcessJobRequest(BaseModel):
     caption_cover: Optional[str] = "off"
     caption_cover_image: Optional[str] = ""
     caption_cover_url: Optional[str] = ""
-    vocal_mute_strategy: Optional[str] = "demucs"
+    vocal_mute_strategy: Optional[str] = "auto"
     original_vocal_volume: Optional[float] = 0.10
     trim_start_sec: Optional[float] = 0.0
     trim_end_sec: Optional[float] = 0.0
@@ -502,7 +502,7 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         reup_platforms = [str(p) for p in req.reup.target_platforms]
     elif req.target_platforms:
         reup_platforms = [str(p) for p in req.target_platforms]
-    reup_vocal_strategy = "demucs"
+    reup_vocal_strategy = "auto"
     if req.reup and getattr(req.reup, "vocal_mute_strategy", None):
         reup_vocal_strategy = req.reup.vocal_mute_strategy
     elif getattr(req, "vocal_mute_strategy", None):

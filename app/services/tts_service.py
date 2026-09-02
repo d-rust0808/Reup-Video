@@ -266,12 +266,17 @@ TTS_CONTINUE_GAP = 0.55
 TTS_JUMP_CUT_GAP = 0.28
 TTS_TAKE_BREATH = 0.02
 TTS_PAUSE_BREATH = 0.16
-TTS_MAX_FIT = 1.28
+TTS_MAX_FIT = 1.42
 TTS_MAX_TAKE_SEC = 4.8
 TTS_MAX_TAKE_CHARS = 140
-TTS_OWN_SHOT_SEC = 2.8
+TTS_OWN_SHOT_SEC = 1.35
 TTS_SENTENCE_SPAN = 10.5
 TTS_SENTENCE_CHARS = 240
+_INCOMPLETE_TAILS = {
+    "từ", "của", "và", "nhưng", "rằng", "thì", "là", "để", "khi", "nếu",
+    "vì", "do", "bởi", "trong", "ngoài", "được", "bị", "sẽ", "đã",
+    "một", "các", "những", "cái", "chiếc", "này", "kia", "đó",
+}
 
 
 def join_spoken_cue_text(previous: str, current: str, gap: float) -> str:
@@ -297,6 +302,21 @@ def join_spoken_cue_text(previous: str, current: str, gap: float) -> str:
             return f"{prev}, {curr}"
         return f"{prev} {curr}"
     return f"{prev} {curr}"
+
+
+def _looks_incomplete(text: str) -> bool:
+    """True when the line is mid-sentence and the next cue still belongs to it."""
+    raw = re.sub(r"\s+", " ", (text or "").rstrip())
+    if not raw:
+        return False
+    if _TERMINAL_PUNCT_RE.search(raw):
+        return False
+    if raw[-1:] in ",;:，、":
+        return True
+    last = re.split(r"\s+", raw)[-1].strip("\"'“”").lower()
+    if len(last) < 2:
+        return False
+    return last in _INCOMPLETE_TAILS
 
 
 def group_long_form_tts_segments(
@@ -337,7 +357,7 @@ def group_long_form_tts_segments(
             str(current.get("text") or ""),
             gap,
         )
-        prev_incomplete = not bool(_TERMINAL_PUNCT_RE.search(str(previous.get("text") or "").rstrip()))
+        prev_incomplete = _looks_incomplete(str(previous.get("text") or ""))
         already_a_shot = prev_dur >= TTS_OWN_SHOT_SEC or curr_dur >= TTS_OWN_SHOT_SEC
         continue_sentence = (
             prev_incomplete
@@ -350,6 +370,8 @@ def group_long_form_tts_segments(
             and gap <= max_gap
             and combined_span <= max_span
             and len(combined_text) <= max_chars
+            and prev_dur < TTS_OWN_SHOT_SEC
+            and curr_dur < TTS_OWN_SHOT_SEC
         )
         if continue_sentence or glue_crumbs:
             previous["text"] = combined_text
@@ -534,12 +556,17 @@ def place_consecutive_tts_clips(clips: List[Dict[str, Any]]) -> List[Dict[str, A
     """Pin each take to its shot time so speech does not slide onto the next image."""
     previous_end = 0.0
     ordered = sorted(clips, key=lambda c: float(c["segment"]["start_time"]))
+    max_slip = 0.12
     for item in ordered:
         desired_start = float(item["segment"]["start_time"])
         duration = max(0.12, float(item.get("final_dur") or 0.0))
         start = desired_start
         if previous_end > 0 and start < previous_end + TTS_TAKE_BREATH:
             start = previous_end + TTS_TAKE_BREATH
+        # At 1.5x a natural-length take that slips to previous_end piles up:
+        # picture runs on while voice arrives seconds later. Cap the slip.
+        if start > desired_start + max_slip:
+            start = desired_start
         item["segment"]["start_time"] = start
         item["segment"]["end_time"] = start + duration
         item["segment"]["duration"] = duration
@@ -726,7 +753,7 @@ class TTSService:
             inputs.extend(["-i", clip_path])
             label = f"a{idx}"
             filter_nodes.append(
-                f"[{idx}:a]aresample=44100,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS,adelay={start_ms}|{start_ms}:all=1[{label}]"
+                f"[{idx}:a]aresample=async=1:first_pts=0,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS,adelay={start_ms}|{start_ms}:all=1[{label}]"
             )
             map_labels.append(f"[{label}]")
 
@@ -899,20 +926,23 @@ class TTSService:
                         speed_factor = 1.0
                     if preserve_natural_voice:
                         if audio_dur > window + 0.05:
-                            clamped_speed = min(speed_factor, TTS_MAX_FIT)
+                            # Fit into this shot first; leftover is trimmed below
+                            # so the last word does not land on the next picture.
+                            fit_cap = 1.55 if speed >= 1.12 else TTS_MAX_FIT
+                            clamped_speed = min(speed_factor, fit_cap)
                         else:
                             clamped_speed = 1.0
                     else:
-                        clamped_speed = max(0.85, min(1.30, speed_factor))
+                        clamped_speed = max(0.85, min(1.50, speed_factor))
                     if abs(clamped_speed - 1.0) > (0.01 if preserve_natural_voice else 0.05):
                         success = scale_audio_speed_ffmpeg(raw_clip_path, scaled_clip_path, clamped_speed)
                         clip_to_use = scaled_clip_path if success else raw_clip_path
                     else:
                         clip_to_use = raw_clip_path
 
-                # VieNeu: never chop the last words. A slightly late next take is
-                # better than abandoning the sentence. Lip-sync engines still pin.
-                if pin_to_shot and not preserve_natural_voice:
+                # Hard-stop at the next shot so leftover words do not cover
+                # the new picture (VieNeu used to spill "ngọt" into the next cue).
+                if pin_to_shot:
                     limited_path = os.path.join(temp_dir, f"seg_{seg['index']}_shot.wav")
                     if limit_clip_to_duration(clip_to_use, limited_path, window):
                         clip_to_use = limited_path

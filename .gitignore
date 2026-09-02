@@ -114,6 +114,7 @@ pyvideotrans_repo/output/*
 .env
 .env.local
 .env.*.local
+proxy.txt
 
 # Operating System & IDE
 .DS_Store

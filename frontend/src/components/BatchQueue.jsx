@@ -100,7 +100,10 @@ export function BatchQueue({ wsUpdates }) {
     return pages;
   };
 
+  const jobsInFlight = useRef(false);
   const loadJobs = useCallback(async (isManualRefresh = false) => {
+    if (jobsInFlight.current && !isManualRefresh) return;
+    jobsInFlight.current = true;
     if (isManualRefresh) setRefreshing(true);
     try {
       const data = await fetchJobs();
@@ -118,8 +121,9 @@ export function BatchQueue({ wsUpdates }) {
         setSelectedJobId(null);
       }
     } catch (e) {
-      console.error('Failed to load jobs:', e);
+      if (isManualRefresh) console.error('Failed to load jobs:', e);
     } finally {
+      jobsInFlight.current = false;
       setLoading(false);
       setRefreshing(false);
     }

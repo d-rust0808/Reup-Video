@@ -120,7 +120,14 @@ class FacebookClient:
         "picture.type(large){url,width,height}"
     )
 
-    def _paged(self, url: str, user_token: str, params: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    def _paged(
+        self,
+        url: str,
+        user_token: str,
+        params: Optional[Dict[str, str]] = None,
+        *,
+        max_items: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
         next_url: Optional[str] = url
         next_params = params
@@ -129,6 +136,8 @@ class FacebookClient:
             payload = self._decode(response)
             data = payload.get("data") or []
             items.extend(item for item in data if isinstance(item, dict))
+            if max_items and len(items) >= max_items:
+                return items[:max_items]
             next_url = ((payload.get("paging") or {}).get("next") or "").strip() or None
             next_params = None
         return items
@@ -284,6 +293,83 @@ class FacebookClient:
             headers=self._auth(page_token),
         )
         return self._decode(response)
+
+    def get_page_insights(
+        self,
+        page_id: str,
+        page_token: str,
+        metrics: List[str],
+        *,
+        period: str = "day",
+        since: Optional[int] = None,
+        until: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        names = [str(item).strip() for item in metrics if str(item).strip()]
+        if not names:
+            return {"data": []}
+        params: Dict[str, str] = {
+            "metric": ",".join(names),
+            "period": period,
+        }
+        if since:
+            params["since"] = str(int(since))
+        if until:
+            params["until"] = str(int(until))
+        response = self.client.get(
+            f"{self.base_url}/{page_id}/insights",
+            params=params,
+            headers=self._auth(page_token),
+        )
+        return self._decode(response)
+
+    def list_published_posts(
+        self,
+        page_id: str,
+        page_token: str,
+        *,
+        limit: int = 80,
+    ) -> List[Dict[str, Any]]:
+        fields = (
+            "id,created_time,message,story,permalink_url,"
+            "shares,likes.summary(true).limit(0),"
+            "comments.summary(true).limit(0),"
+            "reactions.summary(true).limit(0)"
+        )
+        params = {"fields": fields, "limit": "25"}
+        cap = max(1, min(int(limit or 80), 200))
+        try:
+            return self._paged(
+                f"{self.base_url}/{page_id}/published_posts",
+                page_token,
+                params,
+                max_items=cap,
+            )
+        except FacebookAPIError:
+            return self._paged(
+                f"{self.base_url}/{page_id}/posts",
+                page_token,
+                params,
+                max_items=cap,
+            )
+
+    def list_page_videos(
+        self,
+        page_id: str,
+        page_token: str,
+        *,
+        limit: int = 80,
+    ) -> List[Dict[str, Any]]:
+        fields = (
+            "id,created_time,title,description,views,length,permalink_url,"
+            "likes.summary(true).limit(0),comments.summary(true).limit(0)"
+        )
+        cap = max(1, min(int(limit or 80), 200))
+        return self._paged(
+            f"{self.base_url}/{page_id}/videos",
+            page_token,
+            {"fields": fields, "limit": "25"},
+            max_items=cap,
+        )
 
 
 def granted_page_ids(debug_data: Dict[str, Any]) -> List[str]:

@@ -20,6 +20,7 @@ from app.services.facebook_client import (
     token_metadata,
 )
 from app.services.facebook_distribution import enqueue_channel_video
+from app.services.channel_growth import record_profile_snapshot
 from app.services.secret_store import SecretStoreError, get_secret, set_secret
 
 
@@ -129,6 +130,12 @@ def _ensure_page_avatar(page_id: str) -> str:
                     )
                     """,
                     (payload["name"], payload["username"], payload["about"] or payload["category"], now, pid),
+                )
+                record_profile_snapshot(
+                    conn,
+                    page_id=pid,
+                    fans=payload["fan_count"],
+                    followers=payload["followers_count"],
                 )
                 conn.commit()
         return dest if os.path.isfile(dest) else ""
@@ -368,6 +375,13 @@ def _store_pages(pages: List[Dict[str, Any]]) -> int:
                 ),
             )
         _materialize_page_channels(conn, normalized)
+        for page in normalized:
+            record_profile_snapshot(
+                conn,
+                page_id=page.get("page_id") or "",
+                fans=int(page.get("fan_count") or 0),
+                followers=int(page.get("followers_count") or 0),
+            )
         if page_ids:
             placeholders = ",".join("?" for _ in page_ids)
             conn.execute(

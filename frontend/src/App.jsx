@@ -7,6 +7,7 @@ import { BatchQueue } from './components/BatchQueue';
 import { OutputGallery } from './components/OutputGallery';
 import { ChannelManager } from './components/ChannelManager';
 import { ContentManager } from './components/ContentManager';
+import { ChannelGrowthDashboard } from './components/ChannelGrowthDashboard';
 import { fetchJobs, fetchOutputs, fetchLibrary, checkHealth } from './services/api';
 import { WebSocketClient } from './services/websocket';
 import { loadSession, saveSession, hydrateSession } from './services/session';
@@ -19,7 +20,7 @@ function mergeMedia(a = [], b = []) {
   return Array.from(map.values());
 }
 
-const AVAILABLE_TABS = new Set(['extract', 'workbench', 'queue', 'gallery', 'content', 'channels']);
+const AVAILABLE_TABS = new Set(['extract', 'workbench', 'queue', 'gallery', 'content', 'channels', 'growth']);
 
 function normalizeActiveTab(tab) {
   return AVAILABLE_TABS.has(tab) ? tab : 'extract';
@@ -165,6 +166,9 @@ export default function App() {
       } else if (e.key === '6') {
         e.preventDefault();
         setActiveTab('channels');
+      } else if (e.key === '7') {
+        e.preventDefault();
+        setActiveTab('growth');
       } else if (e.key.toLowerCase() === 'b') {
         e.preventDefault();
         setCollapsed((prev) => !prev);
@@ -198,6 +202,8 @@ export default function App() {
         return 'Quản Lý Nội Dung Nguồn';
       case 'channels':
         return 'Fanpage & Đăng Bài';
+      case 'growth':
+        return 'Tăng trưởng kênh';
       default:
         return 'Reup Studio';
     }
@@ -225,7 +231,7 @@ export default function App() {
           outputCount={outputCount}
         />
 
-        <main className="p-4 sm:p-6 xl:p-8 max-w-7xl w-full mx-auto space-y-6 min-w-0">
+        <main className={`p-4 sm:p-6 xl:p-8 w-full mx-auto space-y-6 min-w-0 ${activeTab === 'growth' ? 'max-w-[92rem]' : 'max-w-7xl'}`}>
           <div className={activeTab === 'extract' ? '' : 'hidden'}>
             <UrlExtractor
               initialMedia={extractedMediaList}
@@ -257,6 +263,12 @@ export default function App() {
           <div className={activeTab === 'channels' ? '' : 'hidden'}>
             <ChannelManager />
           </div>
+
+          {activeTab === 'growth' ? (
+            <div>
+              <ChannelGrowthDashboard />
+            </div>
+          ) : null}
 
         </main>
       </div>

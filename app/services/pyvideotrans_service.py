@@ -14,8 +14,9 @@ import json
 import hashlib
 import logging
 import subprocess
+import tempfile
 from pathlib import Path
-from typing import Callable, Dict, Any, Optional, List
+from typing import Callable, Dict, Any, Optional, List, Tuple
 
 from app.modules.videotrans.runner import PyVideoTransRunner
 from app.services.vietsub_rules import (
@@ -41,7 +42,19 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODULE_VIDEOTRANS_PATH = str(PROJECT_ROOT / "app" / "modules" / "videotrans")
 _WHISPER_CACHE: Dict[str, Any] = {"model": None, "name": None, "device": None}
-_STT_DECODE_TAG = "b5c1"
+_STT_DECODE_TAG = "b5c3"
+STT_GAP_MIN_SEC = 8.0
+STT_OPENING_SEC = 150.0
+STT_OPENING_MIN_GAP = 3.5
+STT_OPENING_MIN_COVERAGE = 0.28
+STT_GAP_PAD_SEC = 0.40
+STT_GAP_MAX_FILL = 16
+_STT_VAD = {
+    "threshold": 0.35,
+    "min_silence_duration_ms": 700,
+    "speech_pad_ms": 450,
+    "min_speech_duration_ms": 120,
+}
 
 _is_invalid_translation = is_invalid_translation
 _contains_cjk = contains_cjk
@@ -84,6 +97,51 @@ def subtitle_matches_target_language(srt_path: Optional[str], target_lang: str =
     except (OSError, UnicodeError):
         return False
     return bool(text_lines) and all(_translation_matches_target(line, target_lang) for line in text_lines)
+
+
+def find_stt_gaps(
+    cues: List[Dict[str, Any]],
+    duration: float,
+    min_gap: float = STT_GAP_MIN_SEC,
+    opening_sec: float = STT_OPENING_SEC,
+    opening_min_gap: float = STT_OPENING_MIN_GAP,
+) -> List[Tuple[float, float]]:
+    """Return [start, end) holes on the timeline with no STT cue (opening narration, VAD skips)."""
+    dur = max(0.0, float(duration or 0.0))
+    if dur < min(min_gap, opening_min_gap):
+        return []
+    spans = []
+    for cue in cues or []:
+        start = float(cue.get("start_time") or 0.0)
+        end = float(cue.get("end_time") or start)
+        if end > start:
+            spans.append((start, end))
+    spans.sort()
+    gaps: List[Tuple[float, float]] = []
+    cursor = 0.0
+    for start, end in spans:
+        need = opening_min_gap if cursor < opening_sec else min_gap
+        if start - cursor >= need:
+            gaps.append((cursor, start))
+        cursor = max(cursor, end)
+    need = opening_min_gap if cursor < opening_sec else min_gap
+    if dur - cursor >= need:
+        gaps.append((cursor, dur))
+    return gaps
+
+
+def opening_speech_coverage(cues: List[Dict[str, Any]], window: float = 90.0) -> float:
+    """Seconds of STT inside the first `window` seconds."""
+    win = max(1.0, float(window or 90.0))
+    covered = 0.0
+    for cue in cues or []:
+        start = float(cue.get("start_time") or 0.0)
+        end = float(cue.get("end_time") or start)
+        a = max(0.0, start)
+        b = min(win, end)
+        if b > a:
+            covered += b - a
+    return covered
 
 
 def _cues_to_srt(segments: List[Dict[str, Any]], out_srt: str) -> str:
@@ -400,6 +458,194 @@ class PyVideoTransService:
                     logger.warning(f"faster-whisper '{name}' local_only={local_only} failed: {e}")
         raise RuntimeError(f"Could not load any whisper model: {last_err}")
 
+    def _whisper_segments_to_cues(self, segments) -> List[Dict[str, Any]]:
+        words = []
+        raw_cues: List[Dict[str, Any]] = []
+        for seg in segments or []:
+            wlist = getattr(seg, "words", None) or []
+            if wlist:
+                for w in wlist:
+                    token = (getattr(w, "word", None) or getattr(w, "text", None) or "").strip()
+                    if not token:
+                        continue
+                    words.append({
+                        "text": token,
+                        "start": float(getattr(w, "start", 0.0) or 0.0),
+                        "end": float(getattr(w, "end", 0.0) or 0.0),
+                    })
+            text = (getattr(seg, "text", None) or "").strip()
+            text = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", text)
+            if text:
+                start = float(getattr(seg, "start", 0.0) or 0.0)
+                end = float(getattr(seg, "end", start + 0.5) or (start + 0.5))
+                raw_cues.append({
+                    "start_time": start,
+                    "end_time": max(start + 0.35, end),
+                    "duration": max(0.35, end - start),
+                    "text": text,
+                })
+        if words:
+            return regroup_words_to_sentences(words)
+        return split_long_cues(raw_cues)
+
+    def _shift_cues(self, cues: List[Dict[str, Any]], offset: float) -> List[Dict[str, Any]]:
+        shifted = []
+        for cue in cues:
+            item = dict(cue)
+            start = float(item.get("start_time") or 0.0) + offset
+            end = float(item.get("end_time") or start) + offset
+            item["start_time"] = max(0.0, start)
+            item["end_time"] = max(item["start_time"] + 0.2, end)
+            item["duration"] = item["end_time"] - item["start_time"]
+            shifted.append(item)
+        return shifted
+
+    def _merge_stt_cues(
+        self,
+        existing: List[Dict[str, Any]],
+        extras: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        merged = list(existing) + list(extras)
+        merged.sort(key=lambda item: float(item.get("start_time") or 0.0))
+        merged = split_long_cues(reflow_incomplete_sentences(merge_particles_and_shorts(merged)))
+        for i, item in enumerate(merged, start=1):
+            item["index"] = i
+        return merged
+
+    def _transcribe_audio_slice(
+        self,
+        model,
+        audio_path: str,
+        start: float,
+        end: float,
+        *,
+        language: Optional[str],
+        ffmpeg_bin: str,
+        use_vad: bool = False,
+    ) -> List[Dict[str, Any]]:
+        slice_start = max(0.0, float(start))
+        slice_end = max(slice_start + 0.5, float(end))
+        slice_dur = slice_end - slice_start
+        handle, slice_path = tempfile.mkstemp(prefix="stt_gap_", suffix=".wav")
+        os.close(handle)
+        try:
+            cmd = [
+                ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+                "-ss", f"{slice_start:.3f}", "-t", f"{slice_dur:.3f}",
+                "-i", audio_path,
+                "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+                slice_path,
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if res.returncode != 0 or not os.path.isfile(slice_path) or os.path.getsize(slice_path) < 2048:
+                return []
+            kwargs: Dict[str, Any] = {
+                "language": language,
+                "vad_filter": use_vad,
+                "beam_size": 5,
+                "best_of": 5,
+                "condition_on_previous_text": False,
+                "word_timestamps": True,
+            }
+            if use_vad:
+                kwargs["vad_parameters"] = _STT_VAD
+            segments_iter, _info = model.transcribe(slice_path, **kwargs)
+            sliced = self._whisper_segments_to_cues(list(segments_iter))
+            return self._shift_cues(sliced, slice_start)
+        except Exception as exc:
+            logger.warning("STT slice %.1f-%.1fs failed: %s", slice_start, slice_end, exc)
+            return []
+        finally:
+            try:
+                os.remove(slice_path)
+            except OSError:
+                pass
+
+    def _refill_stt_gaps(
+        self,
+        model,
+        audio_path: str,
+        cues: List[Dict[str, Any]],
+        *,
+        language: Optional[str],
+        duration: float,
+        on_status: Optional[Callable[[str], None]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Re-run Whisper on long holes so opening narration is not left mute."""
+        from app.services.activity import emit_status
+        from app.services.audio_service import find_ffmpeg_binary
+
+        ffmpeg_bin = find_ffmpeg_binary()
+        if not ffmpeg_bin:
+            return cues
+        extras: List[Dict[str, Any]] = []
+        work = list(cues)
+        opening = min(STT_OPENING_SEC, float(duration or 0.0))
+        if opening >= 20 and opening_speech_coverage(work, opening) < opening * STT_OPENING_MIN_COVERAGE:
+            emit_status(
+                on_status,
+                f"🎧 Whisper chạy lại {opening:.0f}s đầu (lời nữ/kể chuyện dưới nhạc)...",
+            )
+            recovered = self._transcribe_audio_slice(
+                model,
+                audio_path,
+                0.0,
+                opening,
+                language=language,
+                ffmpeg_bin=ffmpeg_bin,
+                use_vad=False,
+            )
+            holes = find_stt_gaps(
+                work,
+                opening,
+                min_gap=STT_OPENING_MIN_GAP,
+                opening_sec=opening,
+                opening_min_gap=STT_OPENING_MIN_GAP,
+            )
+            for cue in recovered:
+                mid = (float(cue["start_time"]) + float(cue["end_time"])) / 2.0
+                if any(start - 0.15 <= mid <= end + 0.15 for start, end in holes):
+                    extras.append(cue)
+            if extras:
+                logger.info("STT opening refill recovered %d cues in first %.0fs", len(extras), opening)
+                work = self._merge_stt_cues(work, extras)
+                extras = []
+        gaps = find_stt_gaps(work, duration, min_gap=STT_GAP_MIN_SEC)
+        if not gaps and not extras:
+            return work
+        for index, (gap_start, gap_end) in enumerate(gaps[:STT_GAP_MAX_FILL], start=1):
+            slice_start = max(0.0, gap_start - STT_GAP_PAD_SEC)
+            slice_end = min(duration, gap_end + STT_GAP_PAD_SEC)
+            slice_dur = slice_end - slice_start
+            if slice_dur < 3.0:
+                continue
+            emit_status(
+                on_status,
+                f"🎧 Whisper chạy lại khoảng trống {gap_start:.0f}–{gap_end:.0f}s ({index}/{min(len(gaps), STT_GAP_MAX_FILL)})...",
+            )
+            shifted = self._transcribe_audio_slice(
+                model,
+                audio_path,
+                slice_start,
+                slice_end,
+                language=language,
+                ffmpeg_bin=ffmpeg_bin,
+                use_vad=False,
+            )
+            kept = []
+            for cue in shifted:
+                mid = (float(cue["start_time"]) + float(cue["end_time"])) / 2.0
+                if gap_start - 0.05 <= mid <= gap_end + 0.05:
+                    kept.append(cue)
+            extras.extend(kept)
+            logger.info(
+                "STT gap fill %.1f-%.1fs recovered %d cues",
+                gap_start, gap_end, len(kept),
+            )
+        if not extras:
+            return work
+        return self._merge_stt_cues(work, extras)
+
     def _write_srt(self, srt_path: str, segments) -> int:
         count = 0
         with open(srt_path, "w", encoding="utf-8") as f:
@@ -524,15 +770,24 @@ class PyVideoTransService:
                     on_status,
                     f"🎧 Whisper '{used_name}' đang nhận dạng lời thoại (lang={w_lang or 'auto'}{dur_note}) — {eta}...",
                 )
-                segments_iter, info = fw_model.transcribe(
-                    audio_for_stt,
-                    language=w_lang,
-                    vad_filter=True,
-                    beam_size=5,
-                    best_of=5,
-                    condition_on_previous_text=True,
-                    word_timestamps=True,
-                )
+                prev_tqdm = os.environ.get("TQDM_DISABLE")
+                os.environ["TQDM_DISABLE"] = "1"
+                try:
+                    segments_iter, info = fw_model.transcribe(
+                        audio_for_stt,
+                        language=w_lang,
+                        vad_filter=True,
+                        vad_parameters=_STT_VAD,
+                        beam_size=5,
+                        best_of=5,
+                        condition_on_previous_text=True,
+                        word_timestamps=True,
+                    )
+                finally:
+                    if prev_tqdm is None:
+                        os.environ.pop("TQDM_DISABLE", None)
+                    else:
+                        os.environ["TQDM_DISABLE"] = prev_tqdm
                 # faster-whisper yields lazily; drain here so cancel/progress can run between cues.
                 segments = []
                 last_emit_end = -30.0
@@ -554,6 +809,8 @@ class PyVideoTransService:
                             )
             words = []
             seg_list = []
+            count = 0
+            cues: List[Dict[str, Any]] = []
             for seg in segments:
                 seg_list.append(seg)
                 wlist = getattr(seg, "words", None) or []
@@ -569,8 +826,7 @@ class PyVideoTransService:
                         })
             if words:
                 cues = regroup_words_to_sentences(words)
-                count = self._write_cue_dicts(srt_path, cues)
-                logger.info(f"STT sentence-regrouped {len(words)} words -> {count} cues")
+                logger.info(f"STT sentence-regrouped {len(words)} words -> {len(cues)} cues")
             else:
                 raw_cues = []
                 for seg in seg_list:
@@ -588,10 +844,23 @@ class PyVideoTransService:
                     })
                 cues = split_long_cues(raw_cues)
                 if cues:
-                    count = self._write_cue_dicts(srt_path, cues)
-                    logger.info(f"STT split {len(raw_cues)} Whisper blobs -> {count} picture cues")
+                    logger.info(f"STT split {len(raw_cues)} Whisper blobs -> {len(cues)} picture cues")
                 else:
                     count = self._write_srt(srt_path, seg_list)
+                    cues = []
+            if cues:
+                with gpu_task_slot(enabled=device == "cuda"):
+                    filled = self._refill_stt_gaps(
+                        fw_model,
+                        audio_for_stt,
+                        cues,
+                        language=w_lang,
+                        duration=audio_dur,
+                        on_status=on_status,
+                    )
+                if filled:
+                    cues = filled
+                count = self._write_cue_dicts(srt_path, cues)
             detected = getattr(info, "language", None)
             if count > 0 and os.path.exists(srt_path) and os.path.getsize(srt_path) > 0:
                 gated = self._stt_gate_result(srt_path, detected, used_name, count)

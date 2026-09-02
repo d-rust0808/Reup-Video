@@ -152,7 +152,13 @@ def test_delete_library_video_removes_canonical_files_and_sidecars(tmp_path, mon
     from app.config import settings
 
     monkeypatch.setattr(settings, "RAW_INPUT_DIR", str(tmp_path))
-    for name in ("12345678.mp4", "12345678.json", "12345678.vi.srt", "douyin_12345678_title.mp4"):
+    for name in (
+        "12345678.mp4",
+        "12345678.json",
+        "12345678.vi.srt",
+        "12345678_vi.aligned.srt",
+        "douyin_12345678_title.mp4",
+    ):
         (tmp_path / name).write_bytes(b"video")
     (tmp_path / "87654321.mp4").write_bytes(b"keep")
 
@@ -163,6 +169,7 @@ def test_delete_library_video_removes_canonical_files_and_sidecars(tmp_path, mon
         "12345678.json",
         "12345678.mp4",
         "12345678.vi.srt",
+        "12345678_vi.aligned.srt",
         "douyin_12345678_title.mp4",
     ]
     assert (tmp_path / "87654321.mp4").exists()
@@ -229,12 +236,16 @@ def test_build_caption_hashtags():
     from app.services.caption import build_caption
     cap = build_caption("Mèo vui", "douyin", ["viral"])
     assert "Mèo vui" in cap
-    assert "#douyin" in cap
-    assert "#vietsub" in cap
     assert "#viral" in cap
-    empty = build_caption(None, "tiktok")
-    assert empty.startswith("Video reup")
-    assert "#tiktok" in empty
+    assert "#vietsub" not in cap.lower()
+    empty = build_caption(None, "youtube")
+    assert "Video mới" not in empty
+    assert "#vietsub" not in empty.lower()
+    assert "#youtube" not in empty.lower()
+    tagged = build_caption("Mèo vui", "facebook", ["reup", "vietsub", "reels"])
+    assert "#reup" not in tagged.lower()
+    assert "#vietsub" not in tagged.lower()
+    assert "#reels" in tagged
 
 def test_failed_ws_payload_reads_error_message():
     import inspect

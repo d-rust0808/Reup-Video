@@ -11,6 +11,7 @@ import {
   Sparkles,
   ClipboardPaste,
   Trash2,
+  HardDrive,
   Video,
   UserCheck,
   Search,
@@ -24,10 +25,12 @@ import {
   fetchSampleVideos,
   fetchLibrary,
   deleteLibraryVideo,
+  cleanupReuppedVideos,
   getStreamUrl,
   submitJob,
 } from '../services/api';
 import { loadSession, saveSession } from '../services/session';
+import { ConfirmModal } from './ConfirmModal';
 
 function sameMediaIds(a, b) {
   if (a.length !== b.length) return false;
@@ -52,6 +55,8 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
   const [queuedJobs, setQueuedJobs] = useState([]);
   const [batchBusy, setBatchBusy] = useState(false);
   const [deletingId, setDeletingId] = useState(null);
+  const [cleaningReup, setCleaningReup] = useState(false);
+  const [cleanupConfirm, setCleanupConfirm] = useState(false);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
   const onMediaExtractedRef = useRef(onMediaExtracted);
@@ -91,22 +96,38 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
       .catch(() => setSamples([]));
   }, []);
 
+  const mergeLibraryItems = useCallback((items) => {
+    if (!Array.isArray(items) || !items.length) return;
+    setExtractedList((prev) => {
+      const map = new Map();
+      [...items, ...prev].forEach((item) => {
+        if (item?.video_id && !map.has(item.video_id)) map.set(item.video_id, item);
+      });
+      const next = Array.from(map.values());
+      return sameMediaIds(prev, next) ? prev : next;
+    });
+  }, []);
+
   useEffect(() => {
     refreshRecent();
     fetchLibrary()
-      .then((data) => {
-        const items = data.items || [];
-        if (!items.length) return;
-        setExtractedList((prev) => {
-          const map = new Map();
-          [...items, ...prev].forEach((item) => {
-            if (item?.video_id && !map.has(item.video_id)) map.set(item.video_id, item);
-          });
-          const next = Array.from(map.values());
-          return sameMediaIds(prev, next) ? prev : next;
-        });
-      })
+      .then((data) => mergeLibraryItems(data.items || []))
       .catch(() => {});
+  }, [refreshRecent, mergeLibraryItems]);
+
+  useEffect(() => {
+    const onLibraryChanged = () => {
+      refreshRecent();
+      fetchLibrary()
+        .then((data) => {
+          const items = data.items || [];
+          const keep = new Set(items.map((item) => item.video_id));
+          setExtractedList((prev) => prev.filter((item) => keep.has(item.video_id)));
+        })
+        .catch(() => {});
+    };
+    window.addEventListener('reup:library-changed', onLibraryChanged);
+    return () => window.removeEventListener('reup:library-changed', onLibraryChanged);
   }, [refreshRecent]);
 
   // Focus input and show in-app paste shortcut tip WITHOUT calling restricted navigator.clipboard.readText()
@@ -117,6 +138,22 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
     }
     setPasteTip(true);
     setTimeout(() => setPasteTip(false), 3000);
+  };
+
+  const handleCleanupReupped = async () => {
+    if (cleaningReup) return;
+    setCleanupConfirm(false);
+    setCleaningReup(true);
+    setError(null);
+    try {
+      const res = await cleanupReuppedVideos();
+      window.dispatchEvent(new Event('reup:library-changed'));
+      setChannelMessage(res.message || 'Đã dọn video đã reup.');
+    } catch (e) {
+      setError(e.message || 'Không dọn được video đã reup');
+    } finally {
+      setCleaningReup(false);
+    }
   };
 
   const handleDeleteLibraryVideo = async (item) => {
@@ -159,7 +196,7 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
         const enableVocalMute = hasSavedAudioMode ? opts.enable_vocal_mute : wantsTts;
         const vocalMuteStrategy = hasSavedAudioMode
           ? (opts.vocal_mute_strategy || 'auto')
-          : (wantsTts ? 'demucs_duck' : 'auto');
+          : 'auto';
         const result = await extractChannel({
           url: inputUrl.trim(),
           max_videos: Number(maxVideos) || 8,
@@ -504,6 +541,15 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
           isDragOver ? 'border-blue-500 ring-4 ring-blue-500/10 bg-blue-50/20' : ''
         }`}
       >
+        <ConfirmModal
+          isOpen={cleanupConfirm}
+          title="Dọn video đã reup"
+          message="Xóa thành phẩm + video gốc + file TTS của các job đã xong để giải phóng ổ đĩa. Video chưa reup, clip mẫu, và job đang chạy được giữ lại."
+          onConfirm={handleCleanupReupped}
+          onCancel={() => setCleanupConfirm(false)}
+          confirmText="Xóa video đã reup"
+          cancelText="Hủy Bỏ"
+        />
         {/* Mode Selector Tabs (Reup Theo Video vs Reup Theo Kênh) */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-100">
           <div className="flex items-center p-1 bg-slate-100/90 rounded-2xl border border-slate-200 w-fit">
@@ -690,6 +736,16 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
               />
               <button
                 type="button"
+                onClick={() => setCleanupConfirm(true)}
+                disabled={cleaningReup}
+                className="bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold text-xs px-4 py-2.5 rounded-xl border border-amber-200 transition flex items-center gap-2 cursor-pointer shadow-xs disabled:opacity-50"
+                title="Xóa thành phẩm + video gốc của job đã reup xong để giải phóng ổ đĩa"
+              >
+                {cleaningReup ? <Loader2 className="w-4 h-4 animate-spin" /> : <HardDrive className="w-4 h-4" />}
+                <span>{cleaningReup ? 'Đang dọn…' : 'Dọn video đã reup'}</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={uploading}
                 className="bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs px-4 py-2.5 rounded-xl border border-slate-300 transition flex items-center gap-2 cursor-pointer shadow-xs"
@@ -800,18 +856,30 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
       {/* Extracted Cards Results (channel clone or multi-video extract) */}
       {(extractedList.length > 1 || (mode === 'channel' && extractedList.length > 0)) && (
         <div className="clean-panel rounded-3xl p-6 sm:p-8 space-y-4 animate-in fade-in duration-300">
-          <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+          <div className="flex items-center justify-between pb-2 border-b border-slate-100 gap-2 flex-wrap">
             <h4 className="text-xs font-black text-slate-500 uppercase tracking-wider">
               Danh Sách Video Đã Quét ({extractedList.length})
             </h4>
-            <button
-              type="button"
-              disabled={batchBusy || !extractedList.length}
-              onClick={handleBatchReup}
-              className="text-xs font-extrabold bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-3 py-2 rounded-xl"
-            >
-              {batchBusy ? 'Đang xếp job…' : `Reup tất cả (${extractedList.length})`}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={cleaningReup}
+                onClick={() => setCleanupConfirm(true)}
+                className="text-xs font-bold bg-amber-50 hover:bg-amber-100 disabled:opacity-50 text-amber-800 border border-amber-200 px-3 py-2 rounded-xl flex items-center gap-1.5"
+                title="Xóa thành phẩm + video gốc của job đã reup xong"
+              >
+                {cleaningReup ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <HardDrive className="w-3.5 h-3.5" />}
+                {cleaningReup ? 'Đang dọn…' : 'Dọn video đã reup'}
+              </button>
+              <button
+                type="button"
+                disabled={batchBusy || !extractedList.length}
+                onClick={handleBatchReup}
+                className="text-xs font-extrabold bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-3 py-2 rounded-xl"
+              >
+                {batchBusy ? 'Đang xếp job…' : `Reup tất cả (${extractedList.length})`}
+              </button>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

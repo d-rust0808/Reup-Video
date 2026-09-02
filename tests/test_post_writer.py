@@ -3,6 +3,8 @@ from app.services.post_writer import (
     _fallback_post,
     _posts_from_envelope,
     extract_contacts,
+    is_lazy_title,
+    title_from_brief,
     usable_brand_title,
     video_brief_from_srt,
     write_facebook_posts,
@@ -83,6 +85,49 @@ def test_write_posts_uses_agy_envelope(monkeypatch):
     assert _posts_from_envelope(envelope, 2)[1]["title"] == "Tháo dỡ không ẩu"
 
 
+def test_title_from_brief_summarizes_not_placeholder():
+    assert is_lazy_title("Video mới")
+    assert is_lazy_title("Video Reup #abc123")
+    title = title_from_brief(
+        "Phế phi bị đày vào lãnh cung. Cửu hoàng tử còn đỏ hỏn đã bị bỏ rơi."
+    )
+    assert "lãnh cung" in title.lower() or "phế phi" in title.lower() or "hoàng tử" in title.lower()
+    assert "vietsub" not in title.lower()
+    assert title != "Video mới"
+
+
+def test_posts_never_include_reup_word(monkeypatch):
+    from app.services import agy_cli_service
+    from app.services.post_writer import strip_reup_mentions
+
+    assert "reup" not in strip_reup_mentions("Video reup hay #reup").lower()
+    envelope = {
+        "status": "SUCCESS",
+        "structured_output": {
+            "posts": [
+                {
+                    "index": 1,
+                    "title": "Reup clip đập phá",
+                    "caption": "Video reup này hay. Vietsub full. Gọi 0777704099 #reup #vietsub",
+                    "hashtags": ["reup", "vietsub", "xaydung"],
+                }
+            ]
+        },
+    }
+    monkeypatch.setattr(agy_cli_service, "is_available", lambda: True)
+    monkeypatch.setattr(agy_cli_service, "complete", lambda *a, **k: envelope)
+    posts = write_facebook_posts(
+        intent="LH 0777704099 đập phá",
+        video_brief="tháo dỡ nhà",
+        page_names=["Page A"],
+    )
+    blob = (posts[0]["title"] + " " + posts[0]["caption"] + " " + " ".join(posts[0]["hashtags"])).lower()
+    assert "reup" not in blob
+    assert "vietsub" not in blob
+    assert "0777704099" in posts[0]["caption"]
+    assert "xaydung" in posts[0]["hashtags"]
+
+
 def test_write_posts_fallback_when_agy_missing(monkeypatch):
     from app.services import agy_cli_service
 
@@ -97,3 +142,5 @@ def test_write_posts_fallback_when_agy_missing(monkeypatch):
     captions = {p["caption"] for p in posts}
     assert len(captions) == 3
     assert all("0909123456" in p["caption"] for p in posts)
+    assert all("vietsub" not in (p["title"] + p["caption"] + " ".join(p["hashtags"])).lower() for p in posts)
+    assert all(not is_lazy_title(p["title"]) for p in posts)

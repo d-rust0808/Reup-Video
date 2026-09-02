@@ -17,6 +17,7 @@ from app.api.bgm import router as bgm_router
 from app.api.facebook import router as facebook_router
 from app.api.tiktok import router as tiktok_router
 from app.api.content import router as content_router
+from app.api.growth import router as growth_router
 
 api_router = APIRouter()
 
@@ -31,3 +32,4 @@ api_router.include_router(bgm_router, tags=["BGM"])
 api_router.include_router(facebook_router, tags=["Facebook"])
 api_router.include_router(tiktok_router, tags=["TikTok"])
 api_router.include_router(content_router, tags=["Content"])
+api_router.include_router(growth_router, tags=["Growth"])

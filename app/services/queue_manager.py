@@ -678,7 +678,7 @@ class BatchQueueManager:
             self._notify_callbacks(updated_job)
 
 
-    def _row_to_dict(self, row) -> Dict[str, Any]:
+    def _row_to_dict(self, row, include_logs: bool = True) -> Dict[str, Any]:
         """Converts an SQLite row to a clean job dictionary."""
         d = dict(row)
         inp_path = d.get("input_file_path") or d.get("source_url") or ""
@@ -712,17 +712,18 @@ class BatchQueueManager:
             except Exception:
                 params_dict = {}
 
-        raw_logs = d.get("logs")
         logs_list = []
-        if isinstance(raw_logs, list):
-            logs_list = raw_logs
-        elif isinstance(raw_logs, str) and raw_logs.strip():
-            try:
-                parsed_logs = json.loads(raw_logs)
-                if isinstance(parsed_logs, list):
-                    logs_list = parsed_logs
-            except Exception:
-                logs_list = []
+        if include_logs:
+            raw_logs = d.get("logs")
+            if isinstance(raw_logs, list):
+                logs_list = raw_logs
+            elif isinstance(raw_logs, str) and raw_logs.strip():
+                try:
+                    parsed_logs = json.loads(raw_logs)
+                    if isinstance(parsed_logs, list):
+                        logs_list = parsed_logs
+                except Exception:
+                    logs_list = []
 
         raw_msg = d.get("message") or ""
 
@@ -742,7 +743,7 @@ class BatchQueueManager:
             "error": d.get("error_message"),
             "message": str(raw_msg),
             "log": str(raw_msg),
-            "logs": logs_list,
+            "logs": logs_list if include_logs else [],
             "watermark_config": d.get("watermark_config"),
             "reup_config": d.get("reup_config"),
             "params": params_dict,
@@ -764,7 +765,11 @@ class BatchQueueManager:
             return [self._row_to_dict(r) for r in rows]
 
     def list_jobs_paginated(
-        self, status_filter: Optional[str] = None, limit: int = 50, offset: int = 0
+        self,
+        status_filter: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+        include_logs: bool = True,
     ) -> tuple:
         """Lists jobs with optional status filter and offset/limit pagination in a single optimized query."""
         with self._get_conn() as conn:
@@ -785,7 +790,7 @@ class BatchQueueManager:
                 )
             
             rows = cursor.fetchall()
-            return [self._row_to_dict(r) for r in rows], total
+            return [self._row_to_dict(r, include_logs=include_logs) for r in rows], total
 
 
     def cancel_job(self, job_id: str) -> bool:
@@ -1147,11 +1152,13 @@ class BatchQueueManager:
                 job.get("input_file_path") or job.get("input_path") or job.get("source_url") or ""
             )[0]
             if original_base:
-                sidecar_srt = original_base + ".vi.srt"
-                sidecar_tts = original_base + ".vi.mp3"
-                if not getattr(reup_config, "srt_path", None) and os.path.exists(sidecar_srt):
+                from app.services.reup_service import find_cached_tts_audio, find_cached_vietsub_srt
+
+                sidecar_srt = find_cached_vietsub_srt(original_base)
+                sidecar_tts = find_cached_tts_audio(original_base)
+                if not getattr(reup_config, "srt_path", None) and sidecar_srt:
                     reup_config.srt_path = sidecar_srt
-                if not getattr(reup_config, "tts_audio_path", None) and os.path.exists(sidecar_tts):
+                if not getattr(reup_config, "tts_audio_path", None) and sidecar_tts:
                     reup_config.tts_audio_path = sidecar_tts
                     reup_config.enable_tts = True
 
@@ -1338,9 +1345,12 @@ class BatchQueueManager:
                 reason = report.get("stt_fail_reason") or report.get("translate_fail_reason")
                 self.append_job_log(
                     job_id,
-                    f"⚠️ Cần kiểm tra Vietsub ({review_label(reason)}). Video vẫn tải được.",
-                    level="WARN",
+                    f"⚠️ Cần kiểm tra Vietsub ({review_label(reason)}). Đã chặn xuất file dở.",
+                    level="ERROR",
                     stage="REUP_TRANSFORM",
+                )
+                raise RuntimeError(
+                    "Reup thiếu Vietsub — không xuất file dở."
                 )
             elif q_status == "PASS":
                 self.append_job_log(
@@ -1455,8 +1465,22 @@ class BatchQueueManager:
             ) -> str:
                 cv_id = f"cvid_{uuid.uuid4().hex[:8]}"
                 raw_tags = getattr(reup_config, "post_tags", None) or params.get("post_tags") or []
-                p_title = getattr(reup_config, "post_title", None) or params.get("post_title") or f"Video Reup #{job_id[-6:]}"
+                p_title = getattr(reup_config, "post_title", None) or params.get("post_title") or ""
                 p_caption = getattr(reup_config, "post_caption", None) or params.get("post_caption") or ""
+                if not copy:
+                    from app.services.post_writer import _sanitize_post, find_job_transcript
+                    from app.config import settings as _post_settings
+                    brief = find_job_transcript(
+                        job_id,
+                        getattr(_post_settings, "OUTPUT_DIR", "data/outputs"),
+                    )
+                    cleaned = _sanitize_post(
+                        {"title": p_title, "caption": p_caption, "hashtags": raw_tags},
+                        brief=brief,
+                    )
+                    p_title = cleaned["title"]
+                    p_caption = cleaned["caption"]
+                    raw_tags = cleaned["hashtags"]
                 if copy:
                     p_title = str(copy.get("title") or p_title)
                     p_caption = str(copy.get("caption") or p_caption)
@@ -1569,7 +1593,7 @@ class BatchQueueManager:
             if explicit_ids:
                 try:
                     intent = str(getattr(reup_config, "post_intent", "") or "").strip()
-                    want_writer = bool(getattr(reup_config, "agy_write_post", True)) and bool(intent)
+                    want_writer = bool(getattr(reup_config, "agy_write_post", True))
                     if want_writer:
                         from app.config import settings as app_settings
                         from app.services.post_writer import find_job_transcript, write_facebook_posts
@@ -1588,13 +1612,13 @@ class BatchQueueManager:
                         )
                         self.append_job_log(
                             job_id,
-                            f"✍️ agy đang viết {len(explicit_ids)} bài đăng (SEO, khác nhau từng Page)...",
+                            f"✍️ agy đang viết {len(explicit_ids)} bài đăng (tóm nội dung, hashtag chuẩn)...",
                             level="INFO",
                             stage="COMPLETED",
                         )
                         generated_posts = write_facebook_posts(
                             intent=intent,
-                            brand_title="",
+                            brand_title=str(getattr(reup_config, "post_title", "") or ""),
                             video_brief=brief,
                             page_names=names,
                             extra_notes="",
@@ -1659,6 +1683,20 @@ class BatchQueueManager:
 
             updated_job = self.get_job(job_id)
             if updated_job:
+                try:
+                    from app.services.disk_cleanup import release_scratch_after_complete
+
+                    freed = release_scratch_after_complete(updated_job, queue_manager=self)
+                    bytes_freed = int(freed.get("bytes_freed") or 0)
+                    if bytes_freed > 0:
+                        self.append_job_log(
+                            job_id,
+                            f"🧹 Đã xóa video gốc + file TTS sau reup ({bytes_freed / (1024 ** 3):.2f} GB).",
+                            level="INFO",
+                            stage="COMPLETED",
+                        )
+                except Exception as exc:
+                    logger.warning("Post-complete scratch cleanup failed for %s: %s", job_id, exc)
                 self._notify_callbacks(updated_job)
             return updated_job or {}
 
@@ -1682,6 +1720,8 @@ class BatchQueueManager:
             if "CANCEL" in str(e).upper():
                 raise
             if isinstance(e, FileNotFoundError):
+                raise
+            if "không xuất file dở" in str(e):
                 raise
             self.append_job_log(
                 job_id,
@@ -1746,6 +1786,8 @@ class BatchQueueManager:
         except Exception as e:
             logger.error(f"Worker pipeline async execution error for job {job_id}: {e}")
             if isinstance(e, FileNotFoundError):
+                return
+            if "không xuất file dở" in str(e):
                 return
             try:
                 self.append_job_log(job_id, f"🔁 Tự chạy lại 1 lần sau lỗi: {e}", level="WARN")

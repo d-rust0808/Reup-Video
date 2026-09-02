@@ -241,7 +241,8 @@ def test_clean_audio_modes_keep_or_remove_source_background():
     )
     _, keep_audio, _, keep_af = build_reup_filtergraph(keep_cfg, has_audio=True)
     assert keep_audio is True
-    assert "stereotools" in keep_af
+    assert "stereotools" not in keep_af
+    assert "volume=0.70" in keep_af
     assert keep_af != "volume=0"
 
     mute_cfg = ReupConfig(
@@ -385,6 +386,7 @@ def test_submitted_speed_ratio_is_kept():
     )
     assert "setpts=PTS/1.3000" in vf
     assert "atempo=1.3000" in af
+    assert "asetpts=PTS-STARTPTS" in af
 
 
 def test_custom_speed_factor_lands_in_setpts():
@@ -392,25 +394,125 @@ def test_custom_speed_factor_lands_in_setpts():
     _, _, vf, af = build_reup_filtergraph(cfg, has_audio=True)
     assert "setpts=PTS/1.3000" in vf
     assert "atempo=1.3000" in af
+    assert "asetpts=PTS-STARTPTS" in af
 
 
 def test_pitch_shift_uses_probed_source_sample_rate():
-    cfg = ReupConfig(speed_factor=1.3, film_grain=0.0, frame_enabled=False, pitch_shift=True)
+    cfg = ReupConfig(speed_factor=1.03, film_grain=0.0, frame_enabled=False, pitch_shift=True)
     _, _, _, af_48k = build_reup_filtergraph(cfg, has_audio=True, audio_sample_rate=48000)
     assert "asetrate=48000*1.0300,aresample=48000" in af_48k
     assert "asetrate=44100" not in af_48k
-    assert "atempo=1.2621" in af_48k
 
     _, _, _, af_44k = build_reup_filtergraph(cfg, has_audio=True, audio_sample_rate=44100)
     assert "asetrate=44100*1.0300,aresample=44100" in af_44k
-    assert "atempo=1.2621" in af_44k
 
 
 def test_pitch_shift_without_known_rate_keeps_full_atempo():
-    cfg = ReupConfig(speed_factor=1.3, film_grain=0.0, frame_enabled=False, pitch_shift=True)
+    cfg = ReupConfig(speed_factor=1.03, film_grain=0.0, frame_enabled=False, pitch_shift=True)
     _, _, _, af = build_reup_filtergraph(cfg, has_audio=True, audio_sample_rate=0)
     assert "asetrate" not in af
-    assert "atempo=1.3000" in af
+    assert "atempo=1.0300" in af
+
+
+def test_large_speedup_uses_matching_setpts_and_atempo():
+    cfg = ReupConfig(speed_factor=1.5, film_grain=0.0, frame_enabled=False, pitch_shift=True)
+    _, _, vf, af = build_reup_filtergraph(cfg, has_audio=True, audio_sample_rate=48000)
+    assert "setpts=PTS/1.5000" in vf
+    assert "atempo=1.5000" in af
+    assert "asetrate" not in af
+    assert "asetpts=PTS-STARTPTS" in af
+    assert vf.index("setpts=PTS/1.5000") < vf.index("fps=30")
+
+
+def test_speed_encode_uses_libx264_not_videotoolbox():
+    from app.services.reup_service import browser_safe_encode_args, find_ffmpeg_binary
+
+    ffmpeg = find_ffmpeg_binary()
+    if not ffmpeg:
+        pytest.skip("ffmpeg required")
+    args = browser_safe_encode_args(ffmpeg, force_software=True)
+    assert args[1] == "libx264"
+    assert "videotoolbox" not in " ".join(args)
+
+
+def test_ensure_av_lock_rejects_ignored_setpts(tmp_path):
+    from app.services.audio_service import ensure_av_lock
+
+    assert ensure_av_lock("/tmp/nope-av-lock.mp4") is False
+    fake = tmp_path / "empty.mp4"
+    fake.write_bytes(b"")
+    assert ensure_av_lock(str(fake), source_dur=10.0, speed=1.5) is False
+
+
+def test_ffmpeg_1_5x_keeps_audio_and_video_the_same_length(tmp_path):
+    import shutil
+    import subprocess
+    from app.services.audio_service import ensure_av_lock, probe_media_duration_sec
+    from app.services.reup_service import find_ffmpeg_binary
+
+    ffmpeg = find_ffmpeg_binary()
+    if not ffmpeg:
+        pytest.skip("ffmpeg required")
+    src = tmp_path / "src.mp4"
+    make = subprocess.run(
+        [
+            ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=red:s=160x120:r=25:d=2",
+            "-f", "lavfi", "-i", "sine=f=440:d=2",
+            "-shortest",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-ac", "2",
+            str(src),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    if make.returncode != 0 or not src.is_file():
+        pytest.skip(f"could not mint test media: {(make.stderr or '')[-200:]}")
+    cfg = ReupConfig(
+        speed_factor=1.5, hflip=False, film_grain=0, crop_percent=0,
+        pitch_shift=False, modify_md5=False,
+    )
+    fc, has_a, vf, af = build_reup_filtergraph(cfg, has_audio=True, frame_size=(160, 120))
+    assert has_a
+    out = tmp_path / "out.mp4"
+    enc = subprocess.run(
+        [
+            ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(src), "-filter_complex", fc,
+            "-map", "[v_out]", "-map", "[a_out]",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-ac", "2", "-shortest", "-t", "1.40",
+            str(out),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert enc.returncode == 0, enc.stderr[-400:]
+    assert out.is_file()
+    assert ensure_av_lock(str(out), source_dur=2.0, speed=1.5)
+    video_dur = probe_media_duration_sec(str(out), "v:0")
+    audio_dur = probe_media_duration_sec(str(out), "a:0")
+    assert abs(video_dur - audio_dur) < 0.12
+    assert 1.15 < video_dur < 1.55
+
+
+def test_place_consecutive_tts_does_not_pile_behind_picture():
+    from app.services.tts_service import place_consecutive_tts_clips
+
+    clips = [
+        {"segment": {"start_time": 1.0, "end_time": 1.4}, "final_dur": 2.4},
+        {"segment": {"start_time": 1.5, "end_time": 2.0}, "final_dur": 2.4},
+        {"segment": {"start_time": 2.2, "end_time": 2.8}, "final_dur": 2.4},
+    ]
+    placed = place_consecutive_tts_clips(clips)
+    assert placed[0]["segment"]["start_time"] == pytest.approx(1.0)
+    assert placed[1]["segment"]["start_time"] == pytest.approx(1.5)
+    assert placed[2]["segment"]["start_time"] == pytest.approx(2.2)
+
+
+def test_restretch_audio_skips_missing_file():
+    from app.services.audio_service import restretch_audio_to_video
+
+    assert restretch_audio_to_video("/tmp/definitely-missing-av-lock.mp4") is False
 
 
 def test_timed_subtitle_overlay_is_composited_before_setpts():
@@ -568,6 +670,58 @@ def test_pipeline_with_subtitles_off_does_not_reference_missing_srt(monkeypatch,
     assert captured["speech_intervals"] == []
 
 
+def test_require_complete_reup_blocks_missing_vietsub_and_tts(tmp_path):
+    from app.services.reup_service import (
+        abort_incomplete_reup,
+        refuse_incomplete_output,
+        require_complete_reup,
+    )
+
+    require_complete_reup(
+        ReupConfig(burn_subtitles=False, subtitle_mode="off", enable_tts=False)
+    )
+
+    with pytest.raises(RuntimeError, match="Vietsub"):
+        require_complete_reup(
+            ReupConfig(subtitle_mode="hard", enable_tts=False),
+            translated_srt=None,
+        )
+
+    srt = tmp_path / "vi.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nXin chào\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="lồng tiếng"):
+        require_complete_reup(
+            ReupConfig(subtitle_mode="hard", enable_tts=True),
+            translated_srt=str(srt),
+            synced_tts_audio=None,
+        )
+
+    tts = tmp_path / "voice.wav"
+    tts.write_bytes(b"\x00" * 4096)
+    require_complete_reup(
+        ReupConfig(subtitle_mode="hard", enable_tts=True),
+        translated_srt=str(srt),
+        synced_tts_audio=str(tts),
+    )
+
+    broken = tmp_path / "broken.mp4"
+    broken.write_bytes(b"not-a-finished-video")
+    with pytest.raises(RuntimeError, match="Vietsub in cứng"):
+        refuse_incomplete_output(
+            ReupConfig(subtitle_mode="hard", enable_tts=False),
+            output_path=str(broken),
+            burned_sub=False,
+            had_srt=True,
+        )
+    assert not broken.exists()
+
+    leftover = tmp_path / "desync.mp4"
+    leftover.write_bytes(b"leftover")
+    with pytest.raises(RuntimeError, match="không xuất file dở"):
+        abort_incomplete_reup(str(leftover), "Reup thiếu lồng tiếng — không xuất file dở.")
+    assert not leftover.exists()
+
+
 def test_empty_stt_never_turns_post_title_into_full_video_subtitle(monkeypatch, tmp_path):
     from app.services import pyvideotrans_service, reup_service, tts_service
 
@@ -598,20 +752,20 @@ def test_empty_stt_never_turns_post_title_into_full_video_subtitle(monkeypatch, 
 
     monkeypatch.setattr(reup_service, "process_reup_video", fake_process_reup_video)
 
-    result = reup_service.ReupService.process_reup_pipeline(
-        str(source),
-        ReupConfig(
-            burn_subtitles=True,
-            subtitle_mode="hard",
-            enable_tts=False,
-            post_title="Tây Tạng Mê Tho — tiêu đề bài đăng",
-        ),
-        str(output),
-    )
+    with pytest.raises(RuntimeError, match="Vietsub"):
+        reup_service.ReupService.process_reup_pipeline(
+            str(source),
+            ReupConfig(
+                burn_subtitles=True,
+                subtitle_mode="hard",
+                enable_tts=False,
+                post_title="Tây Tạng Mê Tho — tiêu đề bài đăng",
+            ),
+            str(output),
+        )
 
-    assert result == str(output)
-    assert captured["srt_override"] is None
-    assert captured["speech_intervals"] == []
+    assert captured == {}
+    assert not output.exists()
     assert not (tmp_path / "source.title.srt").exists()
 
 
@@ -701,23 +855,22 @@ def test_failed_tts_fails_job_instead_of_exporting_chinese_only(monkeypatch, tmp
 
     monkeypatch.setattr(reup_service, "process_reup_video", fake_process_reup_video)
 
-    result = reup_service.ReupService.process_reup_pipeline(
-        str(source),
-        ReupConfig(
-            enable_tts=True,
-            enable_vocal_mute=True,
-            vocal_mute_strategy="demucs_duck",
-            preserve_bgm=True,
-            srt_path=str(srt),
-            subtitle_mode="hard",
-        ),
-        str(output),
-    )
+    with pytest.raises(RuntimeError, match="lồng tiếng"):
+        reup_service.ReupService.process_reup_pipeline(
+            str(source),
+            ReupConfig(
+                enable_tts=True,
+                enable_vocal_mute=True,
+                vocal_mute_strategy="demucs_duck",
+                preserve_bgm=True,
+                srt_path=str(srt),
+                subtitle_mode="hard",
+            ),
+            str(output),
+        )
 
-    assert result == str(output)
-    assert captured["tts_audio_override"] is None
-    assert captured["cfg"].enable_tts is False
-    assert captured["cfg"].enable_vocal_mute is False
+    assert captured == {}
+    assert not output.exists()
 
 
 def test_translation_failure_surfaces_provider_warning(monkeypatch, tmp_path):
@@ -756,16 +909,15 @@ def test_translation_failure_surfaces_provider_warning(monkeypatch, tmp_path):
 
     monkeypatch.setattr(reup_service, "process_reup_video", fake_process_reup_video)
 
-    result = reup_service.ReupService.process_reup_pipeline(
-        str(source),
-        ReupConfig(enable_tts=True, subtitle_mode="hard", source_lang="zh", target_lang="vi"),
-        str(output),
-    )
+    with pytest.raises(RuntimeError, match="Vietsub"):
+        reup_service.ReupService.process_reup_pipeline(
+            str(source),
+            ReupConfig(enable_tts=True, subtitle_mode="hard", source_lang="zh", target_lang="vi"),
+            str(output),
+        )
 
-    assert result == str(output)
-    assert captured["tts_audio_override"] is None
-    assert captured["srt_override"] is None
-    assert captured["cfg"].enable_tts is False
+    assert captured == {}
+    assert not output.exists()
 
 
 def test_retry_reuses_only_completed_stage2(tmp_path):
@@ -1064,15 +1216,14 @@ def test_tts_mix_preserves_source_gain():
     assert "sidechaincompress" in fc
     assert "asplit=2[voice_duck][voice_mix]" in fc
     assert "[bed][voice_duck]sidechaincompress=" in fc
-    assert "[safebed][voice_mix]amix=" in fc
-    assert "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=0.50[bed]" in fc
-    assert "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=2.50" in fc
+    assert "volume=0.95[bed]" in fc
+    assert "volume=2.20" in fc
+    assert "threshold=0.08:ratio=4" in fc
+    assert "alimiter" not in fc
     assert "[2:a]" not in fc
     assert "source_voice" not in fc
     assert "stereotools" not in fc
-    assert "volume=0.22" not in fc
-    assert "[0:a]lowpass=f=180" not in fc
-    assert "weights=0.55 1.20" in fc
+    assert "weights=1.00 1.15" in fc
     overlay_fc = build_tts_bgm_mix_filter(0.08, 1.22)
     assert overlay_fc == fc
     import inspect
@@ -1080,19 +1231,38 @@ def test_tts_mix_preserves_source_gain():
     process_src = inspect.getsource(process_reup_video)
     assert "vocal_volume=cfg.original_vocal_volume" in process_src
     assert "Đang phủ giọng Việt riêng" in process_src
+    assert "giữ audio gốc" not in process_src
+    assert "refuse_incomplete_output" in process_src
     mute = build_vocal_mute_ffmpeg_filter(preserve_bgm=True)
-    assert "stereotools=" in mute
-    assert "asplit=" in mute
-    assert "lowpass=" in mute
-    assert mute.endswith("volume=1.0")
+    assert "stereotools" not in mute
+    assert mute == "volume=0.70"
     cfg = ReupConfig(enable_vocal_mute=True, film_grain=0, pitch_shift=False, speed_factor=1.0)
     graph, has_a, vf, af = build_reup_filtergraph(cfg, has_audio=True)
     assert has_a is True
-    assert "asplit=2" in graph
+    assert "stereotools" not in graph
+    assert "volume=0.70" in graph
     assert graph.count("[0:a]") == 1
     timed = build_timed_speech_ducking_filter([(1.0, 2.0)])
     assert "between(t,0.900,2.150)" in timed
-    assert ",0.12,1.0" in timed
+    ducked = ReupConfig(
+        enable_vocal_mute=True, preserve_bgm=True, film_grain=0,
+        pitch_shift=False, speed_factor=1.0, vocal_mute_strategy="auto",
+    )
+    g2, _, _, af2 = build_reup_filtergraph(
+        ducked, has_audio=True, speech_intervals=[(1.0, 2.0)],
+    )
+    assert "between(t," in af2
+    assert "stereotools" not in af2
+    assert ",0.10,1.0" in af2
+    custom_duck = ReupConfig(
+        enable_vocal_mute=True, preserve_bgm=True, film_grain=0,
+        pitch_shift=False, speed_factor=1.0, vocal_mute_strategy="auto",
+        original_vocal_volume=0.08,
+    )
+    _, _, _, af_custom = build_reup_filtergraph(
+        custom_duck, has_audio=True, speech_intervals=[(1.0, 2.0)],
+    )
+    assert ",0.08,1.0" in af_custom
     dub_cfg = ReupConfig(enable_tts=True, enable_vocal_mute=True, vocal_mute_strategy="demucs")
     assert should_use_demucs_for_dubbing(dub_cfg, [(1.0, 2.0)]) is True
     assert should_use_demucs_for_dubbing(dub_cfg, []) is True
@@ -1102,6 +1272,41 @@ def test_tts_mix_preserves_source_gain():
     assert should_use_demucs_for_dubbing(auto_cfg, [(1.0, 2.0)]) is False
     mute_all_cfg = ReupConfig(enable_vocal_mute=True, preserve_bgm=False, vocal_mute_strategy="mute_all")
     assert should_use_demucs_for_dubbing(mute_all_cfg, [(1.0, 2.0)]) is False
+
+
+def test_long_speech_duck_uses_sendcmd_not_giant_volume_expr(tmp_path):
+    from app.services.audio_service import build_timed_speech_ducking_filter
+    from app.services.reup_service import (
+        build_reup_filtergraph,
+        find_cached_tts_audio,
+        find_cached_vietsub_srt,
+    )
+
+    many = [(float(i), float(i) + 0.8) for i in range(0, 400, 2)]
+    duck_path = str(tmp_path / "duck.txt")
+    timed = build_timed_speech_ducking_filter(many, duck_volume=0.22, command_path=duck_path)
+    assert "asendcmd=" in timed
+    assert "between(t," not in timed
+    assert os.path.isfile(duck_path)
+    text = open(duck_path, encoding="ascii").read()
+    assert "volume volume 0.22" in text
+    cfg = ReupConfig(
+        enable_vocal_mute=True, preserve_bgm=True, film_grain=0,
+        pitch_shift=False, speed_factor=1.0, vocal_mute_strategy="auto",
+    )
+    _, _, _, af = build_reup_filtergraph(
+        cfg, has_audio=True, speech_intervals=many, duck_command_path=duck_path,
+    )
+    assert "asendcmd=" in af
+
+    wav = tmp_path / "clip_synced_tts.wav"
+    wav.write_bytes(b"\x00" * 4096)
+    srt = tmp_path / "clip_vi.aligned.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nXin chào\n", encoding="utf-8")
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"x")
+    assert find_cached_tts_audio(str(video), str(tmp_path)).endswith("clip_synced_tts.wav")
+    assert find_cached_vietsub_srt(str(video)).endswith("clip_vi.aligned.srt")
 
 
 def test_vietnamese_overlay_keeps_tts_in_the_mix(tmp_path):
@@ -1729,7 +1934,7 @@ def test_long_form_tts_groups_nearby_cues_without_cutting_text():
 
     grouped = group_long_form_tts_segments(segments)
 
-    assert 12 <= len(grouped) <= 24
+    assert 20 <= len(grouped) <= 60
     combined = " ".join(segment["text"] for segment in grouped)
     assert "Câu số 1" in combined
     assert "Câu số 60" in combined
@@ -1747,10 +1952,10 @@ def test_tts_groups_jump_cuts_but_keeps_real_pauses():
         {"index": 3, "start_time": 8.5, "end_time": 10.0, "duration": 1.5, "text": later},
     ]
     grouped = group_long_form_tts_segments(segments)
-    assert len(grouped) == 2
-    assert nearby_a in grouped[0]["text"]
-    assert nearby_b in grouped[0]["text"]
-    assert grouped[1]["text"] == later
+    assert len(grouped) == 3
+    assert grouped[0]["text"] == nearby_a
+    assert grouped[1]["text"] == nearby_b
+    assert grouped[2]["text"] == later
 
 
 def test_tts_does_not_merge_ten_second_shots():
@@ -1807,8 +2012,9 @@ def test_tts_soft_joins_period_so_last_sentence_does_not_hold():
         {"index": 1, "start_time": 0.0, "end_time": 2.0, "duration": 2.0, "text": "Câu cuối của đoạn này."},
         {"index": 2, "start_time": 2.2, "end_time": 4.0, "duration": 1.8, "text": "Câu đầu của đoạn kia."},
     ])
-    assert len(grouped) == 1
-    assert grouped[0]["text"] == "Câu cuối của đoạn này Câu đầu của đoạn kia."
+    assert len(grouped) == 2
+    assert grouped[0]["text"] == "Câu cuối của đoạn này."
+    assert grouped[1]["text"] == "Câu đầu của đoạn kia."
 
 
 def test_tts_does_not_glue_separate_paragraphs():
@@ -1821,6 +2027,32 @@ def test_tts_does_not_glue_separate_paragraphs():
     assert len(grouped) == 2
     assert grouped[0]["text"] == "Hết đoạn một."
     assert grouped[1]["text"] == "Sang đoạn hai."
+
+
+def test_tts_does_not_steal_next_shot_word():
+    from app.services.tts_service import group_long_form_tts_segments
+
+    grouped = group_long_form_tts_segments([
+        {
+            "index": 1,
+            "start_time": 0.0,
+            "end_time": 1.65,
+            "duration": 1.65,
+            "text": "Mua kẹo hồ lô",
+        },
+        {
+            "index": 2,
+            "start_time": 1.80,
+            "end_time": 3.10,
+            "duration": 1.30,
+            "text": "ngọt lắm",
+        },
+    ])
+    assert len(grouped) == 2
+    assert grouped[0]["text"] == "Mua kẹo hồ lô"
+    assert grouped[1]["text"] == "ngọt lắm"
+    assert "ngọt" not in grouped[0]["text"]
+    assert grouped[1]["start_time"] == pytest.approx(1.80)
 
 
 def test_tts_keeps_a_new_image_as_its_own_take():

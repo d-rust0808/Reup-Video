@@ -13,6 +13,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ShieldCheck,
+  TrendingUp,
 } from 'lucide-react';
 
 export function Sidebar({
@@ -100,6 +101,20 @@ export function Sidebar({
       activeBg: 'bg-blue-50/90 text-blue-800 border-blue-200 shadow-xs font-bold',
       iconActive: 'bg-blue-600 text-white shadow-sm shadow-blue-500/20',
       iconInactive: 'bg-slate-100 text-slate-600 group-hover:bg-slate-200 group-hover:text-slate-900',
+    },
+  ];
+
+  const insightItems = [
+    {
+      id: 'growth',
+      label: 'Tăng trưởng kênh',
+      shortLabel: 'Tăng trưởng',
+      icon: TrendingUp,
+      shortcut: '⌘7',
+      desc: 'Follow, like, comment, view theo ngày',
+      activeBg: 'bg-emerald-50 text-emerald-900 border-emerald-200 shadow-xs font-bold',
+      iconActive: 'bg-emerald-600 text-white shadow-sm shadow-emerald-500/20',
+      iconInactive: 'bg-emerald-100 text-emerald-700 group-hover:bg-emerald-200 group-hover:text-emerald-900',
     },
   ];
 
@@ -233,6 +248,15 @@ export function Sidebar({
               </div>
             )}
             {catalogItems.map(renderNavItem)}
+          </div>
+
+          <div className="space-y-1.5 pt-1 border-t border-slate-100">
+            {!collapsed && (
+              <div className="flex items-center justify-between px-2.5 mb-1 mt-2">
+                <p className="text-[11px] font-extrabold text-emerald-600 uppercase tracking-wider">Phân tích</p>
+              </div>
+            )}
+            {insightItems.map(renderNavItem)}
           </div>
         </nav>
       </div>

@@ -322,8 +322,8 @@ export function ChannelManager() {
       if (outs.length > 0) {
         setSelectedOutput(outs[0]);
         setVideoForm({
-          title: `Video Reup #${outs[0].job_id.slice(-6)}`,
-          caption: `#viral #trending #reup #${activeChannel?.platform || 'tiktok'}`,
+          title: outs[0].title || '',
+          caption: '',
           tagsInput: (activeChannel?.tags || []).join(', '),
           publish_status: 'READY',
           notes: '',

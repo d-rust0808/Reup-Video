@@ -138,12 +138,151 @@ def probe_stream_duration_sec(media_path: str, stream_spec: str = "v:0") -> floa
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         raw = (res.stdout or "").strip().splitlines()
         if res.returncode == 0 and raw:
-            duration = float(raw[0])
-            if duration > 0:
-                return duration
+            token = raw[0].strip()
+            if token and token.upper() != "N/A":
+                duration = float(token)
+                if duration > 0:
+                    return duration
     except Exception:
         pass
     return 0.0
+
+
+def probe_format_duration_sec(media_path: str) -> float:
+    """Container duration. Used when stream duration is N/A (common on WebM/M4A)."""
+    if not media_path or not os.path.exists(media_path):
+        return 0.0
+    ffprobe_bin = find_ffprobe_binary()
+    if not ffprobe_bin:
+        return 0.0
+    try:
+        cmd = [
+            ffprobe_bin, "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "csv=p=0",
+            media_path,
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        raw = (res.stdout or "").strip().splitlines()
+        if res.returncode == 0 and raw:
+            token = raw[0].strip()
+            if token and token.upper() != "N/A":
+                duration = float(token)
+                if duration > 0:
+                    return duration
+    except Exception:
+        pass
+    return 0.0
+
+
+def probe_media_duration_sec(media_path: str, stream_spec: str = "v:0") -> float:
+    """Best-effort duration: stream first, then container."""
+    duration = probe_stream_duration_sec(media_path, stream_spec)
+    if duration > 0:
+        return duration
+    return probe_format_duration_sec(media_path)
+
+
+def av_streams_in_sync(path: str, slop_sec: float = 0.08) -> bool:
+    """True when video and audio durations match within slop (or there is no audio)."""
+    if not path or not os.path.exists(path):
+        return False
+    video_dur = probe_media_duration_sec(path, "v:0")
+    audio_dur = probe_media_duration_sec(path, "a:0")
+    if video_dur < 0.2:
+        return False
+    if audio_dur < 0.2:
+        return True
+    return abs(audio_dur - video_dur) <= slop_sec
+
+
+def restretch_audio_to_video(path: str, slop_sec: float = 0.08) -> bool:
+    """Force the audio stream duration to match video so 1.5x jobs do not drift.
+
+    Speeding with VideoToolbox often leaves picture and sound different lengths.
+    A second audio-only pass with atempo is cheaper than a full re-encode.
+    """
+    if not path or not os.path.exists(path):
+        return False
+    video_dur = probe_media_duration_sec(path, "v:0")
+    audio_dur = probe_media_duration_sec(path, "a:0")
+    if video_dur < 0.3 or audio_dur < 0.3:
+        return False
+    if abs(audio_dur - video_dur) < slop_sec:
+        return False
+    tempo = audio_dur / video_dur
+    if tempo < 0.5 or tempo > 2.0:
+        # Chain later via scale helper if ever needed; 1.5x jobs stay in (0.66, 1.5).
+        if tempo < 0.5 or tempo > 4.0:
+            logger.warning("AV duration gap too large to restretch (v=%.3f a=%.3f)", video_dur, audio_dur)
+            return False
+    ffmpeg_bin = find_ffmpeg_binary()
+    if not ffmpeg_bin:
+        return False
+
+    nodes = []
+    t = tempo
+    while t > 2.0:
+        nodes.append("atempo=2.0")
+        t /= 2.0
+    while t < 0.5:
+        nodes.append("atempo=0.5")
+        t /= 0.5
+    if abs(t - 1.0) > 1e-4:
+        nodes.append(f"atempo={t:.6f}")
+    if not nodes:
+        return False
+    af = ",".join(nodes) + ",asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0"
+    tmp = path + ".avlock.mp4"
+    cmd = [
+        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+        "-i", path,
+        "-map", "0:v:0", "-c:v", "copy",
+        "-map", "0:a:0", "-af", af, "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+        "-muxdelay", "0", "-muxpreload", "0",
+        "-movflags", "+faststart",
+        tmp,
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if res.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+        os.replace(tmp, path)
+        logger.info("Locked A/V duration (video=%.3fs audio was=%.3fs tempo=%.4f)", video_dur, audio_dur, tempo)
+        return True
+    if os.path.exists(tmp):
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    logger.warning("AV lock restretch failed (%s): %s", res.returncode, (res.stderr or "")[-400:])
+    return False
+
+
+def ensure_av_lock(
+    path: str,
+    source_dur: float = 0.0,
+    speed: float = 1.0,
+    slop_sec: float = 0.08,
+) -> bool:
+    """Make output A/V the same length, and confirm speed actually landed on picture.
+
+    Returns False when the picture is still ~source length (setpts was ignored)
+    so the caller can re-encode with libx264.
+    """
+    if not path or not os.path.exists(path):
+        return False
+    restretch_audio_to_video(path, slop_sec=slop_sec)
+    speed = float(speed or 1.0)
+    source_dur = float(source_dur or 0.0)
+    if source_dur > 0.4 and abs(speed - 1.0) > 0.01:
+        expected = source_dur / max(0.5, speed)
+        actual = probe_media_duration_sec(path, "v:0") or probe_format_duration_sec(path)
+        if actual > expected * 1.12 and actual > source_dur * 0.90:
+            logger.error(
+                "Speed was ignored on picture (source=%.3fs out=%.3fs expected=%.3fs x%.3f)",
+                source_dur, actual, expected, speed,
+            )
+            return False
+    return av_streams_in_sync(path, slop_sec=slop_sec)
 
 
 def probe_audio_channels(audio_path: str) -> int:
@@ -266,31 +405,82 @@ def extract_vocals_demucs(
     raise RuntimeError(f"Demucs vocal extraction failed or is unavailable for {input_audio_path}")
 
 
+_DUCK_EXPR_CHAR_LIMIT = 2500
+
+
+def merge_speech_intervals(
+    speech_intervals: List[Tuple[float, float]],
+    pad_before: float = 0.10,
+    pad_after: float = 0.15,
+) -> List[Tuple[float, float]]:
+    """Merge overlapping padded speech windows so duck commands stay monotonic."""
+    windows: List[List[float]] = []
+    for start, end in speech_intervals or []:
+        s = max(0.0, float(start) - pad_before)
+        e = float(end) + pad_after
+        if e > s:
+            windows.append([s, e])
+    windows.sort()
+    merged: List[List[float]] = []
+    for s, e in windows:
+        if not merged or s > merged[-1][1]:
+            merged.append([s, e])
+        else:
+            merged[-1][1] = max(merged[-1][1], e)
+    return [(s, e) for s, e in merged]
+
+
+def _ffmpeg_filter_file_arg(path: str) -> str:
+    p = os.path.abspath(path).replace("\\", "/")
+    p = p.replace("\\", "\\\\").replace("'", r"\'").replace(":", r"\:")
+    return p
+
+
+def write_speech_duck_sendcmd(
+    command_path: str,
+    speech_intervals: List[Tuple[float, float]],
+    duck_volume: float = 0.22,
+) -> str:
+    """Write an asendcmd script that ducks volume only during speech windows."""
+    merged = merge_speech_intervals(speech_intervals)
+    os.makedirs(os.path.dirname(os.path.abspath(command_path)) or ".", exist_ok=True)
+    with open(command_path, "w", encoding="ascii") as handle:
+        handle.write("0 volume volume 1.0;\n")
+        for start, end in merged:
+            handle.write(f"{start:.3f} volume volume {float(duck_volume):.2f};\n")
+            handle.write(f"{end:.3f} volume volume 1.0;\n")
+    return command_path
+
+
 def build_timed_speech_ducking_filter(
     speech_intervals: List[Tuple[float, float]],
-    duck_volume: float = 0.12
+    duck_volume: float = 0.12,
+    command_path: Optional[str] = None,
 ) -> str:
     """
     Constructs an FFmpeg volume ducking filter around detected speech timestamps. The
     original track remains present at a low level, preserving effects such as meows,
     footsteps, and room ambience instead of replacing the whole soundtrack with a
     Demucs music stem.
+
+    Long videos (hundreds of cues) cannot use one giant volume=if(between+between...)
+    expression — FFmpeg dies with "Cannot allocate memory". Those jobs use asendcmd.
     """
-    if not speech_intervals:
+    merged = merge_speech_intervals(speech_intervals)
+    if not merged:
         return ""
 
-    conditions = []
-    for start, end in speech_intervals:
-        s = max(0.0, float(start) - 0.10)
-        e = float(end) + 0.15
-        if e > s:
-            conditions.append(f"between(t,{s:.3f},{e:.3f})")
+    conditions = [f"between(t,{s:.3f},{e:.3f})" for s, e in merged]
+    inline = f"volume='if({'+'.join(conditions)},{duck_volume:.2f},1.0)':eval=frame"
+    if len(inline) <= _DUCK_EXPR_CHAR_LIMIT:
+        return inline
 
-    if not conditions:
-        return ""
-
-    expr = "+".join(conditions)
-    return f"volume='if({expr},{duck_volume:.2f},1.0)':eval=frame"
+    path = command_path
+    if not path:
+        handle, path = tempfile.mkstemp(prefix="reup_duck_", suffix=".txt")
+        os.close(handle)
+    write_speech_duck_sendcmd(path, merged, duck_volume=duck_volume)
+    return f"asendcmd=f='{_ffmpeg_filter_file_arg(path)}',volume=1"
 
 
 def build_vocal_mute_ffmpeg_filter(
@@ -306,14 +496,10 @@ def build_vocal_mute_ffmpeg_filter(
     if vocal_mute_strategy == "mute_all" or not preserve_bgm:
         return "volume=0"
 
-    # Stereo mid-side vocal suppression: cancels center vocals while keeping the
-    # remaining track near its original loudness.
-    return (
-        "asplit=2[vm_bass_in][vm_mid_in];"
-        "[vm_bass_in]lowpass=f=160:poles=2,volume=0.85[vm_bass];"
-        "[vm_mid_in]highpass=f=160,stereotools=mlev=0.02:slev=1.35[vm_sides];"
-        "[vm_bass][vm_sides]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,volume=1.0"
-    )
+    # Do not kill the mid/center channel: impacts, whooshes and animal calls
+    # are usually centered and disappeared with stereotools=mlev≈0. Keep the
+    # full stereo bed and only lower overall level when we have no speech map.
+    return "volume=0.70"
 
 
 

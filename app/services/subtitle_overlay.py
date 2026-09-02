@@ -189,6 +189,71 @@ def build_overlay_filter(overlays: List[Dict[str, Any]]) -> Tuple[str, List[str]
     return ";".join(parts), inputs
 
 
+def write_overlay_concat_list(
+    overlays: List[Dict[str, Any]],
+    concat_path: str,
+    transparent_path: str,
+) -> Optional[str]:
+    """Write a concat demuxer list that holds each cue PNG for its on-screen duration."""
+    if not overlays:
+        return None
+    entries: List[Tuple[str, float]] = []
+    cursor = 0.0
+    for overlay in overlays:
+        start = max(cursor, float(overlay["start"]))
+        end = max(start + 0.04, float(overlay["end"]))
+        if start > cursor:
+            entries.append((transparent_path, start - cursor))
+        entries.append((overlay["png"], end - start))
+        cursor = end
+    entries.append((transparent_path, 0.04))
+    os.makedirs(os.path.dirname(os.path.abspath(concat_path)) or ".", exist_ok=True)
+    with open(concat_path, "w", encoding="utf-8") as concat_file:
+        for path, duration in entries:
+            escaped = os.path.abspath(path).replace("'", "'\\''")
+            concat_file.write(f"file '{escaped}'\n")
+            concat_file.write(f"duration {duration:.3f}\n")
+        escaped = os.path.abspath(entries[-1][0]).replace("'", "'\\''")
+        concat_file.write(f"file '{escaped}'\n")
+    return concat_path
+
+
+def render_srt_to_concat_track(
+    srt_path: str,
+    video_w: int,
+    video_h: int,
+    concat_path: str,
+    *,
+    cover_band: float = 0.0,
+    cover_kind: str = "off",
+    subtitle_y: float = 0.0,
+    cover_pad: float = 0.0,
+    subtitle_box_w: float = 0.88,
+    subtitle_box_h: float = 0.08,
+) -> Optional[str]:
+    """Render cues to PNGs and a concat list. Keeps stills on disk for the encode."""
+    from PIL import Image
+
+    frame_dir = os.path.dirname(os.path.abspath(concat_path)) or "."
+    overlays = render_srt_to_overlays(
+        srt_path,
+        video_w,
+        video_h,
+        frame_dir,
+        cover_band=cover_band,
+        cover_kind=cover_kind,
+        subtitle_y=subtitle_y,
+        cover_pad=cover_pad,
+        subtitle_box_w=subtitle_box_w,
+        subtitle_box_h=subtitle_box_h,
+    )
+    if not overlays:
+        return None
+    transparent_path = os.path.join(frame_dir, "transparent.png")
+    Image.new("RGBA", (video_w, video_h), (0, 0, 0, 0)).save(transparent_path)
+    return write_overlay_concat_list(overlays, concat_path, transparent_path)
+
+
 def render_srt_to_apng(
     srt_path: str,
     video_w: int,

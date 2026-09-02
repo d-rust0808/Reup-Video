@@ -4,6 +4,7 @@ REST API Router for Job Tracking, Status Querying, Cancellation, and Retry.
 Target Path: app/api/jobs.py
 """
 
+import asyncio
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -36,7 +37,13 @@ async def list_jobs(
     Lists processing jobs with optional status filter and offset/limit pagination.
     """
     qm = _get_queue_manager(request)
-    jobs, total = qm.list_jobs_paginated(status_filter=status, limit=limit, offset=offset)
+    jobs, total = await asyncio.to_thread(
+        qm.list_jobs_paginated,
+        status,
+        limit,
+        offset,
+        False,
+    )
     return {
         "jobs": jobs,
         "total": total,
@@ -63,7 +70,7 @@ async def get_job_logs(job_id: str, request: Request):
     Fetches real-time terminal logs and stage history for a specific job.
     """
     qm = _get_queue_manager(request)
-    job = qm.get_job(job_id)
+    job = await asyncio.to_thread(qm.get_job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job ID {job_id} not found")
     return {

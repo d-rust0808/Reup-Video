@@ -8,10 +8,16 @@ function resolveJobsWsUrl() {
   if (typeof window === 'undefined') {
     return `${DESKTOP_BACKEND_WS}/ws/jobs`;
   }
+  const hostName = window.location.hostname;
+  const port = String(window.location.port || '');
+  const loopback = hostName === '127.0.0.1' || hostName === 'localhost';
+  // Dev Vite proxies /ws → backend. Same-origin avoids private-network WS failures.
+  if (loopback && port === '6001') {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${window.location.host}/ws/jobs`;
+  }
   const desktop = !!window.electronAPI?.isDesktop || window.location.protocol === 'file:';
-  const onBackend =
-    (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost') &&
-    String(window.location.port || '') === '6000';
+  const onBackend = loopback && port === '6000';
   if (desktop && !onBackend) {
     return `${DESKTOP_BACKEND_WS}/ws/jobs`;
   }

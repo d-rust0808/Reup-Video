@@ -108,7 +108,7 @@ export function VideoWorkbench({ selectedMedia, onJobSubmitted }) {
       merged.preset_id = 'clean_duck_vocals';
       merged.enable_vocal_mute = true;
       merged.preserve_bgm = true;
-      merged.vocal_mute_strategy = 'demucs_duck';
+      merged.vocal_mute_strategy = 'auto';
       merged.original_vocal_volume = merged.original_vocal_volume ?? 0.10;
     } else {
       merged.preset_id = 'clean_keep_bgm';

@@ -51,6 +51,16 @@ def _defer_sample_seed() -> bool:
 # Sample MP4 seeding is deferred in packaged Electron (REUP_SKIP_SAMPLE_SEED=1)
 # so uvicorn can bind /health before edge-tts/FFmpeg run.
 settings.ensure_directories()
+_stt_threads = str(max(1, int(getattr(settings, "STT_CPU_THREADS", 4) or 4)))
+for _key in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ.setdefault(_key, _stt_threads)
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 if not _defer_sample_seed():
     _seed_sample_media()
 

@@ -9,6 +9,8 @@ from app.services.pyvideotrans_service import (
     _is_ai_unavailable_error,
     _merge_fragmented_cues,
     _translation_matches_target,
+    find_stt_gaps,
+    opening_speech_coverage,
     subtitle_matches_target_language,
 )
 
@@ -322,6 +324,29 @@ def test_fully_vietnamese_srt_is_accepted(tmp_path):
         encoding="utf-8",
     )
     assert subtitle_matches_target_language(str(srt), "vi") is True
+
+
+def test_find_stt_gaps_catches_opening_hole():
+    cues = [
+        {"start_time": 0.48, "end_time": 0.84, "text": "打"},
+        {"start_time": 3.44, "end_time": 3.92, "text": "生了"},
+        {"start_time": 45.46, "end_time": 47.02, "text": "怎么会有阴儿这"},
+    ]
+    gaps = find_stt_gaps(cues, duration=50.0, min_gap=8.0)
+    assert len(gaps) == 1
+    assert abs(gaps[0][0] - 3.92) < 0.05
+    assert abs(gaps[0][1] - 45.46) < 0.05
+    opening = [
+        {"start_time": 0.48, "end_time": 0.84, "text": "打"},
+        {"start_time": 3.44, "end_time": 3.92, "text": "生了"},
+        {"start_time": 45.46, "end_time": 47.02, "text": "怎么会有阴儿这"},
+        {"start_time": 50.60, "end_time": 55.02, "text": "红白"},
+        {"start_time": 61.29, "end_time": 64.81, "text": "气费"},
+    ]
+    assert opening_speech_coverage(opening, 90.0) < 90.0 * 0.28
+    early_holes = find_stt_gaps(opening, duration=90.0)
+    assert any(abs(g[0] - 3.92) < 0.1 and abs(g[1] - 45.46) < 0.1 for g in early_holes)
+    assert any(g[0] >= 64.0 and g[1] >= 89.0 for g in early_holes)
 
 
 def test_legacy_deepseek_chat_alias_maps_to_v4_flash():

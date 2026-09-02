@@ -63,9 +63,16 @@ def ffmpeg_supports_libass(ffmpeg_bin: Optional[str] = None) -> bool:
     return _LIBASS_CACHE
 
 
-def browser_safe_encode_args(ffmpeg_bin: str) -> list:
-    """H.264/AAC flags that HTML5 players (Chrome/Safari) can actually play."""
-    encoder_name, encoder_flags = detect_h264_encoder(ffmpeg_bin)
+def browser_safe_encode_args(ffmpeg_bin: str, force_software: bool = False) -> list:
+    """H.264/AAC flags that HTML5 players (Chrome/Safari) can actually play.
+
+    VideoToolbox ignores setpts=PTS/speed, so speed-changed jobs must use libx264
+    or the picture keeps original timing while audio is atempo'd (or the reverse).
+    """
+    if force_software:
+        encoder_name, encoder_flags = "libx264", ["-preset", "veryfast", "-crf", "20"]
+    else:
+        encoder_name, encoder_flags = detect_h264_encoder(ffmpeg_bin)
     args = ["-c:v", encoder_name, *encoder_flags, "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
     if encoder_name == "libx264":
         args.extend(["-profile:v", "main", "-level", "4.0"])
@@ -94,6 +101,64 @@ def remux_faststart(path: str) -> bool:
     return False
 
 
+def repair_output_speed(path: str, source_dur: float, speed: float) -> bool:
+    """If setpts was ignored, re-encode both streams at the requested speed with libx264."""
+    from app.services.audio_service import ensure_av_lock
+
+    speed = float(speed or 1.0)
+    source_dur = float(source_dur or 0.0)
+    if not path or not os.path.exists(path):
+        return False
+    if abs(speed - 1.0) <= 0.01:
+        return ensure_av_lock(path)
+    if ensure_av_lock(path, source_dur=source_dur, speed=speed):
+        return True
+    ffmpeg_bin = find_ffmpeg_binary()
+    if not ffmpeg_bin:
+        return False
+    tempo = ",".join(_build_atempo_nodes(speed) + ["asetpts=PTS-STARTPTS"])
+    if not tempo:
+        tempo = "anull"
+    tmp = path + ".speedfix.mp4"
+    out_t = max(0.4, source_dur / max(0.5, speed)) if source_dur > 0.4 else 0.0
+    has_audio = detect_audio_stream(path)
+    if has_audio:
+        fc = (
+            f"[0:v]setpts=PTS/{speed:.4f},fps=30,setpts=PTS-STARTPTS[v];"
+            f"[0:a]{tempo}[a]"
+        )
+        maps = ["-map", "[v]", "-map", "[a]", "-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+    else:
+        fc = f"[0:v]setpts=PTS/{speed:.4f},fps=30,setpts=PTS-STARTPTS[v]"
+        maps = ["-map", "[v]", "-an"]
+    cmd = [
+        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+        "-i", path,
+        "-filter_complex", fc,
+        *maps,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-profile:v", "main", "-level", "4.0",
+        "-fps_mode", "cfr", "-r", "30",
+        "-movflags", "+faststart",
+        "-muxdelay", "0", "-muxpreload", "0",
+    ]
+    if out_t > 0.4:
+        cmd.extend(["-t", f"{out_t:.3f}"])
+    cmd.append(tmp)
+    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if res.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+        os.replace(tmp, path)
+        logger.info("Re-encoded sped output with libx264 after setpts was ignored")
+        return ensure_av_lock(path, source_dur=source_dur, speed=speed)
+    if os.path.exists(tmp):
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    logger.error("Speed repair encode failed (%s): %s", res.returncode, (res.stderr or "")[-400:])
+    return False
+
+
 def detect_h264_encoder(ffmpeg_bin: str) -> Tuple[str, List[str]]:
     """
     Probes FFmpeg for hardware acceleration support.
@@ -108,7 +173,7 @@ def detect_h264_encoder(ffmpeg_bin: str) -> Tuple[str, List[str]]:
     except Exception as e:
         logger.warning(f"Failed to probe FFmpeg encoders: {e}")
 
-    return "libx264", ["-preset", "ultrafast", "-crf", "23"]
+    return "libx264", ["-preset", "veryfast", "-crf", "20"]
 
 
 def detect_audio_stream(input_path: str) -> bool:
@@ -183,6 +248,7 @@ def build_reup_filtergraph(
     burn_srt_path: Optional[str] = None,
     speech_intervals: Optional[List[Tuple[float, float]]] = None,
     frame_size: Optional[Tuple[int, int]] = None,
+    duck_command_path: Optional[str] = None,
 ) -> Tuple[str, bool, str, str]:
     """
     Constructs unified single-pass complex filtergraph string alongside individual
@@ -283,6 +349,7 @@ def build_reup_filtergraph(
     if abs(s_ratio - 1.0) > 1e-3:
         vf_nodes.append(f"setpts=PTS/{s_ratio:.4f}")
         vf_nodes.append("fps=30")
+        vf_nodes.append("setpts=PTS-STARTPTS")
 
     if cfg.color_adjust or (cfg.brightness != 0.0 or cfg.contrast != 1.0 or cfg.saturation != 1.0):
         b, c, sat = cfg.brightness, cfg.contrast, cfg.saturation
@@ -307,7 +374,12 @@ def build_reup_filtergraph(
         elif cfg.enable_vocal_mute:
             if speech_intervals:
                 from app.services.audio_service import build_timed_speech_ducking_filter
-                timed_filter = build_timed_speech_ducking_filter(speech_intervals, duck_volume=0.12)
+                leftover = leftover_original_vocal_volume(cfg)
+                timed_filter = build_timed_speech_ducking_filter(
+                    speech_intervals,
+                    duck_volume=leftover,
+                    command_path=duck_command_path,
+                )
                 if timed_filter:
                     af_nodes.append(timed_filter)
             else:
@@ -322,15 +394,19 @@ def build_reup_filtergraph(
                 elif vm_filter:
                     af_nodes.append(vm_filter)
 
-        if cfg.pitch_shift:
-            # Bound pitch ratio between 0.97 and 1.03 to preserve human voice timbre & natural formants
+        if abs(s_ratio - 1.0) > 0.04:
+            # Large speed-up must be a single atempo chain. Splitting 1.50x into
+            # asetrate*1.03 + atempo*1.456 drifted when the probed rate was wrong
+            # and left speech seconds behind the picture.
+            af_nodes.extend(_build_atempo_nodes(s_ratio))
+            af_nodes.append("asetpts=PTS-STARTPTS")
+        elif cfg.pitch_shift:
+            # Tiny anti-detect pitch only when speed stays near 1.0.
             raw_p_ratio = cfg.pitch_factor if cfg.pitch_factor != 1.0 else s_ratio
             p_ratio = max(0.97, min(1.03, raw_p_ratio))
             src_rate = int(audio_sample_rate or 0)
             applied_pitch = False
             if src_rate >= 8000 and abs(p_ratio - 1.0) > 1e-4:
-                # asetrate must use THIS file's rate. A fixed 44100 on 48 kHz
-                # Opus (YouTube) left audio longer than the sped video.
                 af_nodes.append(f"asetrate={src_rate}*{p_ratio:.4f},aresample={src_rate}")
                 applied_pitch = True
             remaining_speed = (
@@ -338,8 +414,10 @@ def build_reup_filtergraph(
             )
             if abs(remaining_speed - 1.0) > 1e-4:
                 af_nodes.extend(_build_atempo_nodes(remaining_speed))
+            af_nodes.append("asetpts=PTS-STARTPTS")
         elif abs(s_ratio - 1.0) > 1e-4:
             af_nodes.extend(_build_atempo_nodes(s_ratio))
+            af_nodes.append("asetpts=PTS-STARTPTS")
 
     vf_str = ",".join(vf_nodes) if vf_nodes else ""
     af_str = ",".join(af_nodes) if af_nodes else ""
@@ -506,7 +584,147 @@ def subtitle_output_mode(cfg: ReupConfig) -> str:
     """Return the normalized subtitle mode while honoring the legacy enable flag."""
     if not getattr(cfg, "burn_subtitles", True):
         return "off"
-    return "hard" if getattr(cfg, "subtitle_mode", "soft") == "hard" else "soft"
+    return "hard" if getattr(cfg, "subtitle_mode", "hard") == "hard" else "soft"
+
+
+def abort_incomplete_reup(output_path: Optional[str], message: str) -> None:
+    """Delete a half-built file so a FAILED job cannot be downloaded as the product."""
+    if output_path and os.path.isfile(output_path):
+        try:
+            os.remove(output_path)
+        except OSError:
+            logger.warning("Could not remove incomplete output %s", output_path)
+    raise RuntimeError(message)
+
+
+def require_complete_reup(
+    cfg: ReupConfig,
+    *,
+    translated_srt: Optional[str] = None,
+    synced_tts_audio: Optional[str] = None,
+    detail: str = "",
+) -> None:
+    """Refuse to encode a half-built file when the user asked for Vietsub/TTS."""
+    missing: List[str] = []
+    mode = subtitle_output_mode(cfg)
+    if mode in ("hard", "soft"):
+        if not (isinstance(translated_srt, str) and os.path.exists(translated_srt)):
+            missing.append("Vietsub")
+    if getattr(cfg, "enable_tts", False):
+        if not (
+            isinstance(synced_tts_audio, str)
+            and os.path.exists(synced_tts_audio)
+            and os.path.getsize(synced_tts_audio) > 2048
+        ):
+            missing.append("lồng tiếng")
+    if not missing:
+        return
+    why = " ".join(str(detail or "").split())
+    raise RuntimeError(
+        "Reup thiếu " + " và ".join(missing) + " — không xuất file dở."
+        + (f" {why}" if why else "")
+    )
+
+
+def _existing_media(path: Optional[str], min_bytes: int = 2048) -> Optional[str]:
+    if isinstance(path, str) and os.path.isfile(path) and os.path.getsize(path) > min_bytes:
+        return path
+    return None
+
+
+def find_cached_tts_audio(*roots: str) -> Optional[str]:
+    """Reuse a previously rendered TTS wav so a failed encode does not re-read hours of cues."""
+    stems: List[str] = []
+    dirs: List[str] = []
+    allow_global = False
+    for root in roots:
+        if not root:
+            continue
+        if os.path.isdir(root):
+            dirs.append(root)
+            continue
+        base = root[:-4] if root.lower().endswith(".mp4") else os.path.splitext(root)[0]
+        stems.append(os.path.basename(base))
+        dirs.append(os.path.dirname(os.path.abspath(base)) or ".")
+        norm = os.path.abspath(root).replace("\\", "/")
+        if "/data/input/" in norm or "/data/outputs/" in norm:
+            allow_global = True
+    if allow_global:
+        try:
+            from app.config import Settings
+            dirs.append(Settings().TTS_OUTPUT_DIR)
+        except Exception:
+            dirs.append("data/outputs/tts")
+    seen = set()
+    for stem in stems:
+        for folder in dirs:
+            for name in (
+                f"{stem}_synced_tts.wav",
+                f"{stem}.vi.wav",
+                f"{stem}.vi.mp3",
+            ):
+                path = os.path.join(folder, name)
+                if path in seen:
+                    continue
+                seen.add(path)
+                found = _existing_media(path)
+                if found:
+                    return found
+    return None
+
+
+def find_cached_vietsub_srt(*roots: str) -> Optional[str]:
+    """Prefer the aligned Vietsub next to the source so retry skips STT/translate."""
+    from app.services.pyvideotrans_service import subtitle_matches_target_language
+
+    aligned: List[str] = []
+    plain: List[str] = []
+    for root in roots:
+        if not root:
+            continue
+        base = root[:-4] if str(root).lower().endswith(".mp4") else os.path.splitext(str(root))[0]
+        aligned.extend([base + "_vi.aligned.srt", base + ".vi.aligned.srt"])
+        plain.extend([base + "_vi.srt", base + ".vi.srt"])
+    for path in aligned:
+        if os.path.isfile(path) and subtitle_matches_target_language(path, "vi"):
+            return path
+    # Plain Vietsub is only reused together with a TTS wav (failed-encode retry).
+    if find_cached_tts_audio(*roots):
+        for path in plain:
+            if os.path.isfile(path) and subtitle_matches_target_language(path, "vi"):
+                return path
+    return None
+
+
+def refuse_incomplete_output(
+    cfg: ReupConfig,
+    *,
+    output_path: str,
+    burned_sub: bool = False,
+    dubbed_vi: bool = False,
+    subtitle_sidecar: Optional[str] = None,
+    softsub_embedded: bool = False,
+    had_srt: bool = False,
+    had_tts: bool = False,
+) -> None:
+    """Refuse to keep an encoded file that is missing requested Vietsub or TTS."""
+    missing: List[str] = []
+    mode = subtitle_output_mode(cfg)
+    if mode == "hard" and had_srt and not burned_sub:
+        missing.append("Vietsub in cứng")
+    if mode == "soft" and had_srt and not (
+        (isinstance(subtitle_sidecar, str) and os.path.exists(subtitle_sidecar))
+        or softsub_embedded
+    ):
+        missing.append("Vietsub")
+    if getattr(cfg, "enable_tts", False) and had_tts and not dubbed_vi:
+        missing.append("lồng tiếng")
+    if not missing:
+        return
+    abort_incomplete_reup(
+        output_path,
+        "Reup thiếu " + " và ".join(missing) + " — không xuất file dở.",
+    )
 
 
 def prepare_output_subtitle(srt_path: str, output_path: str, speed_factor: float = 1.0) -> Optional[str]:
@@ -631,7 +849,7 @@ def _burn_hardsub_overlay(
     """libass-free hardsub: render cues to PNGs (Pillow) and composite via overlay."""
     import tempfile
     from app.services.caption_cover import clamp_subtitle_box_h
-    from app.services.subtitle_overlay import render_srt_to_overlays, build_overlay_filter
+    from app.services.subtitle_overlay import render_srt_to_overlays, write_overlay_concat_list
 
     w, h = _probe_video_size(video_path)
     tmp_dir = tempfile.mkdtemp(prefix="visub_ovl_")
@@ -649,12 +867,24 @@ def _burn_hardsub_overlay(
         if not overlays:
             logger.warning("Subtitle overlay produced no cues; leaving video unchanged")
             return False
-        fc, input_args = build_overlay_filter(overlays)
+        from PIL import Image
+
+        concat_path = os.path.join(tmp_dir, "frames.txt")
+        transparent_path = os.path.join(tmp_dir, "transparent.png")
+        Image.new("RGBA", (w, h), (0, 0, 0, 0)).save(transparent_path)
+        if not write_overlay_concat_list(overlays, concat_path, transparent_path):
+            return False
+        fc = (
+            "[0:v][1:v]overlay=0:0:eof_action=pass:repeatlast=0[v_out]"
+        )
         tmp_out = output_path + ".ovlsub.tmp.mp4"
         encode_args = browser_safe_encode_args(ffmpeg_bin)
-        cmd = [ffmpeg_bin, "-y", "-threads", "0", "-i", video_path, *input_args,
-               "-filter_complex", fc, "-map", "[v_out]", "-map", "0:a?",
-               *encode_args, "-c:a", "copy", tmp_out]
+        cmd = [
+            ffmpeg_bin, "-y", "-threads", "0", "-i", video_path,
+            "-f", "concat", "-safe", "0", "-i", concat_path,
+            "-filter_complex", fc, "-map", "[v_out]", "-map", "0:a?",
+            *encode_args, "-c:a", "copy", tmp_out,
+        ]
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if res.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 0:
             os.replace(tmp_out, output_path)
@@ -742,12 +972,13 @@ def burn_vietnamese_hardsub(
     vf = ",".join([p for p in (plate, _subtitles_filter(work_srt, style, frame_w, frame_h)) if p])
 
     tmp_out = output_path + ".hardsub.tmp.mp4"
-    encode_args = browser_safe_encode_args(ffmpeg_bin)
+    encode_args = browser_safe_encode_args(ffmpeg_bin, force_software=True)
     cmd = [
         ffmpeg_bin, "-y", "-threads", "0", "-i", video_path,
         "-vf", vf,
         *encode_args,
         "-c:a", "copy",
+        "-muxdelay", "0", "-muxpreload", "0",
         tmp_out,
     ]
     try:
@@ -787,15 +1018,23 @@ def build_tts_bgm_mix_filter(
     # asplit is required: an FFmpeg pad can only be consumed once. Reusing
     # [voice] for both sidechain and amix dropped the TTS track entirely.
     return (
-        "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=2.50,"
+        "[1:a]aresample=async=1:first_pts=0,aformat=channel_layouts=stereo,volume=2.20,"
         "highpass=f=80,lowpass=f=12000,"
-        "acompressor=threshold=-18dB:ratio=2.0:attack=5:release=80:makeup=3.0,"
+        "acompressor=threshold=-18dB:ratio=2.0:attack=5:release=80:makeup=2.0,"
         "asplit=2[voice_duck][voice_mix];"
-        "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=0.50[bed];"
-        "[bed][voice_duck]sidechaincompress=threshold=0.012:ratio=16:attack=8:release=200:makeup=1[ducked];"
-        "[ducked]alimiter=limit=0.78[safebed];"
-        "[safebed][voice_mix]amix=inputs=2:duration=first:dropout_transition=0:weights=0.55 1.20:normalize=0[aout]"
+        "[0:a]aresample=async=1:first_pts=0,aformat=channel_layouts=stereo,volume=0.95[bed];"
+        "[bed][voice_duck]sidechaincompress=threshold=0.08:ratio=4:attack=12:release=160:makeup=1[ducked];"
+        "[ducked][voice_mix]amix=inputs=2:duration=first:dropout_transition=0:weights=1.00 1.15:normalize=0[aout]"
     )
+
+
+def leftover_original_vocal_volume(cfg: ReupConfig) -> float:
+    """How much source speech stays under Vietnamese TTS (song tiếng)."""
+    try:
+        raw = float(getattr(cfg, "original_vocal_volume", 0.10) or 0.0)
+    except (TypeError, ValueError):
+        raw = 0.10
+    return max(0.0, min(0.30, raw))
 
 
 def should_use_demucs_for_dubbing(cfg: ReupConfig, _speech_intervals: Optional[List[Tuple[float, float]]]) -> bool:
@@ -851,7 +1090,8 @@ def mix_tts_with_background(
             "-filter_complex", fc,
             "-map", "0:v:0", "-map", "[aout]",
             "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+            "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+            "-muxdelay", "0", "-muxpreload", "0",
             tmp_out,
         ]
     else:
@@ -861,7 +1101,8 @@ def mix_tts_with_background(
             "-i", audio_to_use,
             "-map", "0:v:0", "-map", "1:a:0",
             "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+            "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+            "-muxdelay", "0", "-muxpreload", "0",
             tmp_out,
         ]
     try:
@@ -873,10 +1114,10 @@ def mix_tts_with_background(
         if has_audio:
             # Fallback: keep BGM loud instead of crushing it
             fc2 = (
-                "[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=0.45[bed];"
-                "[1:a]aresample=44100,aformat=channel_layouts=stereo,volume=3.20,asplit=2[voice_duck][voice_mix];"
-                "[bed][voice_duck]sidechaincompress=threshold=0.015:ratio=12:attack=10:release=220:makeup=1[ducked];"
-                "[ducked][voice_mix]amix=inputs=2:duration=first:dropout_transition=0:weights=0.50 1.20:normalize=0[aout]"
+                "[0:a]aresample=async=1:first_pts=0,aformat=channel_layouts=stereo,volume=0.95[bed];"
+                "[1:a]aresample=async=1:first_pts=0,aformat=channel_layouts=stereo,volume=2.20,asplit=2[voice_duck][voice_mix];"
+                "[bed][voice_duck]sidechaincompress=threshold=0.08:ratio=4:attack=12:release=160:makeup=1[ducked];"
+                "[ducked][voice_mix]amix=inputs=2:duration=first:dropout_transition=0:weights=1.00 1.15:normalize=0[aout]"
             )
             cmd[cmd.index("-filter_complex") + 1] = fc2
             res2 = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -987,6 +1228,8 @@ def process_reup_video(
     libass_hardsub = bool(wants_hardsub and ffmpeg_supports_libass())
     burn_in_graph = libass_hardsub
     subtitle_track_dir: Optional[str] = None
+    duck_command_path: Optional[str] = None
+    last_ffmpeg_err = ""
 
     speech_intervals = kwargs.get("speech_intervals")
     # Prefer a separated music stem for the "remove speech, keep BGM" mode.
@@ -1053,7 +1296,16 @@ def process_reup_video(
         # Original-audio cleanup (Demucs/BGM/leftover Chinese) is already baked
         # into this stem. Later TTS overlay must not re-apply those gains.
         graph_cfg = cfg.model_copy(update={"enable_vocal_mute": False}) if demucs_bgm_path else cfg
-        audio_speech_intervals = None if cfg.enable_vocal_mute else speech_intervals
+        # Keep SFX/animals: duck only human-speech windows on the original mix.
+        # (Previously mute=on zeroed intervals and fell through to a center-kill
+        # filter that also erased impacts, whooshes and animal calls.)
+        if demucs_bgm_path or not cfg.enable_vocal_mute:
+            audio_speech_intervals = None
+        else:
+            audio_speech_intervals = speech_intervals
+        duck_command_path = None
+        if audio_speech_intervals:
+            duck_command_path = output_path + ".duck.txt"
         main_size = _filtered_video_size(input_path, cfg)
         from app.services.audio_service import probe_audio_sample_rate, probe_stream_duration_sec
 
@@ -1065,6 +1317,7 @@ def process_reup_video(
             has_audio=has_audio,
             audio_sample_rate=source_audio_rate,
             burn_srt_path=srt_override if libass_hardsub else None,
+            duck_command_path=duck_command_path,
             speech_intervals=audio_speech_intervals,
             frame_size=main_size,
         )
@@ -1109,7 +1362,7 @@ def process_reup_video(
         if wants_hardsub and not libass_hardsub and not getattr(cfg, "dynamic_motion", False):
             from app.services.subtitle_overlay import (
                 inject_timed_overlay_before_speed,
-                render_srt_to_apng,
+                render_srt_to_concat_track,
             )
 
             subtitle_track_dir = tempfile.mkdtemp(prefix="visub_track_")
@@ -1123,11 +1376,11 @@ def process_reup_video(
                 )
             except Exception as e:
                 logger.warning(f"Display SRT split skipped ({e})")
-            subtitle_track = render_srt_to_apng(
+            subtitle_track = render_srt_to_concat_track(
                 timed_srt,
                 main_size[0],
                 main_size[1],
-                os.path.join(subtitle_track_dir, "subtitles.png"),
+                os.path.join(subtitle_track_dir, "frames.txt"),
                 cover_band=band if cover_kind != "off" else 0.0,
                 cover_kind=cover_kind,
                 subtitle_y=float(getattr(cfg, "subtitle_y", 0.0) or 0.0),
@@ -1138,7 +1391,7 @@ def process_reup_video(
             if subtitle_track:
                 subtitle_index = first_ov + len(overlay_paths)
                 filter_complex = inject_timed_overlay_before_speed(filter_complex, subtitle_index)
-                subtitle_input_args = ["-i", subtitle_track]
+                subtitle_input_args = ["-f", "concat", "-safe", "0", "-i", subtitle_track]
                 burn_in_graph = True
         input_md5 = calculate_file_md5(input_path)
 
@@ -1150,7 +1403,10 @@ def process_reup_video(
 
         if ffmpeg_bin:
             try:
-                encode_args = browser_safe_encode_args(ffmpeg_bin)
+                encode_args = browser_safe_encode_args(
+                    ffmpeg_bin,
+                    force_software=abs(float(cfg.speed_factor or 1.0) - 1.0) > 0.01,
+                )
                 cmd = [ffmpeg_bin, "-y", "-threads", "0", "-i", input_path]
                 if lib_bgm_path and os.path.exists(lib_bgm_path):
                     from app.services.tts_service import get_audio_duration
@@ -1160,7 +1416,14 @@ def process_reup_video(
                     out_dur = max(0.4, in_dur / max(0.5, speed))
                     vol = float(getattr(cfg, "bgm_volume", 0.85) or 0.85)
                     vf_part = drop_audio_chains(filter_complex)
-                    fc = f"{vf_part};[1:a]volume={vol:.3f},aformat=channel_layouts=stereo[a_out]"
+                    bgm_af = f"volume={vol:.3f},aformat=channel_layouts=stereo"
+                    if abs(speed - 1.0) > 1e-3:
+                        bgm_af = (
+                            f"{bgm_af},"
+                            + ",".join(_build_atempo_nodes(speed))
+                            + ",asetpts=PTS-STARTPTS"
+                        )
+                    fc = f"{vf_part};[1:a]{bgm_af}[a_out]"
                     includes_audio = True
                     cmd.extend(["-stream_loop", "-1", "-t", f"{out_dur:.3f}", "-i", lib_bgm_path])
                 elif demucs_bgm_path and os.path.exists(demucs_bgm_path):
@@ -1180,6 +1443,8 @@ def process_reup_video(
                     cmd.extend(["-map", "[a_out]", "-c:a", "aac", "-b:a", "128k", "-ac", "2"])
                     if source_audio_rate >= 8000:
                         cmd.extend(["-ar", str(source_audio_rate)])
+                    if abs(float(cfg.speed_factor or 1.0) - 1.0) > 1e-3:
+                        cmd.append("-shortest")
                 else:
                     cmd.extend(["-an"])
                 video_dur = probe_stream_duration_sec(input_path, "v:0")
@@ -1188,6 +1453,7 @@ def process_reup_video(
                 if video_dur > 0.2:
                     speed = max(0.5, float(cfg.speed_factor or 1.0))
                     cmd.extend(["-t", f"{video_dur / speed:.3f}"])
+                cmd.extend(["-muxdelay", "0", "-muxpreload", "0"])
                 cmd.append(output_path)
 
                 from app.services.activity import heartbeat
@@ -1199,9 +1465,18 @@ def process_reup_video(
                     interval=8.0,
                 ):
                     res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                last_ffmpeg_err = (res.stderr or res.stdout or "")[-1500:]
                 if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    from app.services.audio_service import probe_media_duration_sec
+                    src_dur = video_dur if video_dur > 0.2 else probe_media_duration_sec(input_path, "v:0")
+                    job_speed = max(0.5, float(cfg.speed_factor or 1.0))
+                    if not repair_output_speed(output_path, src_dur, job_speed):
+                        logger.error("A/V lock failed for %s (speed=%.3f)", output_path, job_speed)
+                        raise RuntimeError(
+                            "Encode xong nhưng hình/tiếng lệch — đã chặn file lệch, hãy chạy lại job."
+                        )
                     ffmpeg_success = True
-                    _report(0.96, "✅ FFmpeg render xong")
+                    _report(0.96, "✅ FFmpeg render xong — hình và tiếng cùng nhịp")
                 else:
                     err = (res.stderr or res.stdout or "")
                     logger.error("FFmpeg reup failed (%s): %s", res.returncode, err[-1500:])
@@ -1212,7 +1487,7 @@ def process_reup_video(
                         ):
                             logger.warning("Hardware H.264 encoder unavailable; retrying with libx264")
                             software_args = [
-                                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                                 "-pix_fmt", "yuv420p", "-movflags", "+faststart",
                                 "-profile:v", "main", "-level", "4.0",
                             ]
@@ -1221,8 +1496,14 @@ def process_reup_video(
                             _report(0.94, "🎞️ Encoder phần cứng lỗi — đang encode lại bằng libx264...")
                             res_sw = subprocess.run(cmd, capture_output=True, text=True, check=False)
                             if res_sw.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                                src_dur = video_dur if video_dur > 0.2 else 0.0
+                                job_speed = max(0.5, float(cfg.speed_factor or 1.0))
+                                if not repair_output_speed(output_path, src_dur, job_speed):
+                                    raise RuntimeError(
+                                        "Encode xong nhưng hình/tiếng lệch — đã chặn file lệch, hãy chạy lại job."
+                                    )
                                 ffmpeg_success = True
-                                _report(0.96, "✅ FFmpeg render xong (libx264)")
+                                _report(0.96, "✅ FFmpeg render xong (libx264) — hình và tiếng cùng nhịp")
                     if not ffmpeg_success and "delogo" in fc and "Logo area is outside" in err:
                         logger.warning("Retrying encode without mid-text delogo")
                         cfg.text_cover_vf = ""
@@ -1233,13 +1514,22 @@ def process_reup_video(
                             burn_srt_path=srt_override if burn_in_graph else None,
                             speech_intervals=audio_speech_intervals,
                             frame_size=main_size,
+                            duck_command_path=duck_command_path,
                         )
                         cmd[cmd.index("-filter_complex") + 1] = filter_complex
                         res2 = subprocess.run(cmd, capture_output=True, text=True, check=False)
                         if res2.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                            src_dur = video_dur if video_dur > 0.2 else 0.0
+                            job_speed = max(0.5, float(cfg.speed_factor or 1.0))
+                            if not repair_output_speed(output_path, src_dur, job_speed):
+                                raise RuntimeError(
+                                    "Encode xong nhưng hình/tiếng lệch — đã chặn file lệch, hãy chạy lại job."
+                                )
                             ffmpeg_success = True
+            except RuntimeError:
+                raise
             except Exception as e:
-                logger.warning(f"FFmpeg execution skipped/failed ({e}), falling back to direct stream copy")
+                logger.warning("FFmpeg reup encode failed: %s", e)
     finally:
         if subtitle_track_dir:
             shutil.rmtree(subtitle_track_dir, ignore_errors=True)
@@ -1248,31 +1538,56 @@ def process_reup_video(
                 os.remove(demucs_bgm_path)
             except OSError:
                 pass
+        if duck_command_path and os.path.exists(duck_command_path):
+            try:
+                os.remove(duck_command_path)
+            except OSError:
+                pass
 
     if not ffmpeg_success:
         err_msg = f"FFmpeg execution failed for input '{input_path}'."
         if not ffmpeg_bin:
             err_msg = "FFmpeg binary executable not found on system PATH."
+        why = " ".join(str(last_ffmpeg_err or "").split())
+        if why:
+            err_msg = err_msg + " " + why[-500:]
         logger.error(err_msg)
-        raise RuntimeError(err_msg)
+        abort_incomplete_reup(output_path, err_msg)
 
     # 4. Optional Vietnamese TTS Dubbing Pass (mix with BGM, never replace)
     dubbed_vi = False
     tts_audio_override = kwargs.get("tts_audio_override")
-    if tts_audio_override and os.path.exists(tts_audio_override) and os.path.getsize(tts_audio_override) > 0:
+    had_tts = bool(
+        tts_audio_override
+        and os.path.exists(tts_audio_override)
+        and os.path.getsize(tts_audio_override) > 0
+    )
+    if had_tts:
         _report(0.97, "🎙️ Đang phủ giọng Việt riêng lên audio gốc đã chỉnh...")
         dubbed_vi = mix_tts_with_background(
             output_path,
             tts_audio_override,
             output_path,
         )
-        if dubbed_vi:
-            _report(0.98, "✅ Đã phủ giọng Việt (lớp riêng, to hơn audio gốc)")
-        else:
-            logger.warning("TTS mix with background audio failed; keeping original audio track")
-            _report(0.98, "⚠️ Mix TTS với BGM thất bại — giữ audio gốc")
+        if not dubbed_vi:
+            abort_incomplete_reup(
+                output_path,
+                "Reup thiếu lồng tiếng — không xuất file dở. Mix TTS với BGM thất bại.",
+            )
+        from app.services.audio_service import ensure_av_lock
+        if not ensure_av_lock(output_path):
+            abort_incomplete_reup(
+                output_path,
+                "Encode xong nhưng hình/tiếng lệch — đã chặn file lệch, hãy chạy lại job.",
+            )
+        _report(0.98, "✅ Đã phủ giọng Việt (lớp riêng, to hơn audio gốc)")
     elif vietnamese_dubbing and text_for_dubbing:
         dubbed_vi = apply_vietnamese_dubbing(output_path, text_for_dubbing, output_path=output_path)
+        if not dubbed_vi:
+            abort_incomplete_reup(
+                output_path,
+                "Reup thiếu lồng tiếng — không xuất file dở. Dubbing thất bại.",
+            )
 
     # 4b. Add the selected subtitle output after TTS mixing.
     burned_sub = bool(burn_in_graph)
@@ -1287,8 +1602,31 @@ def process_reup_video(
         if subtitle_mode == "soft" and subtitle_sidecar:
             softsub_embedded = mux_toggleable_subtitle(output_path, subtitle_sidecar, output_path)
 
+    refuse_incomplete_output(
+        cfg,
+        output_path=output_path,
+        burned_sub=burned_sub,
+        dubbed_vi=dubbed_vi,
+        subtitle_sidecar=subtitle_sidecar,
+        softsub_embedded=softsub_embedded,
+        had_srt=bool(srt_override and os.path.exists(srt_override)),
+        had_tts=had_tts or bool(vietnamese_dubbing and text_for_dubbing),
+    )
+
+    from app.services.audio_service import ensure_av_lock
+    if not ensure_av_lock(output_path):
+        abort_incomplete_reup(
+            output_path,
+            "Encode xong nhưng hình/tiếng lệch — đã chặn file lệch, hãy chạy lại job.",
+        )
+
     # 5. Browser-safe remux then MD5 trailer (trailer MUST come last)
     remux_faststart(output_path)
+    if not ensure_av_lock(output_path):
+        abort_incomplete_reup(
+            output_path,
+            "Encode xong nhưng hình/tiếng lệch — đã chặn file lệch, hãy chạy lại job.",
+        )
     if cfg.modify_md5:
         modify_video_md5_fast(output_path, compute_hash=False)
 
@@ -1502,6 +1840,7 @@ class ReupService:
             base, ext = os.path.splitext(video_path)
             output_path = f"{base}_reup{ext}"
 
+        original_media = video_path
         # Trim video at the start of the pipeline so STT, Vietsub and mixing align 100% with trimmed timestamps
         trim_st = float(getattr(cfg, "trim_start_sec", 0.0) or 0.0)
         trim_en = float(getattr(cfg, "trim_end_sec", 0.0) or 0.0)
@@ -1517,8 +1856,16 @@ class ReupService:
         srt_path: Optional[str] = None
         tts_warning: Optional[str] = None
 
-        preset_srt = getattr(cfg, "srt_path", None)
-        preset_tts = getattr(cfg, "tts_audio_path", None)
+        cached_srt = find_cached_vietsub_srt(original_media, video_path)
+        cached_tts = find_cached_tts_audio(original_media, video_path)
+
+        preset_srt = getattr(cfg, "srt_path", None) or cached_srt
+        preset_tts = getattr(cfg, "tts_audio_path", None) or cached_tts
+        if cached_tts and not getattr(cfg, "tts_audio_path", None):
+            logger.info("Reusing rendered TTS (skip re-read): %s", cached_tts)
+            report_stage(0.86, "🎙️ Dùng lại file thuyết minh đã render — không đọc lại hàng trăm câu.")
+        if cached_srt and not getattr(cfg, "srt_path", None):
+            logger.info("Reusing Vietsub SRT: %s", cached_srt)
         if isinstance(preset_srt, str) and os.path.exists(preset_srt):
             from app.services.pyvideotrans_service import subtitle_matches_target_language
             if subtitle_matches_target_language(preset_srt, cfg.target_lang):
@@ -1593,7 +1940,13 @@ class ReupService:
                     quality_out["report"]["stt_fail_reason"] = fail_reason
                     report_stage(
                         0.80,
-                        f"⚠️ {review_label(fail_reason)} — bỏ vietsub/TTS, giữ video gốc.",
+                        f"⚠️ {review_label(fail_reason)} — dừng job, không xuất file thiếu Vietsub.",
+                    )
+                    require_complete_reup(
+                        cfg,
+                        translated_srt=None,
+                        synced_tts_audio=synced_tts_audio,
+                        detail=review_label(fail_reason),
                     )
                 else:
                     report_stage(
@@ -1642,12 +1995,24 @@ class ReupService:
                         quality_out["report"]["translate_fail_reason"] = fail_reason
                         logger.error(tts_warning)
                         report_stage(0.84, f"⚠️ {review_label(fail_reason)}: {tts_warning}")
+                        require_complete_reup(
+                            cfg,
+                            translated_srt=None,
+                            synced_tts_audio=synced_tts_audio,
+                            detail=tts_warning,
+                        )
                 elif quality_out.get("status") != "NEEDS_REVIEW":
-                    tts_warning = "STT không nhận được lời thoại. Bỏ qua vietsub/lồng tiếng."
+                    tts_warning = "STT không nhận được lời thoại. Không xuất file thiếu Vietsub."
                     quality_out["status"] = "NEEDS_REVIEW"
                     quality_out["report"]["stt_fail_reason"] = "empty_audio"
                     logger.warning(tts_warning)
                     report_stage(0.84, f"⚠️ {tts_warning}")
+                    require_complete_reup(
+                        cfg,
+                        translated_srt=None,
+                        synced_tts_audio=synced_tts_audio,
+                        detail=tts_warning,
+                    )
 
                 if cfg.enable_tts and not synced_tts_audio and translated_srt and os.path.exists(translated_srt):
                     from app.config import Settings
@@ -1700,15 +2065,35 @@ class ReupService:
                         translated_srt = prefer_speech_timed_srt(tts_result, translated_srt)
                         report_stage(0.93, "✅ Thuyết minh tiếng Việt đã sẵn sàng; bắt đầu render...")
                     else:
-                        tts_warning = (tts_warning or "") + " TTS tạo file rỗng/im lặng — giữ audio gốc."
+                        tts_warning = "TTS tạo file rỗng/im lặng."
                         logger.warning(tts_warning)
-                        report_stage(0.90, f"⚠️ {tts_warning.strip()}")
+                        report_stage(0.90, f"⚠️ {tts_warning}")
+                        require_complete_reup(
+                            cfg,
+                            translated_srt=translated_srt,
+                            synced_tts_audio=None,
+                            detail=tts_warning,
+                        )
+            except RuntimeError as e:
+                require_complete_reup(
+                    cfg,
+                    translated_srt=translated_srt,
+                    synced_tts_audio=synced_tts_audio,
+                    detail=str(e),
+                )
+                raise
             except Exception as e:
                 tts_warning = f"Pipeline vietsub/TTS thất bại: {e}"
                 quality_out["status"] = "NEEDS_REVIEW"
                 quality_out["report"]["translate_fail_reason"] = "agy_failed"
                 logger.warning(tts_warning)
                 report_stage(0.86, f"⚠️ {tts_warning}")
+                require_complete_reup(
+                    cfg,
+                    translated_srt=translated_srt,
+                    synced_tts_audio=synced_tts_audio,
+                    detail=tts_warning,
+                )
 
         # If SRT was provided (sidecar / preset) but TTS audio is still missing, synthesize it
         if cfg.enable_tts and not synced_tts_audio and translated_srt and os.path.exists(translated_srt):
@@ -1759,6 +2144,16 @@ class ReupService:
                     from app.services.vietsub_rules import prefer_speech_timed_srt
 
                     translated_srt = prefer_speech_timed_srt(tts_result, translated_srt)
+                else:
+                    logger.warning("Preset-SRT TTS created an empty/silent file")
+            except RuntimeError as e:
+                require_complete_reup(
+                    cfg,
+                    translated_srt=translated_srt,
+                    synced_tts_audio=synced_tts_audio,
+                    detail=str(e),
+                )
+                raise
             except Exception as e:
                 logger.warning(f"Preset-SRT TTS synthesis failed: {e}")
 
@@ -1776,20 +2171,12 @@ class ReupService:
             except Exception as e:
                 logger.warning(f"Could not parse speech intervals from SRT: {e}")
 
-        if cfg.enable_tts and not synced_tts_audio:
-            detail = tts_warning or "Không tạo được file TTS tiếng Việt hợp lệ."
-            report_stage(
-                0.90,
-                f"⚠️ Bỏ qua lồng tiếng: {detail} Video vẫn được render, giữ tiếng gốc.",
-            )
-            tts_warning = detail
-            try:
-                cfg = cfg.model_copy(update={"enable_tts": False, "enable_vocal_mute": False})
-            except Exception:
-                cfg.enable_tts = False
-                cfg.enable_vocal_mute = False
-        elif tts_warning:
-            report_stage(0.92, f"⚠️ Vietsub/TTS: {tts_warning}")
+        require_complete_reup(
+            cfg,
+            translated_srt=translated_srt,
+            synced_tts_audio=synced_tts_audio,
+            detail=tts_warning or "",
+        )
 
         report_stage(0.93, "🎞️ Bắt đầu render video (tách BGM nếu cần, FFmpeg encode)...")
         try:
@@ -1802,15 +2189,9 @@ class ReupService:
                 speech_intervals=speech_intervals,
                 **kwargs
             )
-            if tts_warning:
-                res["vietsub_warning"] = tts_warning
-                logger.warning(f"Reup completed with vietsub warning: {tts_warning}")
-                report_stage(0.99, f"⚠️ Render xong nhưng vietsub/TTS chưa đủ: {tts_warning}")
-            else:
-                report_stage(0.99, "✅ Render video biến đổi hoàn tất")
-            if quality_out.get("status") == "PENDING":
-                quality_out["status"] = "PASS" if translated_srt else "NEEDS_REVIEW"
-            res["quality_status"] = quality_out.get("status")
+            report_stage(0.99, "✅ Render video biến đổi hoàn tất")
+            quality_out["status"] = "PASS"
+            res["quality_status"] = "PASS"
             res["quality_report"] = quality_out.get("report") or {}
             return res["output_path"]
         finally:

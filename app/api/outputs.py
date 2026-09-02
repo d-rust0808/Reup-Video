@@ -209,6 +209,33 @@ async def download_batch_outputs(
     )
 
 
+@router.post("/outputs/cleanup-reupped")
+async def cleanup_reupped_videos(request: Request):
+    """
+    Free disk after videos have already been reup'd.
+
+    Deletes completed job outputs (master + platform variants), leftover TTS
+    wavs, and the source clips of those completed jobs. In-flight jobs, sample
+    clips, and sources of cancelled/failed jobs are kept so they can be retried.
+    """
+    qm = _get_queue_manager(request)
+    from app.services.disk_cleanup import cleanup_completed_reup
+
+    result = cleanup_completed_reup(qm)
+    gb = (result.get("bytes_freed") or 0) / (1024 ** 3)
+    return {
+        **result,
+        "deleted": True,
+        "message": (
+            f"Đã dọn video đã reup — giải phóng {gb:.2f} GB "
+            f"({result.get('jobs_deleted', 0)} job, "
+            f"{result.get('outputs_removed', 0)} thành phẩm, "
+            f"{result.get('sources_removed', 0)} video gốc, "
+            f"{result.get('tts_removed', 0)} file TTS)."
+        ),
+    }
+
+
 @router.delete("/outputs/{job_id}")
 async def delete_output(job_id: str, request: Request):
     """

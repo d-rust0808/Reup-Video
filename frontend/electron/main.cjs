@@ -112,19 +112,16 @@ if (process.platform === 'win32') {
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+app.commandLine.appendSwitch(
+  'disable-features',
+  'BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights,PrivateNetworkAccessRespectPreflightResults',
+);
 const ROOT_DIR = isDev
   ? path.resolve(__dirname, '..', '..')
   : (fs.existsSync(path.join(process.resourcesPath, 'app')) ? process.resourcesPath : path.resolve(__dirname, '..', '..'));
 const BACKEND_PORT = 6000;
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 const ELECTRON_MANAGES_BACKEND = !isDev;
-
-if (!isDev) {
-  app.commandLine.appendSwitch(
-    'disable-features',
-    'BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights,PrivateNetworkAccessRespectPreflightResults',
-  );
-}
 
 function bundledWindowsPython() {
   return path.join(process.resourcesPath, 'python', 'python.exe');

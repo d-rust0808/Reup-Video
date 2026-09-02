@@ -55,7 +55,7 @@ def _studio_reup_defaults(platform: str, overrides: Optional[dict] = None) -> Re
         "modify_md5": True,
         "enable_vocal_mute": True,
         "preserve_bgm": True,
-        "vocal_mute_strategy": "demucs_duck",
+        "vocal_mute_strategy": "auto",
         "original_vocal_volume": 0.10,
         "enable_tts": True,
         "enable_lipsync": True,
@@ -515,11 +515,15 @@ async def delete_library_video(video_id: str, request: Request = None):
     """Delete one downloaded source and its metadata/sidecars permanently."""
     import re
 
+    from app.services.disk_cleanup import remove_library_files
+    from app.services.sample_media import SAMPLE_IDS
+
     safe_id = str(video_id or "").strip()
     if not safe_id or not re.fullmatch(r"[A-Za-z0-9_-]+", safe_id):
         raise HTTPException(status_code=400, detail="Invalid video ID")
+    if safe_id in SAMPLE_IDS:
+        raise HTTPException(status_code=400, detail="Không xóa clip mẫu")
 
-    raw_dir = os.path.abspath(settings.RAW_INPUT_DIR)
     if request is not None:
         qm = getattr(request.app.state, "queue_manager", None)
         if qm is not None:
@@ -529,32 +533,15 @@ async def delete_library_video(video_id: str, request: Request = None):
                     status_code=409,
                     detail=f"Video đang được job {active['job_id']} sử dụng; hãy hủy job trước khi xóa",
                 )
-    removed = []
-    for name in os.listdir(raw_dir) if os.path.isdir(raw_dir) else []:
-        stem, ext = os.path.splitext(name)
-        canonical_match = re.search(r"(?:^|_)(\d{8,})", stem)
-        yt_named = re.match(r"youtube_([A-Za-z0-9_-]{11})_", stem)
-        if canonical_match:
-            canonical = canonical_match.group(1)
-        elif yt_named:
-            canonical = yt_named.group(1)
-        else:
-            canonical = stem.split(".")[0]
-        if canonical != safe_id and stem != safe_id and not stem.startswith(f"{safe_id}."):
-            continue
-        path = os.path.abspath(os.path.join(raw_dir, name))
-        if os.path.commonpath([raw_dir, path]) != raw_dir or not os.path.isfile(path):
-            continue
-        try:
-            os.remove(path)
-            removed.append(name)
-        except OSError as e:
-            raise HTTPException(status_code=500, detail=f"Could not delete {name}: {e}") from e
+    try:
+        result = remove_library_files(safe_id, strict=True)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Could not delete {safe_id}: {e}") from e
 
     # Idempotent delete: a stale client/session can request deletion after the
     # source was already removed. Treat the desired absent state as success so
     # the client can clear its persisted card instead of looping on a 404.
-    return {"video_id": safe_id, "deleted": True, "removed": removed}
+    return {"video_id": safe_id, "deleted": True, "removed": result.get("removed") or []}
 
 
 RECENT_SOURCES_LIMIT = 3
