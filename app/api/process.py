@@ -81,6 +81,8 @@ class ReupPayload(BaseModel):
     agy_write_post: Optional[bool] = True
     post_caption: Optional[str] = None
     post_tags: Optional[List[str]] = None
+    affiliate_link: Optional[str] = None
+    affiliate_product: Optional[str] = None
     publish_status: Optional[str] = "READY"
     overlays: Optional[List[dict]] = None
     frame_enabled: Optional[bool] = False
@@ -257,6 +259,8 @@ class ProcessJobRequest(BaseModel):
     agy_write_post: Optional[bool] = True
     post_caption: Optional[str] = None
     post_tags: Optional[List[str]] = None
+    affiliate_link: Optional[str] = None
+    affiliate_product: Optional[str] = None
     publish_status: Optional[str] = "READY"
     overlays: Optional[List[dict]] = None
     frame_enabled: Optional[bool] = False
@@ -492,9 +496,10 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
     elif getattr(req, "agy_write_post", None) is not None:
         reup_agy_write = bool(req.agy_write_post)
     reup_post_caption = req.reup.post_caption if req.reup and req.reup.post_caption else req.post_caption
-    if not (reup_post_caption or "").strip() and not reup_post_intent.strip():
-        from app.services.caption import build_caption
-        reup_post_caption = build_caption(reup_post_title, platform)
+    from app.services.post_writer import needs_generated_copy
+
+    if needs_generated_copy(reup_post_title or "", reup_post_caption or ""):
+        reup_agy_write = True
     reup_post_tags = (req.reup.post_tags if req.reup and req.reup.post_tags is not None else req.post_tags) or []
     reup_pub_status = (req.reup.publish_status if req.reup and req.reup.publish_status else req.publish_status) or "READY"
     reup_platforms: List[str] = ["tiktok", "youtube_shorts", "facebook"]
@@ -589,6 +594,16 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         agy_write_post=reup_agy_write,
         post_caption=reup_post_caption,
         post_tags=reup_post_tags,
+        affiliate_link=(
+            (req.reup.affiliate_link if req.reup and getattr(req.reup, "affiliate_link", None) else None)
+            or getattr(req, "affiliate_link", None)
+            or ""
+        ),
+        affiliate_product=(
+            (req.reup.affiliate_product if req.reup and getattr(req.reup, "affiliate_product", None) else None)
+            or getattr(req, "affiliate_product", None)
+            or ""
+        ),
         publish_status=reup_pub_status,
         srt_path=(req.reup.srt_path if req.reup and getattr(req.reup, "srt_path", None) else req.srt_path),
         tts_audio_path=(req.reup.tts_audio_path if req.reup and getattr(req.reup, "tts_audio_path", None) else req.tts_audio_path),

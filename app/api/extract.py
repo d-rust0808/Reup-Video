@@ -399,8 +399,8 @@ async def extract_channel(req: ChannelExtractRequest, request: Request):
             cfg = reup_base.model_copy(deep=True)
             title = item.get("title") or item.get("video_id")
             cfg.post_title = title
-            from app.services.caption import build_caption
-            cfg.post_caption = build_caption(title, item.get("platform") or platform)
+            cfg.post_caption = ""
+            cfg.agy_write_post = True
             cfg.channel_id = channel_id or cfg.channel_id
             try:
                 job_id = await _enqueue_file(

@@ -5,9 +5,9 @@ Target Path: app/api/jobs.py
 """
 
 import asyncio
-from typing import Optional, List
+from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.services.queue_manager import BatchQueueManager
@@ -138,6 +138,93 @@ async def cancel_job(job_id: str, request: Request):
         "status": "CANCELLED",
         "message": "Job cancelled successfully"
     }
+
+
+class PublishJobRequest(BaseModel):
+    group_ids: List[str] = Field(default_factory=list)
+    channel_ids: List[str] = Field(default_factory=list)
+    affiliate_link: str = ""
+    affiliate_product: str = ""
+    title: str = ""
+    caption: str = ""
+    hashtags: List[str] = Field(default_factory=list)
+    post_intent: str = ""
+
+
+class PublishOriginalRequest(BaseModel):
+    paths: List[str] = Field(default_factory=list)
+    group_ids: List[str] = Field(default_factory=list)
+    channel_ids: List[str] = Field(default_factory=list)
+    title: str = ""
+    caption: str = ""
+    hashtags: List[str] = Field(default_factory=list)
+    post_intent: str = ""
+    affiliate_link: str = ""
+    affiliate_product: str = ""
+
+
+@router.post("/jobs/{job_id}/publish")
+async def publish_completed_job(job_id: str, req: PublishJobRequest, request: Request):
+    """Assign a finished output to Fanpage groups and enqueue Facebook/TikTok posts."""
+    from app.services.job_publish import publish_job_to_groups
+
+    try:
+        result = await asyncio.to_thread(
+            publish_job_to_groups,
+            settings.DB_PATH,
+            job_id,
+            group_ids=req.group_ids,
+            channel_ids=req.channel_ids,
+            affiliate_link=req.affiliate_link,
+            affiliate_product=req.affiliate_product,
+            title=req.title,
+            caption=req.caption,
+            hashtags=req.hashtags,
+            intent=req.post_intent,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    worker = getattr(request.app.state, "facebook_distribution_worker", None)
+    if worker:
+        worker.wake()
+    tiktok_worker = getattr(request.app.state, "tiktok_distribution_worker", None)
+    if tiktok_worker:
+        tiktok_worker.wake()
+    return result
+
+
+@router.post("/jobs/publish-original")
+async def publish_original_job(req: PublishOriginalRequest, request: Request):
+    """Publish user-made local videos to Fanpage groups without running reup."""
+    from app.services.original_publish import OriginalPublishError, publish_original_videos
+
+    try:
+        result = await asyncio.to_thread(
+            publish_original_videos,
+            settings.DB_PATH,
+            req.paths,
+            group_ids=req.group_ids,
+            channel_ids=req.channel_ids,
+            title=req.title,
+            caption=req.caption,
+            hashtags=req.hashtags,
+            post_intent=req.post_intent,
+            affiliate_link=req.affiliate_link,
+            affiliate_product=req.affiliate_product,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (OriginalPublishError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    worker = getattr(request.app.state, "facebook_distribution_worker", None)
+    if worker:
+        worker.wake()
+    tiktok_worker = getattr(request.app.state, "tiktok_distribution_worker", None)
+    if tiktok_worker:
+        tiktok_worker.wake()
+    return result
 
 
 @router.post("/jobs/{job_id}/retry")

@@ -3,6 +3,7 @@ import { fetchJobs, fetchJobLogs, cancelJob, getDownloadUrl, deleteJob, clearJob
 import { Toast } from './Toast';
 import { ConfirmModal } from './ConfirmModal';
 import { VideoModal } from './VideoModal';
+import { PublishToGroupModal } from './PublishToGroupModal';
 import {
   Layers,
   Loader2,
@@ -20,6 +21,7 @@ import {
   Sparkles,
   Cpu,
   SquareTerminal,
+  Send,
   ArrowDown,
   ChevronLeft,
   ChevronRight,
@@ -65,6 +67,7 @@ export function BatchQueue({ wsUpdates }) {
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [clearTarget, setClearTarget] = useState(null); // 'completed' | 'all'
   const [previewVideo, setPreviewVideo] = useState(null);
+  const [publishJob, setPublishJob] = useState(null);
 
   // Live Terminal Log Console States
   const [selectedJobId, setSelectedJobId] = useState(null);
@@ -440,6 +443,15 @@ export function BatchQueue({ wsUpdates }) {
         cancelText="Hủy Bỏ"
       />
 
+      <PublishToGroupModal
+        isOpen={!!publishJob}
+        jobId={publishJob?.job_id}
+        jobLabel={publishJob?.job_id}
+        onClose={() => setPublishJob(null)}
+        onDone={(res) => setToast({ type: 'success', title: 'Đã xếp đăng', message: res.message || 'Đã đưa video vào nhóm Fanpage.' })}
+        onError={(message) => setToast({ type: 'error', title: 'Đăng lại thất bại', message })}
+      />
+
       {/* Custom In-App Toast */}
       <Toast toast={toast} onClose={() => setToast(null)} />
 
@@ -542,6 +554,7 @@ export function BatchQueue({ wsUpdates }) {
                   const formatStage = (s) => {
                     const st = (s || '').toUpperCase();
                     if (st === 'DOWNLOADING') return 'Đang nạp video';
+                    if (st === 'COPYRIGHT_CHECK') return 'Check bản quyền Facebook';
                     if (st === 'WATERMARK_REMOVAL') return 'Xóa Watermark AI';
                     if (st === 'REUP_TRANSFORM') return 'Biến đổi Reup';
                     if (st === 'COMPLETED') return 'Hoàn thành';
@@ -622,6 +635,13 @@ export function BatchQueue({ wsUpdates }) {
 
                         {isCompleted ? (
                           <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setPublishJob(job)}
+                              className="px-2.5 py-1.5 text-[11px] font-bold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-xl border border-emerald-200 transition inline-flex items-center gap-1 cursor-pointer shadow-xs"
+                            >
+                              <Send className="w-3.5 h-3.5" /> Đăng lại
+                            </button>
                             <button
                               type="button"
                               onClick={() => setPreviewVideo(job)}

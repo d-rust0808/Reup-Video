@@ -759,6 +759,18 @@ function setupIpcHandlers() {
     return null;
   });
 
+  ipcMain.handle('dialog:openVideos', async () => {
+    const res = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile', 'multiSelections'],
+      title: 'Chọn video tự làm để đăng Fanpage',
+      filters: [
+        { name: 'Video', extensions: ['mp4', 'mov', 'm4v', 'mkv', 'webm', 'avi'] },
+      ],
+    });
+    if (res.canceled || !res.filePaths.length) return [];
+    return res.filePaths;
+  });
+
   ipcMain.handle('shell:showItemInFolder', async (event, filePath) => {
     if (!filePath) return false;
     let fullPath = filePath;

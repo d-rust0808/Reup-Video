@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // File & Dialog Operations
   selectDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
+  selectVideoFiles: () => ipcRenderer.invoke('dialog:openVideos'),
   showItemInFolder: (filePath) => ipcRenderer.invoke('shell:showItemInFolder', filePath),
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
 

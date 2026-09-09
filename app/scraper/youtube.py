@@ -7,6 +7,7 @@ Channel / playlist listing is used by Reup Theo Kênh.
 from __future__ import annotations
 
 import asyncio
+import glob
 import logging
 import os
 import re
@@ -121,6 +122,20 @@ def _ffmpeg_location() -> Optional[str]:
         return shutil.which("ffmpeg")
 
 
+def _find_js_runtime() -> Dict[str, Any]:
+    candidates = ["node", "deno", "bun"]
+    extra_dirs = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
+    for name in candidates:
+        p = shutil.which(name)
+        if p and os.path.isfile(p):
+            return {name: {"path": p}}
+        for d in extra_dirs:
+            candidate = os.path.join(d, name)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return {name: {"path": candidate}}
+    return {}
+
+
 def _ydl_opts(
     *,
     noplaylist: bool = True,
@@ -133,15 +148,19 @@ def _ydl_opts(
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
-        "retries": 3,
-        "fragment_retries": 3,
+        "retries": 10,
+        "fragment_retries": 10,
         "socket_timeout": 30,
+        "http_chunk_size": 10485760,
         "noplaylist": noplaylist,
         "skip_download": skip_download,
         "cachedir": False,
         "ignoreerrors": False,
         "overwrites": True,
     }
+    js_runtime = _find_js_runtime()
+    if js_runtime:
+        opts["js_runtimes"] = js_runtime
     if extract_flat:
         opts["extract_flat"] = "in_playlist"
     if playlistend:
@@ -151,6 +170,7 @@ def _ydl_opts(
         opts["skip_download"] = False
         opts["merge_output_format"] = "mp4"
         opts["format"] = (
+            "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/"
             "b[ext=mp4][protocol!=m3u8][height<=1080]/"
             "bv*[height<=1080]+ba/"
             "b[ext=mp4]/"
@@ -176,6 +196,11 @@ def ytdlp_error_message(exc: BaseException) -> str:
         return "Video YouTube không khả dụng (riêng tư, đã xóa, hoặc hạn chế khu vực)."
     if "ffmpeg" in low:
         return "Cần FFmpeg để ghép video/audio YouTube. Kiểm tra ffmpeg đã cài chưa."
+    if "bytes read" in low and "more expected" in low:
+        return (
+            "YouTube ngắt kết nối giữa chừng do bóp băng thông. "
+            "Đã tự động cấu hình lại cơ chế phân đoạn (chunking), vui lòng thử tải lại."
+        )
     return f"Không tải được video YouTube: {text[:240]}"
 
 
@@ -193,6 +218,11 @@ def run_yt_dlp_extract(url: str, opts: Dict[str, Any]) -> Dict[str, Any]:
 
 def download_youtube_to_file(url: str, dest_mp4: str) -> int:
     """Download a single YouTube watch URL to dest_mp4. Returns file size in bytes."""
+    dest_dir = os.path.dirname(dest_mp4)
+    dest_base = os.path.basename(dest_mp4)
+    if dest_dir and os.path.isdir(dest_dir):
+        for stale in glob.glob(os.path.join(dest_dir, f"{dest_base}.*.ytdl")):
+            shutil.rmtree(stale, ignore_errors=True)
     work_dir = f"{dest_mp4}.{uuid.uuid4().hex}.ytdl"
     os.makedirs(work_dir, exist_ok=True)
     outtmpl = os.path.join(work_dir, "video.%(ext)s")

@@ -663,9 +663,20 @@ async def list_facebook_pages():
         data = dict(row)
         data["tasks"] = json.loads(data.get("tasks") or "[]")
         data["can_publish"] = bool(data.get("can_publish"))
+        data["has_page_token"] = bool(str(data.get("page_token_ref") or "").strip())
         data.pop("page_token_ref", None)
         pages.append(data)
     return {"pages": pages, "total": len(pages)}
+
+
+@router.get("/pages/shop-status")
+async def facebook_shop_status():
+    """Scan Fanpages for Shopee cart signals on recent posts."""
+    import asyncio
+
+    from app.services.facebook_shop_check import scan_facebook_shop_status
+
+    return await asyncio.to_thread(scan_facebook_shop_status, settings.DB_PATH)
 
 
 @router.get("/pages/{page_id}/picture")
@@ -741,5 +752,5 @@ async def publish_channel_video(video_id: str, request: Request):
     return {
         "distribution_id": distribution_id,
         "status": "PENDING",
-        "message": "Đã đưa Reel vào hàng đợi đăng Facebook",
+        "message": "Đã đưa Reel vào hàng đợi. Facebook sẽ quét bản quyền trên bản nháp trước khi lên page.",
     }

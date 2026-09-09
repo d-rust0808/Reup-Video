@@ -125,19 +125,19 @@ def _resolve_media_file_path(media_id: str, db_path: str = settings.DB_PATH) -> 
     # Search in SQLite database jobs table
     try:
         if os.path.exists(db_path):
-            conn = get_db_connection(db_path)
-            cursor = conn.execute(
-                "SELECT input_file_path, output_file_path FROM jobs WHERE job_id = ? OR source_url LIKE ?",
-                (media_id, f"%{media_id}%")
-            )
-            row = cursor.fetchone()
-            if row:
-                inp_p = row["input_file_path"]
-                out_p = row["output_file_path"]
-                if out_p and os.path.exists(out_p):
-                    return out_p
-                if inp_p and os.path.exists(inp_p):
-                    return inp_p
+            with get_db_connection(db_path) as conn:
+                cursor = conn.execute(
+                    "SELECT input_file_path, output_file_path FROM jobs WHERE job_id = ? OR source_url LIKE ?",
+                    (media_id, f"%{media_id}%")
+                )
+                row = cursor.fetchone()
+                if row:
+                    inp_p = row["input_file_path"]
+                    out_p = row["output_file_path"]
+                    if out_p and os.path.exists(out_p):
+                        return out_p
+                    if inp_p and os.path.exists(inp_p):
+                        return inp_p
     except Exception as e:
         logger.warning(f"Error querying database for media_id {media_id}: {e}")
 

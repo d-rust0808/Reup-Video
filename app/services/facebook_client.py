@@ -251,7 +251,7 @@ class FacebookClient:
             raise FacebookAPIError("Facebook did not return video_id/upload_url")
         return {"video_id": video_id, "upload_url": upload_url}
 
-    def upload_reel_binary(self, upload_url: str, page_token: str, source_path: str) -> None:
+    def upload_reel_binary(self, upload_url: str, page_token: str, source_path: str) -> Dict[str, Any]:
         file_size = os.path.getsize(source_path)
         with open(source_path, "rb") as video:
             response = self.client.post(
@@ -265,7 +265,7 @@ class FacebookClient:
                 },
                 timeout=httpx.Timeout(1800.0, connect=30.0, read=1800.0, write=1800.0),
             )
-        self._decode(response)
+        return self._decode(response)
 
     def finish_reel(
         self,
@@ -273,26 +273,178 @@ class FacebookClient:
         page_token: str,
         video_id: str,
         description: str,
+        video_state: str = "PUBLISHED",
     ) -> Dict[str, Any]:
+        state = str(video_state or "PUBLISHED").strip().upper()
+        if state not in {"DRAFT", "PUBLISHED", "SCHEDULED"}:
+            state = "PUBLISHED"
         response = self.client.post(
             f"{self.base_url}/{page_id}/video_reels",
             data={
                 "upload_phase": "finish",
                 "video_id": video_id,
-                "video_state": "PUBLISHED",
+                "video_state": state,
                 "description": description or "",
             },
             headers=self._auth(page_token),
         )
         return self._decode(response)
 
-    def get_video_status(self, video_id: str, page_token: str) -> Dict[str, Any]:
-        response = self.client.get(
-            f"{self.base_url}/{video_id}",
-            params={"fields": "id,status,permalink_url"},
+    def delete_object(self, object_id: str, page_token: str) -> Dict[str, Any]:
+        oid = str(object_id or "").strip()
+        if not oid:
+            raise FacebookAPIError("Thiếu id để xoá")
+        response = self.client.delete(
+            f"{self.base_url}/{oid}",
             headers=self._auth(page_token),
         )
         return self._decode(response)
+
+    def comment_on_object(
+        self,
+        object_id: str,
+        page_token: str,
+        message: str,
+        *,
+        attachment_url: str = "",
+    ) -> Dict[str, Any]:
+        oid = str(object_id or "").strip()
+        if not oid:
+            raise FacebookAPIError("Thiếu id bài/video để bình luận")
+        data: Dict[str, str] = {"message": message or ""}
+        if attachment_url:
+            data["attachment_share_url"] = attachment_url
+        response = self.client.post(
+            f"{self.base_url}/{oid}/comments",
+            data=data,
+            headers=self._auth(page_token),
+        )
+        return self._decode(response)
+
+    def pin_comment(self, comment_id: str, page_token: str) -> Dict[str, Any]:
+        cid = str(comment_id or "").strip()
+        if not cid:
+            raise FacebookAPIError("Thiếu comment id để ghim")
+        response = self.client.post(
+            f"{self.base_url}/{cid}",
+            data={"is_pinned": "true"},
+            headers=self._auth(page_token),
+        )
+        return self._decode(response)
+
+    def comment_on_reel(
+        self,
+        page_token: str,
+        *,
+        video_id: str = "",
+        post_id: str = "",
+        page_id: str = "",
+        message: str,
+        attachment_url: str = "",
+        pin: bool = False,
+    ) -> Dict[str, Any]:
+        candidates: List[str] = []
+        for raw in (video_id, post_id):
+            text = str(raw or "").strip()
+            if text and text not in candidates:
+                candidates.append(text)
+        page = str(page_id or "").strip()
+        vid = str(video_id or "").strip()
+        if page and vid:
+            combo = f"{page}_{vid}"
+            if combo not in candidates:
+                candidates.append(combo)
+        if not candidates:
+            raise FacebookAPIError("Thiếu video_id/post_id để bình luận Reel")
+
+        last_error: Optional[FacebookAPIError] = None
+        payload: Dict[str, Any] = {}
+        for oid in candidates:
+            try:
+                payload = self.comment_on_object(
+                    oid, page_token, message, attachment_url=attachment_url
+                )
+                last_error = None
+                break
+            except FacebookAPIError as exc:
+                last_error = exc
+                if attachment_url:
+                    try:
+                        payload = self.comment_on_object(oid, page_token, message)
+                        last_error = None
+                        break
+                    except FacebookAPIError as inner:
+                        last_error = inner
+        if last_error:
+            raise last_error
+
+        comment_id = str(payload.get("id") or "")
+        if pin and comment_id:
+            try:
+                self.pin_comment(comment_id, page_token)
+            except FacebookAPIError:
+                pass
+        return payload
+
+    def get_video_status(self, video_id: str, page_token: str) -> Dict[str, Any]:
+        try:
+            response = self.client.get(
+                f"{self.base_url}/{video_id}",
+                params={"fields": "id,status,permalink_url,copyright_check_information"},
+                headers=self._auth(page_token),
+            )
+            return self._decode(response)
+        except FacebookAPIError as exc:
+            response = self.client.get(
+                f"{self.base_url}/{video_id}",
+                params={"fields": "id,status,permalink_url"},
+                headers=self._auth(page_token),
+            )
+            payload = self._decode(response)
+            payload["_copyright_field_error"] = str(exc)[:300]
+            return payload
+
+    def list_recent_posts(
+        self,
+        page_id: str,
+        page_token: str,
+        *,
+        limit: int = 12,
+    ) -> List[Dict[str, Any]]:
+        fields = "id,created_time,message,story,permalink_url"
+        cap = max(1, min(int(limit or 12), 30))
+        items: List[Dict[str, Any]] = []
+        try:
+            items.extend(self._paged(
+                f"{self.base_url}/{page_id}/published_posts",
+                page_token,
+                {"fields": fields, "limit": "15"},
+                max_items=cap,
+            ))
+        except FacebookAPIError:
+            pass
+        if len(items) < cap:
+            try:
+                items.extend(self._paged(
+                    f"{self.base_url}/{page_id}/feed",
+                    page_token,
+                    {"fields": fields, "limit": "10"},
+                    max_items=cap,
+                ))
+            except FacebookAPIError:
+                pass
+        seen = set()
+        unique: List[Dict[str, Any]] = []
+        for item in items:
+            pid = str(item.get("id") or "")
+            if pid and pid in seen:
+                continue
+            if pid:
+                seen.add(pid)
+            unique.append(item)
+            if len(unique) >= cap:
+                break
+        return unique
 
     def get_page_insights(
         self,

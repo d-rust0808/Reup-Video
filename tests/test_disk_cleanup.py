@@ -162,3 +162,26 @@ def test_remove_library_files_is_idempotent(tmp_path, monkeypatch):
     second = remove_library_files("missingid12")
     assert first["removed"] == []
     assert second["removed"] == []
+
+
+def test_purge_stale_downloads_cleans_ytdl_and_part_files(tmp_path):
+    from app.services.disk_cleanup import purge_stale_downloads
+
+    stale_ytdl_dir = tmp_path / "video.12345.ytdl"
+    stale_ytdl_dir.mkdir()
+    part_file = stale_ytdl_dir / "video.f251.webm.part"
+    part_file.write_bytes(b"data" * 100)
+
+    orphan_part = tmp_path / "direct.part"
+    orphan_part.write_bytes(b"temp" * 50)
+
+    normal_file = tmp_path / "valid_video.mp4"
+    normal_file.write_bytes(b"keep" * 100)
+
+    res = purge_stale_downloads(str(tmp_path))
+    assert "video.12345.ytdl" in res["removed"]
+    assert "direct.part" in res["removed"]
+    assert not stale_ytdl_dir.exists()
+    assert not orphan_part.exists()
+    assert normal_file.exists()
+

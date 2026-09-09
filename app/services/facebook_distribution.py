@@ -13,7 +13,17 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from app.core.database import get_db_connection
+from app.services.affiliate_link import (
+    comment_body,
+    load_affiliate_from_job,
+    prepend_affiliate_caption,
+)
 from app.services.facebook_client import FacebookAPIError, FacebookClient
+from app.services.facebook_copyright import (
+    COPYRIGHT_WAIT_SECONDS,
+    CopyrightVerdict,
+    evaluate_copyright,
+)
 from app.services.secret_store import get_secret
 
 
@@ -60,7 +70,12 @@ def _iso(value: Optional[datetime] = None) -> str:
     return (value or _now()).isoformat()
 
 
-def _caption(row: Dict[str, Any]) -> str:
+def _caption(
+    row: Dict[str, Any],
+    *,
+    affiliate_url: str = "",
+    affiliate_product: str = "",
+) -> str:
     caption = str(row.get("caption") or "").strip()
     try:
         tags = json.loads(row.get("tags") or "[]")
@@ -71,7 +86,8 @@ def _caption(row: Dict[str, Any]) -> str:
         for tag in tags
         if str(tag).strip()
     )
-    return "\n\n".join(part for part in (caption, hashtags) if part)
+    body = "\n\n".join(part for part in (caption, hashtags) if part)
+    return prepend_affiliate_caption(body, affiliate_url, affiliate_product)
 
 
 def _validate_reel_file(source_path: str) -> None:
@@ -148,6 +164,7 @@ def enqueue_channel_video(
         if not source_path or not os.path.isfile(source_path):
             return None
 
+        aff_url, aff_product = load_affiliate_from_job(db_path, str(data.get("job_id") or ""))
         existing = conn.execute(
             """
             SELECT id, status FROM distribution_jobs
@@ -157,16 +174,30 @@ def enqueue_channel_video(
         ).fetchone()
         now = _iso()
         if existing:
-            if reset_failed and str(existing["status"]).upper() == "FAILED":
-                conn.execute(
-                    """
-                    UPDATE distribution_jobs
-                    SET status = 'PENDING', attempts = 0, next_attempt_at = ?,
-                        lease_until = NULL, last_error = '', updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (now, now, existing["id"]),
-                )
+            existing_status = str(existing["status"]).upper()
+            if reset_failed and existing_status in {"FAILED", "COPYRIGHT_BLOCKED"}:
+                if existing_status == "COPYRIGHT_BLOCKED":
+                    conn.execute(
+                        """
+                        UPDATE distribution_jobs
+                        SET status = 'PENDING', attempts = 0, next_attempt_at = ?,
+                            lease_until = NULL, last_error = '',
+                            upload_phase = '', upload_video_id = '', upload_url = '',
+                            remote_media_id = '', remote_post_id = '', updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (now, now, existing["id"]),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE distribution_jobs
+                        SET status = 'PENDING', attempts = 0, next_attempt_at = ?,
+                            lease_until = NULL, last_error = '', updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (now, now, existing["id"]),
+                    )
                 conn.commit()
             distribution_id = str(existing["id"])
         else:
@@ -185,7 +216,7 @@ def enqueue_channel_video(
                     PROVIDER,
                     data["destination_id"],
                     source_path,
-                    _caption(data),
+                    _caption(data, affiliate_url=aff_url, affiliate_product=aff_product),
                     now,
                     now,
                     now,
@@ -232,13 +263,23 @@ class FacebookDistributionWorker:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
-                SELECT * FROM distribution_jobs
-                WHERE provider = 'facebook'
-                  AND status IN ('PENDING','FAILED','STARTING','UPLOADING','FINISHING','PROCESSING')
-                  AND attempts < max_attempts
-                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-                  AND (lease_until IS NULL OR lease_until < ?)
-                ORDER BY created_at ASC
+                SELECT * FROM distribution_jobs d
+                WHERE d.provider = 'facebook'
+                  AND d.status IN ('PENDING','FAILED','STARTING','UPLOADING','FINISHING','PROCESSING')
+                  AND d.attempts < d.max_attempts
+                  AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= ?)
+                  AND (d.lease_until IS NULL OR d.lease_until < ?)
+                  AND (
+                    d.job_id IS NULL OR d.job_id = ''
+                    OR NOT EXISTS (
+                      SELECT 1 FROM distribution_jobs s
+                      WHERE s.provider = 'facebook'
+                        AND s.job_id = d.job_id
+                        AND s.id != d.id
+                        AND s.status IN ('STARTING','UPLOADING','FINISHING','PROCESSING')
+                    )
+                  )
+                ORDER BY d.created_at ASC
                 LIMIT 1
                 """,
                 (now, now),
@@ -302,6 +343,187 @@ class FacebookDistributionWorker:
         ).lower()
         return video_status in {"ready", "published"} or publishing_status in {"complete", "completed"}
 
+    @staticmethod
+    def _copyright_since(row: Dict[str, Any]) -> Optional[datetime]:
+        raw = str(row.get("upload_url") or "")
+        if not raw.startswith("copyright_since:"):
+            return None
+        try:
+            started = datetime.fromisoformat(raw.split(":", 1)[1])
+        except Exception:
+            return None
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        return started
+
+    def _copyright_wait_expired(self, row: Dict[str, Any]) -> bool:
+        started = self._copyright_since(row)
+        if started is None:
+            return False
+        return (_now() - started).total_seconds() >= COPYRIGHT_WAIT_SECONDS
+
+    def _job_has_published_sibling(self, row: Dict[str, Any]) -> bool:
+        job_id = str(row.get("job_id") or "").strip()
+        if not job_id:
+            return False
+        with get_db_connection(self.db_path) as conn:
+            hit = conn.execute(
+                """
+                SELECT 1 FROM distribution_jobs
+                WHERE provider = 'facebook' AND job_id = ? AND status = 'PUBLISHED'
+                LIMIT 1
+                """,
+                (job_id,),
+            ).fetchone()
+        return bool(hit)
+
+    def _caption_for(self, row: Dict[str, Any]) -> str:
+        aff_url, aff_product = load_affiliate_from_job(
+            self.db_path, str(row.get("job_id") or "")
+        )
+        return prepend_affiliate_caption(
+            str(row.get("caption") or ""), aff_url, aff_product
+        )
+
+    def _block_job_copyright(
+        self,
+        row: Dict[str, Any],
+        summary: str,
+        client: Optional[FacebookClient] = None,
+        page_token: str = "",
+    ) -> None:
+        video_id = str(row.get("upload_video_id") or row.get("remote_media_id") or "").strip()
+        if client and page_token and video_id:
+            try:
+                client.delete_object(video_id, page_token)
+            except Exception:
+                logger.warning(
+                    "Could not delete copyright-blocked Facebook draft %s",
+                    video_id,
+                    exc_info=True,
+                )
+        now = _iso()
+        message = str(summary or "Facebook Rights Manager chặn bản quyền").strip()[:2000]
+        job_id = str(row.get("job_id") or "").strip()
+        with get_db_connection(self.db_path) as conn:
+            if job_id:
+                targets = conn.execute(
+                    """
+                    SELECT id, channel_video_id FROM distribution_jobs
+                    WHERE provider = 'facebook' AND job_id = ?
+                      AND status NOT IN ('PUBLISHED','DELETED','CANCELLED','COPYRIGHT_BLOCKED')
+                    """,
+                    (job_id,),
+                ).fetchall()
+            else:
+                targets = conn.execute(
+                    "SELECT id, channel_video_id FROM distribution_jobs WHERE id = ?",
+                    (row["id"],),
+                ).fetchall()
+            for item in targets:
+                conn.execute(
+                    """
+                    UPDATE distribution_jobs
+                    SET status = 'COPYRIGHT_BLOCKED', upload_phase = 'BLOCKED',
+                        lease_until = NULL, next_attempt_at = NULL,
+                        last_error = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (message, now, item["id"]),
+                )
+                conn.execute(
+                    """
+                    UPDATE channel_videos
+                    SET publish_status = 'COPYRIGHT_BLOCKED', notes = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (message, now, item["channel_video_id"]),
+                )
+                conn.execute(
+                    """
+                    UPDATE publish_log
+                    SET status = 'COPYRIGHT_BLOCKED', notes = ?, updated_at = ?
+                    WHERE channel_video_id = ?
+                    """,
+                    (message, now, item["channel_video_id"]),
+                )
+            conn.commit()
+
+    def _wait_copyright(self, row: Dict[str, Any], verdict: CopyrightVerdict) -> None:
+        self._update(
+            row["id"],
+            lease_until=None,
+            next_attempt_at=_iso(_now() + timedelta(seconds=20)),
+            last_error=verdict.summary or "Facebook đang quét bản quyền (nháp, chưa lên page)",
+        )
+
+    def _finish_as(
+        self,
+        row: Dict[str, Any],
+        client: FacebookClient,
+        page_token: str,
+        video_id: str,
+        video_state: str,
+        *,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        description = self._caption_for(row)
+        finished = client.finish_reel(
+            row["destination_id"],
+            page_token,
+            video_id,
+            description,
+            video_state=video_state,
+        )
+        remote_post_id = str(finished.get("post_id") or finished.get("id") or row.get("remote_post_id") or "")
+        fields: Dict[str, Any] = {
+            "status": "PROCESSING",
+            "upload_phase": "DRAFT" if video_state == "DRAFT" else "FINISHED",
+            "lease_until": None,
+            "next_attempt_at": _iso(_now() + timedelta(seconds=15 if video_state == "DRAFT" else 10)),
+            "remote_media_id": video_id,
+            "remote_post_id": remote_post_id,
+            "last_error": (
+                "Facebook đang quét bản quyền (nháp, chưa lên page)"
+                if video_state == "DRAFT"
+                else ""
+            ),
+        }
+        if video_state == "DRAFT":
+            fields["upload_url"] = f"copyright_since:{_iso()}"
+        if extra:
+            fields.update(extra)
+        self._update(row["id"], **fields)
+        return finished
+
+    def _handle_copyright_then_publish(
+        self,
+        row: Dict[str, Any],
+        client: FacebookClient,
+        page_token: str,
+        video_id: str,
+        payload: Dict[str, Any],
+    ) -> None:
+        if self._job_has_published_sibling(row):
+            self._finish_as(row, client, page_token, video_id, "PUBLISHED")
+            return
+        verdict = evaluate_copyright(payload)
+        if verdict.blocked:
+            self._block_job_copyright(row, verdict.summary, client, page_token)
+            return
+        if verdict.state == "clear":
+            self._finish_as(row, client, page_token, video_id, "PUBLISHED")
+            return
+        if self._copyright_wait_expired(row):
+            self._block_job_copyright(
+                row,
+                verdict.summary or "Không xác nhận được bản quyền — không đăng để tránh strike",
+                client,
+                page_token,
+            )
+            return
+        self._wait_copyright(row, verdict)
+
     def _mark_published(self, row: Dict[str, Any], payload: Dict[str, Any]) -> None:
         now = _iso()
         remote_media_id = str(payload.get("id") or row.get("upload_video_id") or "")
@@ -355,6 +577,57 @@ class FacebookDistributionWorker:
         except Exception:
             logger.warning("Could not mark source catalog video as posted", exc_info=True)
 
+    def _comment_affiliate(
+        self,
+        row: Dict[str, Any],
+        client: FacebookClient,
+        page_token: str,
+        payload: Dict[str, Any],
+    ) -> str:
+        """ok = done, skip = nothing to post, retry = wait and try again."""
+        if str(row.get("affiliate_comment_id") or "").strip():
+            return "ok"
+        url, product = load_affiliate_from_job(self.db_path, str(row.get("job_id") or ""))
+        message = comment_body(url, product)
+        if not message:
+            return "skip"
+        video_id = str(
+            payload.get("id") or row.get("remote_media_id") or row.get("upload_video_id") or ""
+        )
+        post_id = str(row.get("remote_post_id") or payload.get("post_id") or "")
+        try:
+            result = client.comment_on_reel(
+                page_token,
+                video_id=video_id,
+                post_id=post_id,
+                page_id=str(row.get("destination_id") or ""),
+                message=message,
+                attachment_url=url,
+                pin=True,
+            )
+            comment_id = str(result.get("id") or "")
+            if not comment_id:
+                return "retry"
+            self._update(row["id"], affiliate_comment_id=comment_id)
+            row["affiliate_comment_id"] = comment_id
+            return "ok"
+        except FacebookAPIError as exc:
+            logger.warning(
+                "Facebook affiliate comment skipped for %s: %s",
+                row.get("id"),
+                exc,
+            )
+            if exc.retryable:
+                return "retry"
+            return "skip"
+        except Exception as exc:
+            logger.warning(
+                "Facebook affiliate comment skipped for %s: %s",
+                row.get("id"),
+                exc,
+            )
+            return "skip"
+
     def _process_sync(self, row: Dict[str, Any]) -> None:
         connection = self._connection(row["destination_id"])
         page_token = connection["page_token"]
@@ -366,35 +639,46 @@ class FacebookDistributionWorker:
             video_id = str(row.get("upload_video_id") or "")
             upload_url = str(row.get("upload_url") or "")
             phase = str(row.get("upload_phase") or "").upper()
+            status = str(row.get("status") or "").upper()
 
-            if (
-                str(row.get("status") or "").upper() == "PROCESSING"
-                or phase == "FINISHED"
-            ) and video_id:
+            if video_id and (status == "PROCESSING" or phase in {"DRAFT", "FINISHED"}):
                 payload = client.get_video_status(video_id, page_token)
-                if self._is_published(payload):
-                    self._mark_published(row, payload)
-                else:
-                    status_payload = payload.get("status") or {}
-                    video_status = str(
-                        status_payload.get("video_status")
-                        if isinstance(status_payload, dict)
-                        else ""
-                    ).lower()
-                    if video_status in {"error", "failed"}:
-                        raise FacebookAPIError("Facebook failed to process the uploaded Reel")
-                    self._update(
-                        row["id"],
-                        lease_until=None,
-                        next_attempt_at=_iso(_now() + timedelta(seconds=20)),
+                if phase != "FINISHED":
+                    self._handle_copyright_then_publish(
+                        row, client, page_token, video_id, payload
                     )
+                    return
+                if self._is_published(payload):
+                    outcome = self._comment_affiliate(row, client, page_token, payload)
+                    if outcome == "retry":
+                        self._update(
+                            row["id"],
+                            lease_until=None,
+                            next_attempt_at=_iso(_now() + timedelta(seconds=20)),
+                        )
+                        return
+                    self._mark_published(row, payload)
+                    return
+                status_payload = payload.get("status") or {}
+                video_status = str(
+                    status_payload.get("video_status")
+                    if isinstance(status_payload, dict)
+                    else ""
+                ).lower()
+                if video_status in {"error", "failed"}:
+                    raise FacebookAPIError("Facebook failed to process the uploaded Reel")
+                self._update(
+                    row["id"],
+                    lease_until=None,
+                    next_attempt_at=_iso(_now() + timedelta(seconds=20)),
+                )
                 return
 
             attempts = int(row.get("attempts") or 0) + 1
             row["attempts"] = attempts
             self._update(row["id"], attempts=attempts)
 
-            if not video_id or not upload_url:
+            if not video_id or not upload_url or str(upload_url).startswith("copyright_since:"):
                 self._update(row["id"], status="STARTING")
                 started = client.start_reel(row["destination_id"], page_token)
                 video_id = started["video_id"]
@@ -409,27 +693,19 @@ class FacebookDistributionWorker:
                 )
 
             if phase != "UPLOADED":
-                client.upload_reel_binary(upload_url, page_token, source_path)
+                uploaded = client.upload_reel_binary(upload_url, page_token, source_path) or {}
                 phase = "UPLOADED"
                 self._update(row["id"], status="FINISHING", upload_phase=phase)
+                if isinstance(uploaded, dict):
+                    early = evaluate_copyright(uploaded)
+                    if early.blocked:
+                        self._block_job_copyright(row, early.summary, client, page_token)
+                        return
 
-            finished = client.finish_reel(
-                row["destination_id"],
-                page_token,
-                video_id,
-                str(row.get("caption") or ""),
-            )
-            remote_post_id = str(finished.get("post_id") or finished.get("id") or "")
-            self._update(
-                row["id"],
-                status="PROCESSING",
-                upload_phase="FINISHED",
-                lease_until=None,
-                next_attempt_at=_iso(_now() + timedelta(seconds=10)),
-                remote_media_id=video_id,
-                remote_post_id=remote_post_id,
-                last_error="",
-            )
+            if self._job_has_published_sibling(row):
+                self._finish_as(row, client, page_token, video_id, "PUBLISHED")
+            else:
+                self._finish_as(row, client, page_token, video_id, "DRAFT")
         finally:
             client.close()
 

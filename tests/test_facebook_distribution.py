@@ -134,8 +134,8 @@ def test_facebook_worker_persists_upload_phases_and_publish_result(tmp_path, mon
         def upload_reel_binary(self, upload_url, token, source_path):
             calls.append(("upload", upload_url, token, source_path))
 
-        def finish_reel(self, page_id, token, video_id, description):
-            calls.append(("finish", page_id, token, video_id, description))
+        def finish_reel(self, page_id, token, video_id, description, video_state="PUBLISHED"):
+            calls.append(("finish", video_state, page_id, token, video_id, description))
             return {"success": True}
 
         def get_video_status(self, video_id, token):
@@ -144,6 +144,9 @@ def test_facebook_worker_persists_upload_phases_and_publish_result(tmp_path, mon
                 "id": video_id,
                 "permalink_url": "https://facebook.invalid/reel/1",
                 "status": {"video_status": "ready"},
+                "copyright_check_information": {
+                    "status": {"status": "complete", "matches_found": False},
+                },
             }
 
     monkeypatch.setattr(distribution, "FacebookClient", FakeFacebookClient)
@@ -156,11 +159,17 @@ def test_facebook_worker_persists_upload_phases_and_publish_result(tmp_path, mon
     worker._process_sync(row)
 
     with get_db_connection(db_path) as conn:
+        draft = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (distribution_id,)).fetchone())
+    assert draft["status"] == "PROCESSING"
+    assert draft["upload_phase"] == "DRAFT"
+    assert draft["upload_video_id"] == "remote_video_1"
+    assert draft["attempts"] == 1
+    assert str(draft["upload_url"]).startswith("copyright_since:")
+
+    worker._process_sync(draft)
+    with get_db_connection(db_path) as conn:
         processing = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (distribution_id,)).fetchone())
-    assert processing["status"] == "PROCESSING"
     assert processing["upload_phase"] == "FINISHED"
-    assert processing["upload_video_id"] == "remote_video_1"
-    assert processing["attempts"] == 1
 
     worker._process_sync(processing)
     with get_db_connection(db_path) as conn:
@@ -171,7 +180,351 @@ def test_facebook_worker_persists_upload_phases_and_publish_result(tmp_path, mon
     assert channel_video["publish_status"] == "PUBLISHED"
     assert [call[0] for call in calls].count("start") == 1
     assert [call[0] for call in calls].count("upload") == 1
-    assert [call[0] for call in calls].count("finish") == 1
+    assert [call[0] for call in calls].count("finish") == 2
+    assert [call[1] for call in calls if call[0] == "finish"] == ["DRAFT", "PUBLISHED"]
+
+
+def test_facebook_worker_prepends_affiliate_and_comments(tmp_path, monkeypatch):
+    from app.services import facebook_distribution as distribution
+
+    db_path = str(tmp_path / "aff.sqlite")
+    video_path = tmp_path / "reel.mp4"
+    video_path.write_bytes(b"video")
+    init_db(db_path)
+    _seed_binding(db_path, video_path)
+    now = _now()
+    with get_db_connection(db_path) as conn:
+        conn.execute(
+            """INSERT INTO jobs (job_id, source_url, platform, status, progress_percent,
+                output_file_path, watermark_config, reup_config, created_at, updated_at, message, logs)
+               VALUES ('job_1', '', 'youtube', 'COMPLETED', 100, '', '{}', ?, ?, ?, '', '[]')""",
+            (
+                json.dumps({
+                    "affiliate_link": "https://shopee.vn/giay-ve-sinh",
+                    "affiliate_product": "giấy vệ sinh",
+                }, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+
+    distribution_id = enqueue_channel_video(db_path, "cvid_1", require_auto_publish=True)
+    with get_db_connection(db_path) as conn:
+        queued = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (distribution_id,)).fetchone())
+    assert queued["caption"].startswith("https://shopee.vn/giay-ve-sinh")
+    assert "ủng hộ shop qua link: https://shopee.vn/giay-ve-sinh" in queued["caption"]
+
+    comments = []
+
+    class FakeFacebookClient:
+        def __init__(self, graph_version, timeout=30.0):
+            pass
+
+        def close(self):
+            pass
+
+        def start_reel(self, page_id, token):
+            return {"video_id": "remote_video_1", "upload_url": "https://upload.invalid"}
+
+        def upload_reel_binary(self, upload_url, token, source_path):
+            return None
+
+        def finish_reel(self, page_id, token, video_id, description, video_state="PUBLISHED"):
+            comments.append(("finish", video_state, description))
+            return {"success": True, "post_id": "page_1_remote_video_1"}
+
+        def get_video_status(self, video_id, token):
+            return {
+                "id": video_id,
+                "permalink_url": "https://facebook.invalid/reel/1",
+                "status": {"video_status": "ready"},
+                "copyright_check_information": {
+                    "status": {"status": "complete", "matches_found": False},
+                },
+            }
+
+        def comment_on_reel(self, page_token, **kwargs):
+            comments.append(("comment", kwargs))
+            return {"id": "cmt_99"}
+
+    monkeypatch.setattr(distribution, "FacebookClient", FakeFacebookClient)
+    monkeypatch.setattr(distribution, "get_secret", lambda _ref: "page-token")
+    monkeypatch.setattr(distribution, "_validate_reel_file", lambda _path: None)
+
+    worker = distribution.FacebookDistributionWorker(db_path)
+    with get_db_connection(db_path) as conn:
+        row = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (distribution_id,)).fetchone())
+    worker._process_sync(row)
+    with get_db_connection(db_path) as conn:
+        draft = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (distribution_id,)).fetchone())
+    worker._process_sync(draft)
+    with get_db_connection(db_path) as conn:
+        processing = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (distribution_id,)).fetchone())
+    worker._process_sync(processing)
+    with get_db_connection(db_path) as conn:
+        published = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (distribution_id,)).fetchone())
+
+    assert published["status"] == "PUBLISHED"
+    assert published["affiliate_comment_id"] == "cmt_99"
+    finish_desc = next(item[2] for item in comments if item[0] == "finish")
+    assert finish_desc.startswith("https://shopee.vn/giay-ve-sinh")
+    comment_kwargs = next(item[1] for item in comments if item[0] == "comment")
+    assert comment_kwargs["message"].startswith("https://shopee.vn/giay-ve-sinh")
+    assert "ủng hộ kênh qua: https://shopee.vn/giay-ve-sinh" in comment_kwargs["message"]
+    assert comment_kwargs["pin"] is True
+    assert [item[1] for item in comments if item[0] == "finish"] == ["DRAFT", "PUBLISHED"]
+
+
+def _seed_second_page(db_path, video_path):
+    now = _now()
+    with get_db_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO channels (
+                channel_id, name, platform, handle, tags, description, color,
+                overlays, status, created_at, updated_at
+            ) VALUES ('chan_fb_2', 'Facebook Two', 'facebook', '', '[]', '', 'blue',
+                      '[]', 'ACTIVE', ?, ?)
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO facebook_pages (
+                page_id, connection_id, name, category, tasks, picture_url,
+                page_token_ref, can_publish, last_synced_at, updated_at
+            ) VALUES ('page_2', 'facebook_default', 'Page Two', '', '["CREATE_CONTENT"]', '',
+                      'facebook.page.page_2.token', 1, ?, ?)
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO channel_destinations (
+                channel_id, provider, destination_id, auto_publish, created_at, updated_at
+            ) VALUES ('chan_fb_2', 'facebook', 'page_2', 1, ?, ?)
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO channel_videos (
+                id, channel_id, job_id, title, caption, tags, publish_status,
+                video_path, notes, created_at, updated_at
+            ) VALUES ('cvid_2', 'chan_fb_2', 'job_1', 'Title 2', 'Caption 2', '[]', 'READY', ?, '', ?, ?)
+            """,
+            (str(video_path), now, now),
+        )
+        conn.commit()
+
+
+def test_copyright_match_blocks_whole_job_and_deletes_draft(tmp_path, monkeypatch):
+    from app.services import facebook_distribution as distribution
+
+    db_path = str(tmp_path / "blocked.sqlite")
+    video_path = tmp_path / "reel.mp4"
+    video_path.write_bytes(b"video")
+    init_db(db_path)
+    _seed_binding(db_path, video_path)
+    _seed_second_page(db_path, video_path)
+    first = enqueue_channel_video(db_path, "cvid_1", require_auto_publish=True)
+    second = enqueue_channel_video(db_path, "cvid_2", require_auto_publish=True)
+    assert first and second and first != second
+
+    calls = []
+
+    class FakeFacebookClient:
+        def __init__(self, graph_version, timeout=30.0):
+            pass
+
+        def close(self):
+            pass
+
+        def start_reel(self, page_id, token):
+            calls.append(("start", page_id))
+            return {"video_id": f"vid_{page_id}", "upload_url": "https://upload.invalid"}
+
+        def upload_reel_binary(self, upload_url, token, source_path):
+            calls.append(("upload", source_path))
+
+        def finish_reel(self, page_id, token, video_id, description, video_state="PUBLISHED"):
+            calls.append(("finish", video_state, page_id))
+            return {"success": True}
+
+        def get_video_status(self, video_id, token):
+            return {
+                "id": video_id,
+                "status": {"video_status": "ready"},
+                "copyright_check_information": {
+                    "status": {"status": "complete", "matches_found": True},
+                    "copyright_matches": [
+                        {
+                            "content_title": "Phim cung đình",
+                            "owner_copyright_policy": {
+                                "name": "Studio",
+                                "actions": [{"action": "BLOCK"}],
+                            },
+                            "matched_segments": [{"segment_type": "VIDEO", "duration_in_seconds": 30}],
+                        }
+                    ],
+                },
+            }
+
+        def delete_object(self, object_id, token):
+            calls.append(("delete", object_id))
+            return {"success": True}
+
+    monkeypatch.setattr(distribution, "FacebookClient", FakeFacebookClient)
+    monkeypatch.setattr(distribution, "get_secret", lambda _ref: "page-token")
+    monkeypatch.setattr(distribution, "_validate_reel_file", lambda _path: None)
+
+    worker = distribution.FacebookDistributionWorker(db_path)
+    with get_db_connection(db_path) as conn:
+        row = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (first,)).fetchone())
+    worker._process_sync(row)
+    claimed = worker._claim_next()
+    assert claimed is None
+    with get_db_connection(db_path) as conn:
+        draft = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (first,)).fetchone())
+        sibling = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (second,)).fetchone())
+    assert draft["upload_phase"] == "DRAFT"
+    assert sibling["status"] == "PENDING"
+
+    worker._process_sync(draft)
+    with get_db_connection(db_path) as conn:
+        rows = {
+            item["id"]: dict(item)
+            for item in conn.execute("SELECT * FROM distribution_jobs").fetchall()
+        }
+        videos = {
+            item["id"]: dict(item)
+            for item in conn.execute("SELECT * FROM channel_videos").fetchall()
+        }
+    assert rows[first]["status"] == "COPYRIGHT_BLOCKED"
+    assert rows[second]["status"] == "COPYRIGHT_BLOCKED"
+    assert "Phim cung đình" in rows[first]["last_error"]
+    assert videos["cvid_1"]["publish_status"] == "COPYRIGHT_BLOCKED"
+    assert videos["cvid_2"]["publish_status"] == "COPYRIGHT_BLOCKED"
+    assert [call[0] for call in calls].count("start") == 1
+    assert [call[1] for call in calls if call[0] == "finish"] == ["DRAFT"]
+    assert ("delete", "vid_page_1") in calls
+
+    reset = enqueue_channel_video(db_path, "cvid_1", require_auto_publish=False, reset_failed=True)
+    assert reset == first
+    with get_db_connection(db_path) as conn:
+        restarted = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (first,)).fetchone())
+    assert restarted["status"] == "PENDING"
+    assert restarted["upload_video_id"] == ""
+    assert restarted["upload_phase"] == ""
+
+
+def test_unknown_copyright_result_does_not_publish(tmp_path, monkeypatch):
+    from app.services import facebook_distribution as distribution
+
+    db_path = str(tmp_path / "unknown.sqlite")
+    video_path = tmp_path / "reel.mp4"
+    video_path.write_bytes(b"video")
+    init_db(db_path)
+    _seed_binding(db_path, video_path)
+    distribution_id = enqueue_channel_video(db_path, "cvid_1", require_auto_publish=True)
+    finishes = []
+
+    class FakeFacebookClient:
+        def __init__(self, graph_version, timeout=30.0):
+            pass
+
+        def close(self):
+            pass
+
+        def start_reel(self, page_id, token):
+            return {"video_id": "remote_video_1", "upload_url": "https://upload.invalid"}
+
+        def upload_reel_binary(self, upload_url, token, source_path):
+            return {"success": True}
+
+        def finish_reel(self, page_id, token, video_id, description, video_state="PUBLISHED"):
+            finishes.append(video_state)
+            return {"success": True}
+
+        def get_video_status(self, video_id, token):
+            return {"id": video_id, "status": {"video_status": "ready"}}
+
+        def delete_object(self, object_id, token):
+            return {"success": True}
+
+    monkeypatch.setattr(distribution, "FacebookClient", FakeFacebookClient)
+    monkeypatch.setattr(distribution, "get_secret", lambda _ref: "page-token")
+    monkeypatch.setattr(distribution, "_validate_reel_file", lambda _path: None)
+
+    worker = distribution.FacebookDistributionWorker(db_path)
+    with get_db_connection(db_path) as conn:
+        row = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (distribution_id,)).fetchone())
+    worker._process_sync(row)
+    with get_db_connection(db_path) as conn:
+        draft = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (distribution_id,)).fetchone())
+    worker._process_sync(draft)
+    with get_db_connection(db_path) as conn:
+        still = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (distribution_id,)).fetchone())
+    assert still["status"] == "PROCESSING"
+    assert still["upload_phase"] == "DRAFT"
+    assert finishes == ["DRAFT"]
+
+
+def test_copyright_timeout_blocks_instead_of_publishing(tmp_path, monkeypatch):
+    from datetime import timedelta
+    from app.services import facebook_distribution as distribution
+
+    db_path = str(tmp_path / "timeout.sqlite")
+    video_path = tmp_path / "reel.mp4"
+    video_path.write_bytes(b"video")
+    init_db(db_path)
+    _seed_binding(db_path, video_path)
+    distribution_id = enqueue_channel_video(db_path, "cvid_1", require_auto_publish=True)
+
+    class FakeFacebookClient:
+        def __init__(self, graph_version, timeout=30.0):
+            pass
+
+        def close(self):
+            pass
+
+        def start_reel(self, page_id, token):
+            return {"video_id": "remote_video_1", "upload_url": "https://upload.invalid"}
+
+        def upload_reel_binary(self, upload_url, token, source_path):
+            return {"success": True}
+
+        def finish_reel(self, page_id, token, video_id, description, video_state="PUBLISHED"):
+            return {"success": True}
+
+        def get_video_status(self, video_id, token):
+            return {"id": video_id, "status": {"video_status": "ready"}}
+
+        def delete_object(self, object_id, token):
+            return {"success": True}
+
+    monkeypatch.setattr(distribution, "FacebookClient", FakeFacebookClient)
+    monkeypatch.setattr(distribution, "get_secret", lambda _ref: "page-token")
+    monkeypatch.setattr(distribution, "_validate_reel_file", lambda _path: None)
+
+    worker = distribution.FacebookDistributionWorker(db_path)
+    with get_db_connection(db_path) as conn:
+        row = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (distribution_id,)).fetchone())
+    worker._process_sync(row)
+    stale = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    with get_db_connection(db_path) as conn:
+        conn.execute(
+            "UPDATE distribution_jobs SET upload_url = ? WHERE id = ?",
+            (f"copyright_since:{stale}", distribution_id),
+        )
+        conn.commit()
+        draft = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (distribution_id,)).fetchone())
+    worker._process_sync(draft)
+    with get_db_connection(db_path) as conn:
+        blocked = dict(conn.execute("SELECT * FROM distribution_jobs WHERE id = ?", (distribution_id,)).fetchone())
+    assert blocked["status"] == "COPYRIGHT_BLOCKED"
+    assert "không đăng" in (blocked["last_error"] or "").lower() or "bản quyền" in (blocked["last_error"] or "").lower()
 
 
 def test_synced_pages_are_materialized_as_bound_channels(tmp_path, monkeypatch):

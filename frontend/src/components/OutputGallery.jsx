@@ -3,7 +3,8 @@ import { fetchOutputs, getDownloadUrl, getStreamUrl, getSubtitleUrl, downloadBat
 import { ConfirmModal } from './ConfirmModal';
 import { Toast } from './Toast';
 import { VideoModal } from './VideoModal';
-import { FolderDown, Download, CheckSquare, Square, FileVideo, Loader2, Trash2, RefreshCw, ShieldCheck, Play, FolderOpen, HardDrive } from 'lucide-react';
+import { PublishToGroupModal } from './PublishToGroupModal';
+import { FolderDown, Download, CheckSquare, Square, FileVideo, Loader2, Trash2, RefreshCw, ShieldCheck, Play, FolderOpen, HardDrive, Send } from 'lucide-react';
 
 export function OutputGallery() {
   const [outputs, setOutputs] = useState([]);
@@ -18,6 +19,7 @@ export function OutputGallery() {
   const [toast, setToast] = useState(null); // { type, title, message }
   const [search, setSearch] = useState('');
   const [previewVideo, setPreviewVideo] = useState(null);
+  const [publishJobId, setPublishJobId] = useState(null);
 
   const isDesktopApp = typeof window !== 'undefined' && !!window.electronAPI?.isDesktop;
 
@@ -441,6 +443,16 @@ export function OutputGallery() {
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
+                          setPublishJobId(item.job_id || jobId);
+                        }}
+                        title="Chọn nhóm Fanpage để đăng video này"
+                        className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-[11px] font-bold rounded-xl border border-emerald-200 transition flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap"
+                      >
+                        <Send className="w-3.5 h-3.5" /> Đăng lại
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
                           setPreviewVideo(item);
                         }}
                         title="Xem trực tiếp video này"
@@ -487,6 +499,15 @@ export function OutputGallery() {
           })}
         </div>
       )}
+
+      <PublishToGroupModal
+        isOpen={!!publishJobId}
+        jobId={publishJobId}
+        jobLabel={publishJobId}
+        onClose={() => setPublishJobId(null)}
+        onDone={(res) => setToast({ type: 'success', title: 'Đã xếp đăng', message: res.message || 'Đã đưa video vào nhóm Fanpage.' })}
+        onError={(message) => setToast({ type: 'error', title: 'Đăng lại thất bại', message })}
+      />
 
       {/* Direct Video Player Modal */}
       <VideoModal

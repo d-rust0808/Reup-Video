@@ -18,6 +18,7 @@ import {
   Smile,
   Captions,
   Share2,
+  ShoppingBag,
   Music,
   Scissors,
   Play,
@@ -1226,6 +1227,55 @@ export function ReupFxControls({ options, onChange, onSubmit, submitting }) {
             <Share2 className="w-4 h-4 text-indigo-600" />
             Đăng bài & Kênh
           </h4>
+
+          <div className="p-4 bg-gradient-to-br from-orange-50/80 via-amber-50/40 to-white rounded-2xl border border-orange-100 space-y-2.5">
+            <div className="flex items-center gap-2">
+              <ShoppingBag className="w-4 h-4 text-orange-600" />
+              <span className="text-xs font-extrabold text-slate-900">Giỏ hàng Shopee / link tiếp thị</span>
+            </div>
+            <p className="text-[10px] font-medium text-slate-500 leading-snug">
+              Dán <strong>link 1 món</strong> (không phải shop/collection). Studio để link ở <strong>dòng đầu mô tả</strong> + <strong>bình luận</strong> — Facebook tự nhận banner giỏ trên page đã liên kết Shopee.
+            </p>
+            <label className="block text-[11px] font-bold text-slate-700">
+              Link 1 sản phẩm (…-i.shop.item hoặc shp.ee/…)
+              <input
+                type="url"
+                value={options.affiliate_link || ''}
+                onChange={(e) => handleChange('affiliate_link', e.target.value)}
+                placeholder="https://shopee.vn/ten-sp-i.123.456 hoặc https://shp.ee/..."
+                className="mt-1 w-full text-xs font-semibold bg-white border border-orange-200 rounded-xl px-3 py-2 focus:ring-2 focus:ring-orange-400/30 focus:border-orange-400 shadow-2xs"
+              />
+            </label>
+            <label className="block text-[11px] font-bold text-slate-700">
+              Tên sản phẩm (hiện trong câu kêu gọi)
+              <input
+                type="text"
+                value={options.affiliate_product || ''}
+                onChange={(e) => handleChange('affiliate_product', e.target.value)}
+                placeholder="giấy vệ sinh"
+                className="mt-1 w-full text-xs font-semibold bg-white border border-orange-200 rounded-xl px-3 py-2 focus:ring-2 focus:ring-orange-400/30 focus:border-orange-400 shadow-2xs"
+              />
+            </label>
+            {String(options.affiliate_link || '').trim() ? (
+              <div className="rounded-xl bg-white/80 border border-orange-100 px-3 py-2 space-y-1">
+                {!(/shp\.ee|shope\.ee|s\.shopee|-i\.\d+\.\d+|shopee\.[^/\s]+\/product\/\d+\/\d+/i.test(String(options.affiliate_link))) && (
+                  <p className="text-[10px] font-bold text-amber-700">
+                    Link này giống shop/collection — Facebook thường không hiện giỏ. Dán link 1 món.
+                  </p>
+                )}
+                <p className="text-[10px] font-bold text-orange-800">Đầu bài viết:</p>
+                <p className="text-[10px] text-slate-700 leading-snug whitespace-pre-wrap">
+                  {String(options.affiliate_link).trim()}{'\n\n'}Bạn cần mua {String(options.affiliate_product || '').trim() || 'sản phẩm'} hãy ủng hộ shop qua link: {String(options.affiliate_link).trim()}
+                </p>
+                <p className="text-[10px] font-bold text-orange-800 pt-1">Bình luận Reel:</p>
+                <p className="text-[10px] text-slate-700 leading-snug whitespace-pre-wrap">
+                  {String(options.affiliate_link).trim()}{'\n'}Bạn cần mua {String(options.affiliate_product || '').trim() || 'sản phẩm'} hãy ủng hộ kênh qua: {String(options.affiliate_link).trim()}
+                </p>
+              </div>
+            ) : (
+              <p className="text-[10px] text-slate-400 font-medium">Để trống nếu job này không gắn link.</p>
+            )}
+          </div>
 
           {/* Channel Assignment & Distribution Section */}
           <div className="p-4 bg-gradient-to-br from-blue-50/70 via-indigo-50/40 to-slate-50 rounded-2xl border border-blue-100/90 space-y-3.5">

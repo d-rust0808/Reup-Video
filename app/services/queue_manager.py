@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from app.models.job import JobAborted, JobStatus, WatermarkConfig, ReupConfig
 from app.core.database import get_db_connection, init_db, DEFAULT_DB_PATH
 from app.services.activity import heartbeat
+from app.services.facebook_copyright import CopyrightBlockedError, assert_source_copyright_clear
 from app.services.reup_service import process_reup_video
 
 logger = logging.getLogger(__name__)
@@ -525,6 +526,52 @@ class BatchQueueManager:
                 "quality_status": d.get("quality_status") or "PENDING",
                 "quality_report": _parse_quality_report(d.get("quality_report")),
             }
+
+    def _store_job_social_copy(self, job_id: str, reup_config: Any, post: Dict[str, Any]) -> None:
+        title = str(post.get("title") or "")
+        caption = str(post.get("caption") or "")
+        tags = post.get("hashtags") if isinstance(post.get("hashtags"), list) else []
+        if hasattr(reup_config, "post_title"):
+            reup_config.post_title = title
+            reup_config.post_caption = caption
+            reup_config.post_tags = tags
+            payload = reup_config.model_dump_json()
+        else:
+            payload = json.dumps(
+                {"post_title": title, "post_caption": caption, "post_tags": tags},
+                ensure_ascii=False,
+            )
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE jobs SET reup_config = ?, updated_at = ? WHERE job_id = ?",
+                (payload, _utc_now_iso(), job_id),
+            )
+            conn.commit()
+
+    def _ensure_job_social_copy(self, job_id: str, reup_config: Any, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        from app.config import settings as app_settings
+        from app.services.post_writer import (
+            find_job_transcript,
+            needs_generated_copy,
+            write_facebook_posts,
+        )
+
+        title = str(getattr(reup_config, "post_title", "") or params.get("post_title") or "")
+        caption = str(getattr(reup_config, "post_caption", "") or params.get("post_caption") or "")
+        brief = find_job_transcript(job_id, getattr(app_settings, "OUTPUT_DIR", "data/outputs"))
+        if not brief and not needs_generated_copy(title, caption):
+            return None
+        intent = str(getattr(reup_config, "post_intent", "") or "").strip()
+        posts = write_facebook_posts(
+            intent=intent,
+            brand_title=title,
+            video_brief=brief,
+            page_names=["YouTube"],
+        )
+        if not posts:
+            return None
+        self._store_job_social_copy(job_id, reup_config, posts[0])
+        return posts[0]
 
     def append_job_log(
         self,
@@ -1068,6 +1115,21 @@ class BatchQueueManager:
                     f"({os.path.getsize(current_video_path)} bytes)."
                 )
 
+            self.update_job_status(
+                job_id,
+                "COPYRIGHT_CHECK",
+                progress=0.28,
+                message="Check bản quyền Facebook trên video gốc…",
+            )
+            assert_source_copyright_clear(
+                current_video_path,
+                db_path=self.db_path,
+                job_id=job_id,
+                log=lambda msg: self.append_job_log(
+                    job_id, msg, level="INFO", stage="COPYRIGHT_CHECK", progress=0.28
+                ),
+            )
+
             # ------------------------------------------------------------------
             # Stage 2: WATERMARK_REMOVAL
             # ------------------------------------------------------------------
@@ -1491,8 +1553,18 @@ class BatchQueueManager:
                         if clean and clean not in merged_tags:
                             merged_tags.append(clean)
                     raw_tags = merged_tags
-                if suffix and not copy:
-                    p_title = f"{p_title} · {suffix}"
+                plat = ""
+                with self._get_conn() as conn:
+                    prow = conn.execute(
+                        "SELECT platform FROM channels WHERE channel_id = ?",
+                        (channel_id,),
+                    ).fetchone()
+                    plat = str(prow["platform"] or "").lower() if prow else ""
+                if plat in {"facebook", "fb"}:
+                    from app.services.affiliate_link import affiliate_from_mapping, prepend_affiliate_caption
+
+                    aff_url, aff_product = affiliate_from_mapping(reup_config)
+                    p_caption = prepend_affiliate_caption(p_caption, aff_url, aff_product)
                 tags_json = json.dumps(raw_tags if isinstance(raw_tags, list) else [], ensure_ascii=False)
                 p_status = (getattr(reup_config, "publish_status", None) or params.get("publish_status") or "READY").upper()
                 video_note = str(getattr(reup_config, "video_note", "") or "").strip()
@@ -1593,7 +1665,11 @@ class BatchQueueManager:
             if explicit_ids:
                 try:
                     intent = str(getattr(reup_config, "post_intent", "") or "").strip()
-                    want_writer = bool(getattr(reup_config, "agy_write_post", True))
+                    from app.services.post_writer import needs_generated_copy
+
+                    stored_title = str(getattr(reup_config, "post_title", "") or params.get("post_title") or "")
+                    stored_caption = str(getattr(reup_config, "post_caption", "") or params.get("post_caption") or "")
+                    want_writer = True
                     if want_writer:
                         from app.config import settings as app_settings
                         from app.services.post_writer import find_job_transcript, write_facebook_posts
@@ -1623,6 +1699,8 @@ class BatchQueueManager:
                             page_names=names,
                             extra_notes="",
                         )
+                        if generated_posts:
+                            self._store_job_social_copy(job_id, reup_config, generated_posts[0])
                     for i, cid in enumerate(explicit_ids):
                         copy = generated_posts[i] if i < len(generated_posts) else None
                         origin = group_origin.get(cid) or {}
@@ -1643,6 +1721,11 @@ class BatchQueueManager:
                     )
                 except Exception as e:
                     logger.warning(f"Failed to auto-assign video {job_id} to channels {explicit_ids}: {e}")
+            else:
+                try:
+                    self._ensure_job_social_copy(job_id, reup_config, params)
+                except Exception as copy_err:
+                    logger.warning("Job social copy skipped for %s: %s", job_id, copy_err)
 
             # Also drop variants onto matching channels when the user did not pick Pages.
             if variants and not explicit_ids:
@@ -1706,6 +1789,24 @@ class BatchQueueManager:
             self.append_job_log(job_id, "⛔ Đã hủy theo yêu cầu.", level="WARN", stage="CANCELLED")
             raise
 
+        except CopyrightBlockedError as e:
+            logger.warning("Job %s blocked by Facebook copyright check: %s", job_id, e)
+            self.append_job_log(
+                job_id,
+                f"⛔ Dính bản quyền — dừng reup: {e}",
+                level="ERROR",
+                stage="COPYRIGHT_CHECK",
+                progress=0.0,
+            )
+            self.update_job_status(
+                job_id,
+                "FAILED",
+                progress=0.0,
+                error_message=str(e),
+                message=f"Dính bản quyền, chưa reup: {e}",
+            )
+            return self.get_job(job_id) or {}
+
         except Exception as e:
             logger.error(f"Pipeline failure for job {job_id}: {e}")
             self.append_job_log(job_id, f"❌ Lỗi tiến trình: {e}", level="ERROR", stage="FAILED", progress=0.0)
@@ -1722,6 +1823,8 @@ class BatchQueueManager:
             if isinstance(e, FileNotFoundError):
                 raise
             if "không xuất file dở" in str(e):
+                raise
+            if isinstance(e, CopyrightBlockedError):
                 raise
             self.append_job_log(
                 job_id,
@@ -1786,6 +1889,8 @@ class BatchQueueManager:
         except Exception as e:
             logger.error(f"Worker pipeline async execution error for job {job_id}: {e}")
             if isinstance(e, FileNotFoundError):
+                return
+            if isinstance(e, CopyrightBlockedError):
                 return
             if "không xuất file dở" in str(e):
                 return

@@ -8,6 +8,7 @@ import { OutputGallery } from './components/OutputGallery';
 import { ChannelManager } from './components/ChannelManager';
 import { ContentManager } from './components/ContentManager';
 import { ChannelGrowthDashboard } from './components/ChannelGrowthDashboard';
+import { OriginalPublish } from './components/OriginalPublish';
 import { fetchJobs, fetchOutputs, fetchLibrary, checkHealth } from './services/api';
 import { WebSocketClient } from './services/websocket';
 import { loadSession, saveSession, hydrateSession } from './services/session';
@@ -20,7 +21,7 @@ function mergeMedia(a = [], b = []) {
   return Array.from(map.values());
 }
 
-const AVAILABLE_TABS = new Set(['extract', 'workbench', 'queue', 'gallery', 'content', 'channels', 'growth']);
+const AVAILABLE_TABS = new Set(['extract', 'workbench', 'queue', 'gallery', 'content', 'channels', 'original', 'growth']);
 
 function normalizeActiveTab(tab) {
   return AVAILABLE_TABS.has(tab) ? tab : 'extract';
@@ -169,6 +170,9 @@ export default function App() {
       } else if (e.key === '7') {
         e.preventDefault();
         setActiveTab('growth');
+      } else if (e.key === '8') {
+        e.preventDefault();
+        setActiveTab('original');
       } else if (e.key.toLowerCase() === 'b') {
         e.preventDefault();
         setCollapsed((prev) => !prev);
@@ -202,6 +206,8 @@ export default function App() {
         return 'Quản Lý Nội Dung Nguồn';
       case 'channels':
         return 'Fanpage & Đăng Bài';
+      case 'original':
+        return 'Đăng video tự làm';
       case 'growth':
         return 'Tăng trưởng kênh';
       default:
@@ -262,6 +268,10 @@ export default function App() {
 
           <div className={activeTab === 'channels' ? '' : 'hidden'}>
             <ChannelManager />
+          </div>
+
+          <div className={activeTab === 'original' ? '' : 'hidden'}>
+            <OriginalPublish />
           </div>
 
           {activeTab === 'growth' ? (

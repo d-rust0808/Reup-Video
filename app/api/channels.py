@@ -485,7 +485,20 @@ async def assign_video_to_channel(channel_id: str, req: AssignVideoRequest, requ
     """
     video_content_id = f"cvid_{uuid.uuid4().hex[:8]}"
     now = _utc_now_iso()
-    tags_json = json.dumps(req.tags or [], ensure_ascii=False)
+    from app.services.post_writer import _sanitize_post, find_job_transcript
+
+    brief = find_job_transcript(req.job_id or "", settings.OUTPUT_DIR)
+    cleaned = _sanitize_post(
+        {
+            "title": (req.title or "").strip(),
+            "caption": (req.caption or "").strip(),
+            "hashtags": req.tags or [],
+        },
+        brief=brief,
+    )
+    title = cleaned["title"]
+    caption = cleaned["caption"]
+    tags_json = json.dumps(cleaned["hashtags"], ensure_ascii=False)
 
     with get_db_connection(settings.DB_PATH) as conn:
         # Verify channel exists
@@ -500,7 +513,7 @@ async def assign_video_to_channel(channel_id: str, req: AssignVideoRequest, requ
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             video_content_id, channel_id, req.job_id or "",
-            (req.title or "").strip(), (req.caption or "").strip(),
+            title, caption,
             tags_json, (req.publish_status or "DRAFT").upper(),
             req.scheduled_at, req.video_path or "", (req.notes or "").strip(),
             now, now
@@ -522,7 +535,8 @@ async def assign_video_to_channel(channel_id: str, req: AssignVideoRequest, requ
     return {
         "id": video_content_id,
         "channel_id": channel_id,
-        "title": req.title,
+        "title": title,
+        "caption": caption,
         "message": "Đã thêm video vào kênh thành công!"
     }
 

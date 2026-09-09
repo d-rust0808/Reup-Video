@@ -248,7 +248,13 @@ export function ChannelGroupsPanel({ channels = [], onToast }) {
             <article key={ev.id} className="rounded-xl border border-slate-200 p-2.5 text-[11px]">
               <div className="flex items-center justify-between gap-2">
                 <strong className="text-slate-900 truncate">{ev.page_name || ev.channel_name || ev.channel_id}</strong>
-                <span className={`shrink-0 font-bold ${ev.status === 'PUBLISHED' ? 'text-emerald-600' : 'text-amber-600'}`}>{ev.status}</span>
+                <span className={`shrink-0 font-bold ${
+                  ev.status === 'PUBLISHED'
+                    ? 'text-emerald-600'
+                    : ev.status === 'COPYRIGHT_BLOCKED'
+                    ? 'text-rose-700'
+                    : 'text-amber-600'
+                }`}>{ev.status}</span>
               </div>
               <p className="text-slate-500 mt-0.5">
                 {ev.group_name ? `Nhóm: ${ev.group_name} · ` : ''}
@@ -256,6 +262,9 @@ export function ChannelGroupsPanel({ channels = [], onToast }) {
                 {ev.created_at ? new Date(ev.created_at).toLocaleString('vi-VN') : ''}
               </p>
               {ev.title ? <p className="font-bold text-slate-800 mt-1 line-clamp-1">{ev.title}</p> : null}
+              {ev.notes && ev.status === 'COPYRIGHT_BLOCKED' ? (
+                <p className="text-rose-700 mt-1 line-clamp-3">{ev.notes}</p>
+              ) : null}
               {ev.caption ? <p className="text-slate-600 line-clamp-2">{ev.caption}</p> : null}
               {ev.permalink ? (
                 <a

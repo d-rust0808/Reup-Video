@@ -23,7 +23,7 @@ from pydantic import (
 
 WatermarkAlgorithm = Literal["auto", "all", "lama", "telea", "ns", "delogo", "boxblur", "crop", "opencv_telea", "opencv_ns", "none"]
 JobStatusType = Literal[
-    "PENDING", "DOWNLOAD", "DOWNLOADING", "WATERMARK_REMOVAL", "REUP_TRANSFORM", "PROCESSING", "COMPLETED", "FAILED", "CANCELLED"
+    "PENDING", "DOWNLOAD", "DOWNLOADING", "COPYRIGHT_CHECK", "WATERMARK_REMOVAL", "REUP_TRANSFORM", "PROCESSING", "COMPLETED", "FAILED", "CANCELLED"
 ]
 
 
@@ -306,6 +306,13 @@ class ReupConfig(BaseModel):
             val = val / 100.0
         return max(0.0, min(0.40, val))
 
+    @field_validator("affiliate_link", "affiliate_product", mode="before")
+    @classmethod
+    def _normalize_affiliate_text(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v).strip()[:500]
+
     @field_validator("canvas_fill", mode="before")
     @classmethod
     def _normalize_canvas_fill(cls, v: Any) -> float:
@@ -355,6 +362,14 @@ class ReupConfig(BaseModel):
     )
     post_caption: Optional[str] = Field(default=None, description="Caption/Hashtags for post upon completion")
     post_tags: Optional[List[str]] = Field(default_factory=list, description="Tags/Labels for channel video")
+    affiliate_link: str = Field(
+        default="",
+        description="Shopee/affiliate product URL prepended to Facebook Reels and posted as a comment",
+    )
+    affiliate_product: str = Field(
+        default="",
+        description="Product name in the affiliate CTA, e.g. giấy vệ sinh",
+    )
     publish_status: Optional[str] = Field(default="READY", description="Publish status: DRAFT, READY, PUBLISHED")
     overlays: List[OverlayItem] = Field(
         default_factory=list,

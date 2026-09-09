@@ -16,6 +16,15 @@ export const EMPTY_SESSION = {
   autoReup: false,
   selectedChannelId: null,
   targetPlatforms: ['tiktok', 'youtube_shorts', 'facebook'],
+  originalPublish: {
+    group_ids: [],
+    title: '',
+    caption: '',
+    hashtags: '',
+    post_intent: '',
+    affiliate_link: '',
+    affiliate_product: '',
+  },
   frameStudio: {
     enabled: false,
     preset: 'cinema',
@@ -83,6 +92,10 @@ function compactSession(raw) {
     autoReup: isLegacy ? false : src.autoReup === true,
     selectedChannelId: src.selectedChannelId || null,
     targetPlatforms: platforms.length ? platforms : EMPTY_SESSION.targetPlatforms,
+    originalPublish: {
+      ...EMPTY_SESSION.originalPublish,
+      ...(src.originalPublish && typeof src.originalPublish === 'object' ? src.originalPublish : {}),
+    },
     frameStudio: {
       ...EMPTY_SESSION.frameStudio,
       ...(src.frameStudio || {}),

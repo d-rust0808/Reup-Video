@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 from app.config import settings
@@ -18,6 +19,7 @@ ACTIVE_STATUSES = {
     "QUEUED",
     "DOWNLOAD",
     "DOWNLOADING",
+    "COPYRIGHT_CHECK",
     "WATERMARK_REMOVAL",
     "REUP_TRANSFORM",
     "PROCESSING",
@@ -282,12 +284,46 @@ def release_scratch_after_complete(job: Optional[Dict[str, Any]], queue_manager=
     }
 
 
+def purge_stale_downloads(raw_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Delete leftover .ytdl directories and .part/.tmp download scratch files."""
+    root = os.path.abspath(raw_dir or settings.RAW_INPUT_DIR)
+    if not os.path.isdir(root):
+        return {"removed": [], "bytes_freed": 0}
+    removed: List[str] = []
+    bytes_freed = 0
+    try:
+        for name in os.listdir(root):
+            path = os.path.join(root, name)
+            if not _under_root(path, root):
+                continue
+            if os.path.isdir(path) and name.endswith(".ytdl"):
+                try:
+                    for sub_root, _, files in os.walk(path):
+                        for f in files:
+                            try:
+                                bytes_freed += os.path.getsize(os.path.join(sub_root, f))
+                            except OSError:
+                                pass
+                    shutil.rmtree(path, ignore_errors=True)
+                    removed.append(name)
+                except Exception as exc:
+                    logger.warning("Could not delete stale ytdl directory %s: %s", path, exc)
+            elif os.path.isfile(path) and (name.endswith(".part") or name.endswith(".tmp")):
+                size = _unlink(path)
+                if size or not os.path.exists(path):
+                    removed.append(name)
+                    bytes_freed += size
+    except Exception as exc:
+        logger.warning("Could not purge stale downloads: %s", exc)
+    return {"removed": removed, "bytes_freed": bytes_freed}
+
+
 def cleanup_completed_reup(queue_manager) -> Dict[str, Any]:
     """
     Delete finished reup outputs, their source clips, and leftover TTS.
 
     Keeps in-flight jobs (and their sources), cancelled/failed sources (so they
-    can be retried), and seeded sample clips.
+    can be retried), and seeded sample clips. Also sweeps leftover download scratch (.ytdl, .part).
     """
     completed = queue_manager.list_jobs(status_filter="COMPLETED") if queue_manager else []
     source_ids: Set[str] = set()
@@ -318,14 +354,21 @@ def cleanup_completed_reup(queue_manager) -> Dict[str, Any]:
         source_bytes += int(part.get("bytes_freed") or 0)
 
     tts = purge_orphan_tts(keep_ids=protected)
+    stale_dl = purge_stale_downloads()
 
-    bytes_freed = int(outputs.get("bytes_freed") or 0) + source_bytes + int(tts.get("bytes_freed") or 0)
+    bytes_freed = (
+        int(outputs.get("bytes_freed") or 0)
+        + source_bytes
+        + int(tts.get("bytes_freed") or 0)
+        + int(stale_dl.get("bytes_freed") or 0)
+    )
     logger.info(
-        "Cleanup completed reup: %s jobs, %s output files, %s source files, %s TTS, %.2f GB",
+        "Cleanup completed reup: %s jobs, %s output files, %s source files, %s TTS, %s stale DL, %.2f GB",
         jobs_deleted,
         len(outputs.get("removed") or []),
         len(sources_removed),
         len(tts.get("removed") or []),
+        len(stale_dl.get("removed") or []),
         bytes_freed / (1024 ** 3),
     )
     return {
@@ -333,6 +376,7 @@ def cleanup_completed_reup(queue_manager) -> Dict[str, Any]:
         "outputs_removed": len(outputs.get("removed") or []),
         "sources_removed": len(sources_removed),
         "tts_removed": len(tts.get("removed") or []),
+        "stale_downloads_removed": len(stale_dl.get("removed") or []),
         "bytes_freed": bytes_freed,
         "output_files": outputs.get("removed") or [],
         "source_files": sources_removed,

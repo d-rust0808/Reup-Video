@@ -222,6 +222,8 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             video_note: opts.video_note || '',
             post_intent: opts.post_intent || '',
             agy_write_post: opts.agy_write_post !== false,
+            affiliate_link: opts.affiliate_link || '',
+            affiliate_product: opts.affiliate_product || '',
             wm_method: opts.wm_method,
           },
         });
@@ -409,6 +411,8 @@ export function UrlExtractor({ initialMedia, onMediaExtracted, onSelectForWorkbe
             post_title: opts.post_title || item.title,
             post_intent: opts.post_intent || '',
             agy_write_post: opts.agy_write_post !== false,
+            affiliate_link: opts.affiliate_link || '',
+            affiliate_product: opts.affiliate_product || '',
             target_platforms: opts.target_platforms || ['tiktok', 'youtube_shorts', 'facebook'],
             bgm_path: opts.bgm_path || opts.bgm_id,
             bgm_volume: opts.bgm_volume ?? 0.85,

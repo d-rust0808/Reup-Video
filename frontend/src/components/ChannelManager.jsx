@@ -450,8 +450,10 @@ export function ChannelManager() {
   };
 
   const handleCopyCaption = (vid) => {
-    const text = `${vid.title || ''}\n\n${vid.caption || ''}\n${(vid.tags || []).map((t) => `#${t.replace(/\s+/g, '')}`).join(' ')}`;
-    navigator.clipboard.writeText(text.trim());
+    const title = String(vid.title || '').trim();
+    const caption = String(vid.caption || '').trim();
+    const text = (caption.toLowerCase().startsWith(title.toLowerCase()) ? caption : [title, caption].filter(Boolean).join('\n\n')).trim();
+    navigator.clipboard.writeText(text);
     setCopiedId(vid.id);
     setTimeout(() => setCopiedId(null), 2000);
     setToast({ type: 'success', title: 'Đã Copy', message: 'Đã sao chép tiêu đề, caption & hashtags!' });
@@ -726,7 +728,7 @@ export function ChannelManager() {
 
                 {/* Status Filter Tabs */}
                 <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-xl">
-                  {['ALL', 'READY', 'PUBLISHED', 'DRAFT'].map((st) => (
+                  {['ALL', 'READY', 'PUBLISHED', 'DRAFT', 'COPYRIGHT_BLOCKED'].map((st) => (
                     <button
                       key={st}
                       onClick={() => setStatusFilter(st)}
@@ -736,7 +738,7 @@ export function ChannelManager() {
                           : 'text-slate-500 hover:text-slate-800'
                       }`}
                     >
-                      {st === 'ALL' ? 'Tất Cả' : st === 'READY' ? 'Sẵn Sàng' : st === 'PUBLISHED' ? 'Đã Đăng' : 'Bản Nháp'}
+                      {st === 'ALL' ? 'Tất Cả' : st === 'READY' ? 'Sẵn Sàng' : st === 'PUBLISHED' ? 'Đã Đăng' : st === 'COPYRIGHT_BLOCKED' ? 'Chặn bản quyền' : 'Bản Nháp'}
                     </button>
                   ))}
                 </div>
@@ -792,6 +794,7 @@ export function ChannelManager() {
                   filteredVideos.map((vid) => {
                     const isPublished = vid.publish_status === 'PUBLISHED';
                     const isReady = vid.publish_status === 'READY';
+                    const isBlocked = vid.publish_status === 'COPYRIGHT_BLOCKED';
 
                     return (
                       <div
@@ -857,6 +860,8 @@ export function ChannelManager() {
                               className={`px-2.5 py-1 rounded-xl text-xs font-bold border focus:outline-none cursor-pointer ${
                                 isPublished
                                   ? 'bg-purple-50 text-purple-700 border-purple-200'
+                                  : isBlocked
+                                  ? 'bg-rose-50 text-rose-700 border-rose-200'
                                   : isReady
                                   ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                                   : 'bg-amber-50 text-amber-700 border-amber-200'
@@ -865,6 +870,7 @@ export function ChannelManager() {
                               <option value="DRAFT">📝 Bản Nháp</option>
                               <option value="READY">🚀 Sẵn Sàng Đăng</option>
                               <option value="PUBLISHED">✅ Đã Xuất Bản</option>
+                              <option value="COPYRIGHT_BLOCKED">⛔ Chặn bản quyền</option>
                             </select>
 
                             <button
@@ -909,11 +915,11 @@ export function ChannelManager() {
                             <span className={`font-bold ${
                               vid.distribution_status === 'PUBLISHED'
                                 ? 'text-emerald-700'
-                                : vid.distribution_status === 'FAILED'
+                                : ['FAILED', 'COPYRIGHT_BLOCKED'].includes(vid.distribution_status)
                                 ? 'text-rose-700'
                                 : 'text-blue-700'
                             }`}>
-                              Facebook: {vid.distribution_status}
+                              Facebook: {vid.distribution_status === 'COPYRIGHT_BLOCKED' ? 'Chặn bản quyền' : vid.distribution_status}
                               {vid.distribution_error ? ` · ${vid.distribution_error}` : ''}
                             </span>
                             {vid.facebook_permalink && (

@@ -47,6 +47,24 @@ def clean():
             except Exception as e:
                 print(f"  Failed to delete {fpath}: {e}")
 
+    # Dọn dẹp các thư mục tải dang dở .ytdl và file .part trong data/input
+    input_dir = ROOT_DIR / "data" / "input"
+    if input_dir.exists() and input_dir.is_dir():
+        for p in input_dir.rglob("*.ytdl"):
+            if p.is_dir():
+                try:
+                    shutil.rmtree(p)
+                    print(f"  Removed orphan ytdl dir: {p.relative_to(ROOT_DIR)}")
+                except Exception as e:
+                    print(f"  Failed to delete {p}: {e}")
+        for p in input_dir.rglob("*.part"):
+            if p.is_file():
+                try:
+                    p.unlink()
+                    print(f"  Removed incomplete part file: {p.relative_to(ROOT_DIR)}")
+                except Exception as e:
+                    print(f"  Failed to delete {p}: {e}")
+
     print("✨ Clean complete!")
 
 if __name__ == "__main__":

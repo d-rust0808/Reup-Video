@@ -3,11 +3,12 @@ import {
   bindFacebookPage,
   fetchFacebookPages,
   fetchFacebookSettings,
+  fetchFacebookShopStatus,
   importFacebookPage,
   saveFacebookSettings,
   syncFacebookPages,
 } from '../services/api';
-import { CheckCircle2, KeyRound, Loader2, RefreshCw, Send, ShieldCheck } from 'lucide-react';
+import { CheckCircle2, KeyRound, Loader2, RefreshCw, Search, Send, ShieldCheck, ShoppingBag } from 'lucide-react';
 
 const EMPTY_FORM = {
   app_id: '',
@@ -27,6 +28,7 @@ export function FacebookPublishingPanel({ activeChannel, onChanged }) {
   const [autoPublish, setAutoPublish] = useState(true);
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState(null);
+  const [shopScan, setShopScan] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -122,6 +124,20 @@ export function FacebookPublishingPanel({ activeChannel, onChanged }) {
     }
   };
 
+  const handleShopScan = async () => {
+    setBusy('shop');
+    setMessage(null);
+    try {
+      const data = await fetchFacebookShopStatus();
+      setShopScan(data);
+      setMessage({ type: 'success', text: data.message || 'Đã quét xong Fanpage' });
+    } catch (error) {
+      setMessage({ type: 'error', text: error.message });
+    } finally {
+      setBusy('');
+    }
+  };
+
   const handleBind = async () => {
     if (!activeChannel || !selectedPageId) return;
     setBusy('bind');
@@ -194,7 +210,7 @@ export function FacebookPublishingPanel({ activeChannel, onChanged }) {
               rows={2}
               value={form.user_token}
               onChange={(e) => setForm({ ...form, user_token: e.target.value })}
-              placeholder="User Access Token có pages_show_list, pages_read_engagement, pages_manage_posts"
+              placeholder="User Access Token có pages_show_list, pages_read_engagement, pages_manage_posts, pages_manage_engagement"
               className="sm:col-span-2 px-3 py-2.5 rounded-xl bg-white/10 border border-white/15 placeholder:text-blue-200/50 focus:outline-none focus:border-sky-300 resize-none"
             />
             <div className="flex items-center gap-2">
@@ -285,7 +301,7 @@ export function FacebookPublishingPanel({ activeChannel, onChanged }) {
                 <p className="font-extrabold text-amber-100">Page mới không nằm trong token — không phải thiếu tên quyền.</p>
                 <ol className="list-decimal pl-4 space-y-0.5 text-amber-50/90">
                   <li>Graph Explorer: app <strong>JENJO TREEBOT</strong> ({settings?.app_id || form.app_id || '3287685321396427'}), loại <strong>Mã người dùng</strong>.</li>
-                  <li>Quyền cần có: <code className="text-[9px]">pages_show_list</code>, <code className="text-[9px]">pages_read_engagement</code>, <code className="text-[9px]">pages_manage_posts</code>.</li>
+                  <li>Quyền cần có: <code className="text-[9px]">pages_show_list</code>, <code className="text-[9px]">pages_read_engagement</code>, <code className="text-[9px]">pages_manage_posts</code>. Thêm <code className="text-[9px]">pages_manage_engagement</code> để studio tự bình luận link giỏ hàng trên Reel.</li>
                   <li>Bấm <strong>Generate Access Token</strong>. Cửa sổ Facebook hỏi chọn Trang — mở <strong>Xem thêm trang</strong>, tick page mới (vd. Phim Hay Nè). Đừng để nguyên 22 trang cũ.</li>
                   <li>Copy token, dán vào ô trên, bấm <strong>Xác thực &amp; lưu</strong>. Generate xong mà không dán vào app thì app vẫn dùng token cũ.</li>
                 </ol>
@@ -345,6 +361,64 @@ export function FacebookPublishingPanel({ activeChannel, onChanged }) {
           )}
         </div>
       </div>
+
+      {connected ? (
+        <div className="border-t border-white/10 p-5 md:p-6 space-y-3 bg-black/10">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-wider text-amber-200">
+                <ShoppingBag className="w-4 h-4" /> Giỏ hàng Shopee
+              </div>
+              <p className="text-xs text-blue-100/75 mt-1">
+                Shopee không cho API danh sách «Đã liên kết». App quét bài gần đây trên từng Fanpage:
+                có link shopee.vn / shp.ee thì page đó gắn giỏ được.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleShopScan}
+              disabled={!!busy}
+              className="px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-amber-950 font-extrabold text-xs flex items-center gap-1.5 disabled:opacity-50 shrink-0"
+            >
+              {busy === 'shop' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+              {busy === 'shop' ? 'Đang quét…' : 'Kiểm tra từng page'}
+            </button>
+          </div>
+          {shopScan?.pages?.length ? (
+            <div className="overflow-x-auto rounded-2xl border border-white/10">
+              <table className="w-full text-[11px]">
+                <thead className="bg-white/5 text-blue-200 font-bold">
+                  <tr>
+                    <th className="text-left px-3 py-2">Fanpage</th>
+                    <th className="text-right px-3 py-2">Follow</th>
+                    <th className="text-left px-3 py-2">Kết quả</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shopScan.pages.map((row) => {
+                    const tone =
+                      row.status === 'has_cart_signal'
+                        ? 'text-emerald-200'
+                        : row.status === 'no_token' || row.status === 'cannot_read'
+                          ? 'text-rose-200'
+                          : 'text-amber-100';
+                    return (
+                      <tr key={row.page_id} className="border-t border-white/10">
+                        <td className="px-3 py-2 font-bold text-white">{row.name}</td>
+                        <td className="px-3 py-2 text-right text-blue-100/80">{row.followers || 0}</td>
+                        <td className={`px-3 py-2 ${tone}`}>
+                          <span className="font-extrabold">{row.label}</span>
+                          {row.detail ? <span className="block text-blue-100/70 font-medium">{row.detail}</span> : null}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </section>
   );
 }

@@ -22,6 +22,25 @@ logger = logging.getLogger("api.outputs")
 router = APIRouter()
 
 
+def _public_post_copy(job_id: str, raw_cfg: dict) -> tuple[str, str]:
+    title = str((raw_cfg or {}).get("post_title") or "")
+    caption = str((raw_cfg or {}).get("post_caption") or "")
+    tags = (raw_cfg or {}).get("post_tags") or []
+    try:
+        from app.services.post_writer import _sanitize_post, find_job_transcript, needs_generated_copy
+
+        brief = find_job_transcript(job_id, settings.OUTPUT_DIR)
+        if not needs_generated_copy(title, caption, brief=brief):
+            return title, caption
+        cleaned = _sanitize_post(
+            {"title": title, "caption": caption, "hashtags": tags if isinstance(tags, list) else []},
+            brief=brief,
+        )
+        return cleaned["title"], cleaned["caption"]
+    except Exception:
+        return title, caption
+
+
 def _get_queue_manager(request: Request) -> BatchQueueManager:
     """Helper retrieving BatchQueueManager instance from app state."""
     qm = getattr(request.app.state, "queue_manager", None)
@@ -66,6 +85,7 @@ async def list_outputs(request: Request):
                 if vertical and str(vertical).endswith(".mp4")
                 else j["job_id"]
             )
+            post_title, post_caption = _public_post_copy(j["job_id"], raw_cfg or {})
             outputs.append({
                 "job_id": j["job_id"],
                 "stream_job_id": stream_job_id,
@@ -74,8 +94,8 @@ async def list_outputs(request: Request):
                 "filename": os.path.basename(out_p),
                 "file_size": os.path.getsize(out_p),
                 "created_at": j.get("created_at"),
-                "title": (raw_cfg or {}).get("post_title"),
-                "caption": (raw_cfg or {}).get("post_caption"),
+                "title": post_title,
+                "caption": post_caption,
                 "platform": j.get("platform"),
                 "play_platform": (
                     os.path.basename(vertical).rsplit(".", 2)[-2]

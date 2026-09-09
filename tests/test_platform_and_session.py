@@ -242,10 +242,12 @@ def test_build_caption_hashtags():
     assert "Video mới" not in empty
     assert "#vietsub" not in empty.lower()
     assert "#youtube" not in empty.lower()
-    tagged = build_caption("Mèo vui", "facebook", ["reup", "vietsub", "reels"])
+    tagged = build_caption("Mèo vui", "facebook", ["reup", "vietsub", "reels", "xuhuong"])
     assert "#reup" not in tagged.lower()
     assert "#vietsub" not in tagged.lower()
-    assert "#reels" in tagged
+    assert "#reels" not in tagged.lower()
+    assert "#youtube" not in tagged.lower()
+    assert "#xuhuong" in tagged.lower() or "#thucung" in tagged.lower() or "#fyp" in tagged.lower()
 
 def test_failed_ws_payload_reads_error_message():
     import inspect

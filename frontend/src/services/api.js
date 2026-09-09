@@ -151,6 +151,52 @@ export async function retryJob(jobId) {
   return res.json();
 }
 
+export async function publishJobToGroups(jobId, { group_ids = [], channel_ids = [], affiliate_link = '', affiliate_product = '', title = '', caption = '', hashtags = [], post_intent = '' } = {}) {
+  const res = await fetch(`${getApiBase()}/jobs/${encodeURIComponent(jobId)}/publish`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_ids, channel_ids, affiliate_link, affiliate_product, title, caption, hashtags, post_intent }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Không đăng được video lên nhóm');
+  }
+  return res.json();
+}
+
+export async function publishOriginalVideos({
+  paths = [],
+  group_ids = [],
+  channel_ids = [],
+  title = '',
+  caption = '',
+  hashtags = [],
+  post_intent = '',
+  affiliate_link = '',
+  affiliate_product = '',
+} = {}) {
+  const res = await fetch(`${getApiBase()}/jobs/publish-original`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      paths,
+      group_ids,
+      channel_ids,
+      title,
+      caption,
+      hashtags,
+      post_intent,
+      affiliate_link,
+      affiliate_product,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Không đăng được video tự làm');
+  }
+  return res.json();
+}
+
 export async function retryFailedJobs() {
   const res = await fetch(`${getApiBase()}/jobs/retry-failed`, { method: 'POST' });
   if (!res.ok) throw new Error('Không chạy lại hàng loạt');
@@ -503,6 +549,15 @@ export async function importFacebookPage(page) {
 export async function fetchFacebookPages() {
   const res = await fetch(`${getApiBase()}/facebook/pages`);
   if (!res.ok) throw new Error('Không tải được danh sách Fanpage');
+  return res.json();
+}
+
+export async function fetchFacebookShopStatus() {
+  const res = await fetch(`${getApiBase()}/facebook/pages/shop-status`, { cache: 'no-store' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Không kiểm tra được giỏ hàng Shopee');
+  }
   return res.json();
 }
 
