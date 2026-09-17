@@ -5,28 +5,11 @@
 import { DESKTOP_BACKEND_WS } from './backend';
 
 function resolveJobsWsUrl() {
-  if (typeof window === 'undefined') {
+  if (typeof window === 'undefined' || window.location.protocol === 'file:' || !window.location.host) {
     return `${DESKTOP_BACKEND_WS}/ws/jobs`;
   }
-  const hostName = window.location.hostname;
-  const port = String(window.location.port || '');
-  const loopback = hostName === '127.0.0.1' || hostName === 'localhost';
-  // Dev Vite proxies /ws → backend. Same-origin avoids private-network WS failures.
-  if (loopback && port === '6001') {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${protocol}//${window.location.host}/ws/jobs`;
-  }
-  const desktop = !!window.electronAPI?.isDesktop || window.location.protocol === 'file:';
-  const onBackend = loopback && port === '6000';
-  if (desktop && !onBackend) {
-    return `${DESKTOP_BACKEND_WS}/ws/jobs`;
-  }
-  const host = window.location.host;
-  const protocol = window.location.protocol;
-  if (protocol === 'file:' || !host) {
-    return `${DESKTOP_BACKEND_WS}/ws/jobs`;
-  }
-  return `${protocol === 'https:' ? 'wss:' : 'ws:'}//${host}/ws/jobs`;
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.host}/ws/jobs`;
 }
 
 class WebSocketService {

@@ -265,7 +265,12 @@ class DouyinScraper(BaseScraper):
 
                     # Tier 1: page hydration JSON survives when both detail APIs
                     # are rate-limited, including /jingxuan?modal_id= links.
-                    page_urls = [resolved_url, f"https://www.douyin.com/video/{item_id}"]
+                    page_urls = [
+                        resolved_url,
+                        f"https://www.douyin.com/video/{item_id}",
+                        f"https://www.douyin.com/jingxuan?modal_id={item_id}",
+                        f"https://www.iesdouyin.com/share/video/{item_id}",
+                    ]
                     seen_pages = set()
                     for page_url in page_urls:
                         if not page_url or page_url in seen_pages:
@@ -286,6 +291,19 @@ class DouyinScraper(BaseScraper):
                     logger.debug(f"Douyin ttwid detail fetch exception: {e}")
         except Exception as e:
             logger.debug(f"Douyin HTTP scraping failed for {url_clean}: {e}")
+
+        # Tier 2: unsigned httpx hits Argus (403 Uifid). Chrome signs the same
+        # /aweme/detail/ call the catalog list already uses.
+        if str(item_id).isdigit() and len(str(item_id)) >= 15:
+            try:
+                from app.scraper.douyin_list import fetch_douyin_aweme
+
+                aweme = await fetch_douyin_aweme(item_id)
+                metadata = self._metadata_from_aweme(aweme, item_id, url_clean) if aweme else None
+                if metadata:
+                    return metadata
+            except Exception as e:
+                logger.info("Douyin browser video fallback failed for %s: %s", item_id, e)
 
         raise RuntimeError(
             f"Douyin tạm chặn truy xuất video {item_id}; vui lòng thử lại sau ít giây."

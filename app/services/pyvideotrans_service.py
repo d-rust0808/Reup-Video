@@ -23,11 +23,13 @@ from app.services.vietsub_rules import (
     CHUNK_SIZE,
     PROMPT_VERSION,
     contains_cjk,
+    infer_stt_source_lang,
     is_invalid_translation,
     merge_particles_and_shorts,
     reflow_incomplete_sentences,
     regroup_words_to_sentences,
     resolve_vietsub_style,
+    salvage_stt_cues,
     split_long_cues,
     VI_REFLOW_MAX_CHARS,
     VI_REFLOW_MAX_DUR,
@@ -42,7 +44,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODULE_VIDEOTRANS_PATH = str(PROJECT_ROOT / "app" / "modules" / "videotrans")
 _WHISPER_CACHE: Dict[str, Any] = {"model": None, "name": None, "device": None}
-_STT_DECODE_TAG = "b5c3"
+_STT_DECODE_TAG = "b5c4"
 STT_GAP_MIN_SEC = 8.0
 STT_OPENING_SEC = 150.0
 STT_OPENING_MIN_GAP = 3.5
@@ -275,6 +277,10 @@ class PyVideoTransService:
         return stub_srt_path
 
     def _whisper_device(self) -> tuple:
+        from app.services.onnx_whisper import torch_import_broken
+
+        if torch_import_broken():
+            return "cpu", "int8"
         try:
             import torch
             if torch.cuda.is_available():
@@ -294,6 +300,13 @@ class PyVideoTransService:
             "ja-jp": "ja", "japanese": "ja", "ko-kr": "ko", "korean": "ko",
         }
         return aliases.get(lang, lang.split("-")[0])
+
+    def _resolve_whisper_lang(self, detect_lang: str, media_path: str = "") -> Optional[str]:
+        resolved = self._normalize_whisper_lang(detect_lang)
+        if resolved:
+            return resolved
+        inferred = infer_stt_source_lang(media_path)
+        return self._normalize_whisper_lang(inferred or "")
 
     def _whisper_download_root(self) -> str:
         try:
@@ -488,6 +501,59 @@ class PyVideoTransService:
             return regroup_words_to_sentences(words)
         return split_long_cues(raw_cues)
 
+    def _decode_whisper_cues(
+        self,
+        model,
+        audio_path: str,
+        *,
+        language: Optional[str],
+        use_vad: bool,
+        audio_dur: float = 0.0,
+        on_status: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[List[Dict[str, Any]], Any]:
+        from app.services.activity import emit_status
+
+        kwargs: Dict[str, Any] = {
+            "language": language,
+            "vad_filter": use_vad,
+            "beam_size": 5,
+            "best_of": 5,
+            "temperature": 0.0,
+            "condition_on_previous_text": False,
+            "word_timestamps": True,
+            "no_speech_threshold": 0.45,
+        }
+        if use_vad:
+            kwargs["vad_parameters"] = _STT_VAD
+        prev_tqdm = os.environ.get("TQDM_DISABLE")
+        os.environ["TQDM_DISABLE"] = "1"
+        try:
+            segments_iter, info = model.transcribe(audio_path, **kwargs)
+            segments = []
+            last_emit_end = -30.0
+            for seg in segments_iter:
+                segments.append(seg)
+                end = float(getattr(seg, "end", 0.0) or 0.0)
+                if end - last_emit_end >= 20 or len(segments) == 1:
+                    last_emit_end = end
+                    if audio_dur > 0:
+                        pct = max(0, min(100, int(end * 100 / audio_dur)))
+                        emit_status(
+                            on_status,
+                            f"🎧 Whisper đã nhận {len(segments)} câu (~{end:.0f}/{audio_dur:.0f}s, {pct}%)...",
+                        )
+                    else:
+                        emit_status(
+                            on_status,
+                            f"🎧 Whisper đã nhận {len(segments)} câu (~{end:.0f}s audio)...",
+                        )
+        finally:
+            if prev_tqdm is None:
+                os.environ.pop("TQDM_DISABLE", None)
+            else:
+                os.environ["TQDM_DISABLE"] = prev_tqdm
+        return self._whisper_segments_to_cues(segments), info
+
     def _shift_cues(self, cues: List[Dict[str, Any]], offset: float) -> List[Dict[str, Any]]:
         shifted = []
         for cue in cues:
@@ -544,8 +610,10 @@ class PyVideoTransService:
                 "vad_filter": use_vad,
                 "beam_size": 5,
                 "best_of": 5,
+                "temperature": 0.0,
                 "condition_on_previous_text": False,
                 "word_timestamps": True,
+                "no_speech_threshold": 0.45,
             }
             if use_vad:
                 kwargs["vad_parameters"] = _STT_VAD
@@ -680,6 +748,11 @@ class PyVideoTransService:
         from app.services.tts_service import parse_srt_segments
 
         cues = parse_srt_segments(srt_path) if os.path.isfile(srt_path) else []
+        salvaged = salvage_stt_cues(cues)
+        if salvaged and [str(c.get("text") or "") for c in salvaged] != [str(c.get("text") or "") for c in cues]:
+            self._write_cue_dicts(srt_path, salvaged)
+            cues = salvaged
+            cue_count = len(cues)
         fail_reason = stt_hard_fail_reason(cues)
         if fail_reason:
             logger.warning(f"STT hard-fail ({fail_reason}): {len(cues)} cues -> skip Vietsub")
@@ -697,6 +770,39 @@ class PyVideoTransService:
             "detected_language": detected,
             "model": model_name,
             "cue_count": cue_count or len(cues),
+        }
+
+    def _stt_finish_from_cues(
+        self,
+        cues: Optional[List[Dict[str, Any]]],
+        detected: Optional[str],
+        used_name: str,
+        srt_path: str,
+        cache_key: str,
+    ) -> Dict[str, Any]:
+        count = self._write_cue_dicts(srt_path, cues) if cues else 0
+        if count > 0 and os.path.exists(srt_path) and os.path.getsize(srt_path) > 0:
+            gated = self._stt_gate_result(srt_path, detected, used_name, count)
+            if gated["status"] == "success":
+                logger.info("STT %s wrote %s cues (%s) -> %s", used_name, count, detected, srt_path)
+                self._stt_cache_store(
+                    cache_key,
+                    srt_path,
+                    {
+                        "detected_language": detected,
+                        "model": used_name,
+                        "cue_count": count,
+                    },
+                )
+                return gated
+            return gated
+        logger.warning("STT %s produced zero cues", used_name)
+        return {
+            "status": "empty",
+            "srt_path": None,
+            "detected_language": detected,
+            "model": used_name,
+            "stt_fail_reason": "empty_audio",
         }
 
     def speech_to_text(
@@ -718,8 +824,7 @@ class PyVideoTransService:
         target_dir = os.path.abspath(output_dir) if output_dir else os.path.dirname(os.path.abspath(video_or_audio_path))
         os.makedirs(target_dir, exist_ok=True)
 
-        w_lang = self._normalize_whisper_lang(detect_lang)
-        device, compute_type = self._whisper_device()
+        w_lang = self._resolve_whisper_lang(detect_lang, video_or_audio_path)
         requested = (model_name or "base").strip() or "base"
         # tiny wrecks Chinese + BGM; small is never selected (SPEC: base only).
         if requested in ("tiny", "small"):
@@ -737,13 +842,13 @@ class PyVideoTransService:
                 cached.get("model") or "cache",
                 int(cached.get("cue_count") or 0),
             )
-            if gated["status"] != "success":
+            if gated["status"] == "success":
+                emit_status(
+                    on_status,
+                    f"🎧 Dùng lại Whisper đã nhận trước đó ({cached.get('cue_count') or 0} câu) — bỏ qua nhận dạng lại.",
+                )
                 return gated
-            emit_status(
-                on_status,
-                f"🎧 Dùng lại Whisper đã nhận trước đó ({cached.get('cue_count') or 0} câu) — bỏ qua nhận dạng lại.",
-            )
-            return gated
+            logger.info("STT cache failed quality gate; re-running Whisper")
 
         emit_status(on_status, "🎧 Đang tách audio WAV cho Whisper...")
         audio_for_stt = self._extract_stt_wav(video_or_audio_path, target_dir, max_seconds=max_seconds)
@@ -751,7 +856,37 @@ class PyVideoTransService:
         audio_dur = self._media_duration_sec(audio_for_stt)
 
         try:
+            from app.services.onnx_whisper import torch_import_broken
             from app.services.performance import gpu_task_slot
+            from app.services.whisper_cpp_stt import transcribe_wav as cpp_transcribe_wav
+
+            if torch_import_broken():
+                # Do not import onnxruntime here: on this Windows box it raises
+                # WinError 1114 or access-violates, and the job never reaches a
+                # working STT engine. whisper-cli.exe is a separate process.
+                try:
+                    emit_status(
+                        on_status,
+                        "🎧 Torch/ONNX DLL lỗi — chuyển sang whisper.cpp (file .exe độc lập)...",
+                    )
+                    cues, detected = cpp_transcribe_wav(
+                        audio_for_stt,
+                        language=w_lang or "zh",
+                        on_status=on_status,
+                    )
+                    return self._stt_finish_from_cues(
+                        cues, detected, "whisper-cpp-base", srt_path, cache_key
+                    )
+                except Exception as exc:
+                    logger.warning("faster_whisper STT failed: %s", exc)
+                    return {
+                        "status": "fallback",
+                        "srt_path": None,
+                        "warning": f"STT failed: {exc}",
+                        "stt_fail_reason": "engine_failed",
+                    }
+
+            device, compute_type = self._whisper_device()
             with gpu_task_slot(enabled=device == "cuda"):
                 emit_status(
                     on_status,
@@ -770,102 +905,60 @@ class PyVideoTransService:
                     on_status,
                     f"🎧 Whisper '{used_name}' đang nhận dạng lời thoại (lang={w_lang or 'auto'}{dur_note}) — {eta}...",
                 )
-                prev_tqdm = os.environ.get("TQDM_DISABLE")
-                os.environ["TQDM_DISABLE"] = "1"
-                try:
-                    segments_iter, info = fw_model.transcribe(
-                        audio_for_stt,
-                        language=w_lang,
-                        vad_filter=True,
-                        vad_parameters=_STT_VAD,
-                        beam_size=5,
-                        best_of=5,
-                        condition_on_previous_text=True,
-                        word_timestamps=True,
-                    )
-                finally:
-                    if prev_tqdm is None:
-                        os.environ.pop("TQDM_DISABLE", None)
-                    else:
-                        os.environ["TQDM_DISABLE"] = prev_tqdm
-                # faster-whisper yields lazily; drain here so cancel/progress can run between cues.
-                segments = []
-                last_emit_end = -30.0
-                for seg in segments_iter:
-                    segments.append(seg)
-                    end = float(getattr(seg, "end", 0.0) or 0.0)
-                    if end - last_emit_end >= 20 or len(segments) == 1:
-                        last_emit_end = end
-                        if audio_dur > 0:
-                            pct = max(0, min(100, int(end * 100 / audio_dur)))
-                            emit_status(
-                                on_status,
-                                f"🎧 Whisper đã nhận {len(segments)} câu (~{end:.0f}/{audio_dur:.0f}s, {pct}%)...",
-                            )
-                        else:
-                            emit_status(
-                                on_status,
-                                f"🎧 Whisper đã nhận {len(segments)} câu (~{end:.0f}s audio)...",
-                            )
-            words = []
-            seg_list = []
-            count = 0
-            cues: List[Dict[str, Any]] = []
-            for seg in segments:
-                seg_list.append(seg)
-                wlist = getattr(seg, "words", None) or []
-                if wlist:
-                    for w in wlist:
-                        token = (getattr(w, "word", None) or getattr(w, "text", None) or "").strip()
-                        if not token:
-                            continue
-                        words.append({
-                            "text": token,
-                            "start": float(getattr(w, "start", 0.0) or 0.0),
-                            "end": float(getattr(w, "end", 0.0) or 0.0),
-                        })
-            if words:
-                cues = regroup_words_to_sentences(words)
-                logger.info(f"STT sentence-regrouped {len(words)} words -> {len(cues)} cues")
-            else:
-                raw_cues = []
-                for seg in seg_list:
-                    text = (getattr(seg, "text", None) or "").strip()
-                    text = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", text)
-                    if not text:
-                        continue
-                    start = float(getattr(seg, "start", 0.0) or 0.0)
-                    end = float(getattr(seg, "end", start + 0.5) or (start + 0.5))
-                    raw_cues.append({
-                        "start_time": start,
-                        "end_time": max(start + 0.35, end),
-                        "duration": max(0.35, end - start),
-                        "text": text,
-                    })
-                cues = split_long_cues(raw_cues)
+                cues, info = self._decode_whisper_cues(
+                    fw_model,
+                    audio_for_stt,
+                    language=w_lang,
+                    use_vad=True,
+                    audio_dur=audio_dur,
+                    on_status=on_status,
+                )
+                count = 0
                 if cues:
-                    logger.info(f"STT split {len(raw_cues)} Whisper blobs -> {len(cues)} picture cues")
-                else:
-                    count = self._write_srt(srt_path, seg_list)
-                    cues = []
-            if cues:
-                with gpu_task_slot(enabled=device == "cuda"):
-                    filled = self._refill_stt_gaps(
+                    logger.info("STT decoded %d cues (vad=on)", len(cues))
+                    with gpu_task_slot(enabled=device == "cuda"):
+                        filled = self._refill_stt_gaps(
+                            fw_model,
+                            audio_for_stt,
+                            cues,
+                            language=w_lang,
+                            duration=audio_dur,
+                            on_status=on_status,
+                        )
+                    if filled:
+                        cues = filled
+                    count = self._write_cue_dicts(srt_path, cues)
+            detected = getattr(info, "language", None)
+            gated: Optional[Dict[str, Any]] = None
+            if count > 0 and os.path.exists(srt_path) and os.path.getsize(srt_path) > 0:
+                gated = self._stt_gate_result(srt_path, detected, used_name, count)
+            if gated is None or gated.get("status") != "success":
+                emit_status(
+                    on_status,
+                    "🎧 Whisper chạy lại không VAD (lần trước bị lọc nhạc/ảo giác)...",
+                )
+                retry_lang = w_lang or self._normalize_whisper_lang(detected or "") or "zh"
+                retry_cues, retry_info = self._decode_whisper_cues(
+                    fw_model,
+                    audio_for_stt,
+                    language=retry_lang,
+                    use_vad=False,
+                    audio_dur=audio_dur,
+                    on_status=on_status,
+                )
+                if retry_cues:
+                    retry_cues = self._refill_stt_gaps(
                         fw_model,
                         audio_for_stt,
-                        cues,
-                        language=w_lang,
+                        retry_cues,
+                        language=retry_lang,
                         duration=audio_dur,
                         on_status=on_status,
                     )
-                if filled:
-                    cues = filled
-                count = self._write_cue_dicts(srt_path, cues)
-            detected = getattr(info, "language", None)
-            if count > 0 and os.path.exists(srt_path) and os.path.getsize(srt_path) > 0:
-                gated = self._stt_gate_result(srt_path, detected, used_name, count)
-                if gated["status"] != "success":
-                    return gated
+                    count = self._write_cue_dicts(srt_path, retry_cues)
+                    detected = getattr(retry_info, "language", None) or retry_lang or detected
+                    gated = self._stt_gate_result(srt_path, detected, used_name, count)
+            if gated and gated.get("status") == "success":
                 logger.info(f"STT wrote {count} cues ({detected}) -> {srt_path}")
                 self._stt_cache_store(
                     cache_key,
@@ -876,6 +969,8 @@ class PyVideoTransService:
                         "cue_count": count,
                     },
                 )
+                return gated
+            if gated:
                 return gated
             if os.path.exists(srt_path):
                 try:
@@ -896,6 +991,7 @@ class PyVideoTransService:
                 "status": "fallback",
                 "srt_path": None,
                 "warning": f"STT failed: {e}",
+                "stt_fail_reason": "engine_failed",
             }
         finally:
             if tmp_wav and os.path.exists(tmp_wav):

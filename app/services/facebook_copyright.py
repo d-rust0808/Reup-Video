@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.core.database import get_db_connection
@@ -16,6 +17,11 @@ logger = logging.getLogger(__name__)
 
 
 COPYRIGHT_WAIT_SECONDS = 360
+FACEBOOK_SESSION_EXPIRED_MESSAGE = (
+    "Token Facebook đã hết hạn (đổi mật khẩu hoặc Facebook thu hồi session). "
+    "Vào Kênh → Facebook, dán user token mới rồi chạy lại job. "
+    "Đây không phải dính bản quyền."
+)
 
 @dataclass(frozen=True)
 class CopyrightVerdict:
@@ -30,6 +36,10 @@ class CopyrightVerdict:
     @property
     def pending(self) -> bool:
         return self.state == "pending"
+
+    @property
+    def auth_expired(self) -> bool:
+        return self.state == "auth"
 
 
 def _as_dict(value: Any) -> Dict[str, Any]:
@@ -134,6 +144,44 @@ def evaluate_copyright(payload: Dict[str, Any]) -> CopyrightVerdict:
 
 class CopyrightBlockedError(RuntimeError):
     """Source matched Facebook Rights Manager; the reup pipeline must stop."""
+
+
+class FacebookSessionExpiredError(RuntimeError):
+    """Copyright scan could not run because the Facebook session is dead."""
+
+
+def mark_facebook_connection_expired(
+    db_path: str,
+    *,
+    page_id: str = "",
+    error: str = "",
+) -> None:
+    if not db_path:
+        return
+    detail = (error or FACEBOOK_SESSION_EXPIRED_MESSAGE)[:1000]
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db_connection(db_path) as conn:
+        if page_id:
+            conn.execute(
+                """
+                UPDATE facebook_connections
+                SET status = 'EXPIRED', last_error = ?, updated_at = ?
+                WHERE id = (
+                    SELECT connection_id FROM facebook_pages WHERE page_id = ?
+                )
+                """,
+                (detail, now, page_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE facebook_connections
+                SET status = 'EXPIRED', last_error = ?, updated_at = ?
+                WHERE status = 'CONNECTED'
+                """,
+                (detail, now),
+            )
+        conn.commit()
 
 
 def find_ffprobe_binary() -> Optional[str]:
@@ -334,6 +382,18 @@ def scan_source_on_facebook(
                 return last
             except FacebookAPIError as exc:
                 last = CopyrightVerdict("unknown", str(exc)[:300])
+                if exc.is_auth_error:
+                    mark_facebook_connection_expired(
+                        db_path,
+                        page_id=page.get("page_id") or "",
+                        error=str(exc),
+                    )
+                    last = CopyrightVerdict("auth", FACEBOOK_SESSION_EXPIRED_MESSAGE)
+                    _log(
+                        "⚠️ Token Facebook hết hạn — không check được bản quyền. "
+                        "Cần kết nối lại Fanpage (không phải dính bản quyền)."
+                    )
+                    break
                 if exc.status_code == 429 or exc.code in {4, 17, 32, 613, 80004}:
                     _log(f"Facebook rate-limit page {page.get('name') or page['page_id']}, thử page khác")
                     continue
@@ -385,6 +445,10 @@ def assert_source_copyright_clear(
         if log:
             log("✅ Facebook không thấy trùng bản quyền trên clip gốc — chạy reup")
         return verdict
+    if verdict.auth_expired:
+        raise FacebookSessionExpiredError(
+            verdict.summary or FACEBOOK_SESSION_EXPIRED_MESSAGE
+        )
     if verdict.blocked:
         raise CopyrightBlockedError(verdict.summary)
     raise CopyrightBlockedError(

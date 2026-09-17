@@ -6,14 +6,16 @@
     <link rel="apple-touch-icon" href="/logo.jpg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Reup Studio AI — Hệ Thống Tách Watermark & Reup Video Tự Động</title>
-    
-    <!-- Google Fonts: Plus Jakarta Sans & Inter for Premium Clean SaaS Typography -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
+    <!-- Local system fonts only. Google Fonts is render-blocking and leaves
+         packaged Electron on a blank white window when the request hangs. -->
+    <style>
+      html, body, #root { min-height: 100vh; margin: 0; background: #f8fafc; }
+      #root:empty {
+        display: flex; align-items: center; justify-content: center;
+        color: #64748b; font: 700 15px/1.4 system-ui, Segoe UI, sans-serif;
+      }
+      #root:empty::before { content: "Đang mở Reup Studio…"; }
+    </style>
   </head>
   <body class="bg-slate-50 text-slate-900 font-sans antialiased selection:bg-blue-600 selection:text-white">
     <div id="root"></div>

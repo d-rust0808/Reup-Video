@@ -150,6 +150,135 @@ def test_assert_source_copyright_clear_raises_on_match(tmp_path, monkeypatch):
         assert_source_copyright_clear(str(src), db_path="unused.sqlite", job_id="job_1")
 
 
+def test_invalid_facebook_session_is_not_copyright_block(tmp_path, monkeypatch):
+    import pytest
+    from app.core.database import get_db_connection, init_db
+    from app.services.facebook_client import FacebookAPIError
+    from app.services.facebook_copyright import (
+        FacebookSessionExpiredError,
+        assert_source_copyright_clear,
+    )
+
+    db = str(tmp_path / "jobs.sqlite")
+    init_db(db)
+    now = "2026-09-14T00:00:00+00:00"
+    with get_db_connection(db) as conn:
+        conn.execute(
+            """
+            INSERT INTO facebook_connections (
+                id, app_id, graph_version, user_id, user_name, scopes,
+                app_secret_ref, user_token_ref, status, last_error, created_at, updated_at
+            ) VALUES ('facebook_default', 'app_1', 'v24.0', 'user_1', 'User',
+                      '[]', 'app-secret-ref', 'user-token-ref', 'CONNECTED', '', ?, ?)
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO facebook_pages (
+                page_id, connection_id, name, category, tasks, picture_url,
+                page_token_ref, can_publish, last_synced_at, updated_at
+            ) VALUES ('page_1', 'facebook_default', 'Review', '', '[]', '',
+                      'tok.ref', 1, ?, ?)
+            """,
+            (now, now),
+        )
+        conn.commit()
+
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"x" * 8000)
+    monkeypatch.setattr(
+        "app.services.facebook_copyright.build_copyright_probe",
+        lambda *a, **k: str(src),
+    )
+    monkeypatch.setattr("app.services.secret_store.get_secret", lambda _ref: "page-token")
+
+    class ExpiredFacebookClient:
+        def __init__(self, graph_version, timeout=30.0):
+            pass
+
+        def close(self):
+            pass
+
+        def start_reel(self, page_id, token):
+            raise FacebookAPIError(
+                "Error validating access token: The session has been invalidated "
+                "because the user changed their password or Facebook has changed "
+                "the session for security reasons.",
+                status_code=400,
+                code=190,
+                subcode=460,
+            )
+
+        def delete_object(self, object_id, token):
+            return {"success": True}
+
+    monkeypatch.setattr("app.services.facebook_client.FacebookClient", ExpiredFacebookClient)
+    with pytest.raises(FacebookSessionExpiredError, match="không phải dính bản quyền"):
+        assert_source_copyright_clear(str(src), db_path=db, job_id="job_8805d433")
+
+    with get_db_connection(db) as conn:
+        row = conn.execute(
+            "SELECT status, last_error FROM facebook_connections WHERE id = 'facebook_default'"
+        ).fetchone()
+    assert row["status"] == "EXPIRED"
+    assert "session has been invalidated" in (row["last_error"] or "").lower()
+
+
+def test_pipeline_session_expired_does_not_say_copyright(tmp_path, monkeypatch):
+    from app.services.facebook_copyright import FacebookSessionExpiredError
+    from app.services.queue_manager import BatchQueueManager
+
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"x" * 8000)
+    out = tmp_path / "out.mp4"
+    manager = BatchQueueManager(db_path=str(tmp_path / "jobs.sqlite"), max_concurrent_jobs=1)
+    reup_called = {"n": 0}
+
+    def _no_reup(*_a, **_k):
+        reup_called["n"] += 1
+        raise AssertionError("reup must not run after facebook session expiry")
+
+    monkeypatch.setattr(
+        "app.services.queue_manager.assert_source_copyright_clear",
+        lambda *a, **k: (_ for _ in ()).throw(
+            FacebookSessionExpiredError(
+                "Token Facebook đã hết hạn. Đây không phải dính bản quyền."
+            )
+        ),
+    )
+    monkeypatch.setattr("app.services.queue_manager.process_reup_video", _no_reup)
+    try:
+        job_id = manager.enqueue_job(str(src), str(out))
+        manager._claim_pending_job(job_id)
+        manager._run_pipeline_stages(job_id)
+        job = manager.get_job(job_id)
+        assert job["status"] == "FAILED"
+        assert "không phải dính bản quyền" in (job.get("error_message") or "").lower()
+        assert "Dính bản quyền, chưa reup" not in (job.get("message") or "")
+        assert reup_called["n"] == 0
+        logs = " ".join(str(item.get("message") or item) for item in (job.get("logs") or []))
+        assert "Dính bản quyền — dừng reup" not in logs
+        assert "hết hạn" in logs.lower() or "không phải dính bản quyền" in logs.lower()
+    finally:
+        manager.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_facebook_api_error_detects_invalidated_session():
+    from app.services.facebook_client import FacebookAPIError
+
+    err = FacebookAPIError(
+        "Error validating access token: The session has been invalidated "
+        "because the user changed their password or Facebook has changed "
+        "the session for security reasons.",
+        status_code=400,
+        code=190,
+        subcode=460,
+    )
+    assert err.is_auth_error
+    assert not FacebookAPIError("rate limit", code=4, retryable=True).is_auth_error
+
+
 def test_pipeline_does_not_reup_when_source_is_copyrighted(tmp_path, monkeypatch):
     from app.services.facebook_copyright import CopyrightBlockedError
     from app.services.queue_manager import BatchQueueManager

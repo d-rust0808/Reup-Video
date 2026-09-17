@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Dict, Iterable, List, Sequence, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,53 @@ _CHROME_PATHS = (
     "/usr/bin/chromium",
     "/usr/bin/chromium-browser",
 )
+
+_FETCH_DETAIL_JS = """
+async (awemeId) => {
+  const params = new URLSearchParams({
+    device_platform: 'webapp',
+    aid: '6383',
+    channel: 'channel_pc_web',
+    aweme_id: String(awemeId),
+    request_source: '600',
+    origin_type: 'video_page',
+    update_version_code: '170400',
+    pc_client_type: '1',
+    pc_libra_divert: 'Windows',
+    version_code: '190500',
+    version_name: '19.5.0',
+    cookie_enabled: 'true',
+    screen_width: '1280',
+    screen_height: '900',
+    browser_language: 'zh-CN',
+    browser_platform: 'Win32',
+    browser_name: 'Chrome',
+    browser_version: '131.0.0.0',
+    browser_online: 'true',
+    engine_name: 'Blink',
+    engine_version: '131.0.0.0',
+    os_name: 'Windows',
+    os_version: '10',
+    cpu_core_num: '8',
+    device_memory: '8',
+    platform: 'PC',
+    downlink: '10',
+    effective_type: '4g',
+    round_trip_time: '50',
+  });
+  const res = await fetch('/aweme/v1/web/aweme/detail/?' + params.toString(), {
+    credentials: 'include',
+    headers: { accept: 'application/json, text/plain, */*' },
+  });
+  const text = await res.text();
+  if (!text) return { ok: false, empty: true, http: res.status };
+  let data = null;
+  try { data = JSON.parse(text); } catch (err) {
+    return { ok: false, http: res.status, snippet: text.slice(0, 80) };
+  }
+  return { ok: true, http: res.status, data };
+}
+"""
 
 _FETCH_POST_JS = """
 async ({sec, cursor, count}) => {
@@ -135,6 +182,31 @@ async (months) => {
 """
 
 
+def aweme_from_detail_payload(payload: Any, item_id: str = "") -> Optional[Dict[str, Any]]:
+    """Pull `aweme_detail` (or a matching list item) from a Douyin detail JSON body."""
+    if not isinstance(payload, dict):
+        return None
+    wanted = str(item_id or "").strip()
+    direct = payload.get("aweme_detail")
+    if isinstance(direct, dict):
+        aid = str(direct.get("aweme_id") or "")
+        if not wanted or not aid or aid == wanted:
+            return direct
+    for key in ("item_list", "aweme_list"):
+        items = payload.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            aid = str(item.get("aweme_id") or item.get("id") or "")
+            if wanted and aid and aid != wanted:
+                continue
+            if item.get("video") or aid:
+                return item
+    return None
+
+
 def catalog_entries_from_awemes(items: Iterable[Any], **_kwargs: Any) -> List[Dict[str, str]]:
     """Normalize aweme dicts (or `{aweme_id, desc}` rows) into catalog entries."""
     entries: List[Dict[str, str]] = []
@@ -203,7 +275,7 @@ async def _launch_browser(playwright: Any) -> Any:
     except Exception as exc:
         errors.append(f"bundled: {exc}")
     raise RuntimeError(
-        "Không mở được Chrome/Edge để lấy danh sách Douyin. "
+        "Không mở được Chrome/Edge để lấy dữ liệu Douyin. "
         "Cài Google Chrome hoặc Microsoft Edge rồi thử lại. "
         + "; ".join(errors[:3])
     )
@@ -222,6 +294,96 @@ async def _ingest_response(response: Any, sink: List[Dict[str, str]], limit: int
     if not isinstance(data, dict):
         return
     _merge_entries(sink, catalog_entries_from_awemes(data.get("aweme_list") or []), limit)
+
+
+async def _ingest_detail_response(response: Any, sink: List[Dict[str, Any]], item_id: str) -> None:
+    if sink:
+        return
+    try:
+        url = str(getattr(response, "url", "") or "")
+        if "aweme/detail" not in url and "aweme/iteminfo" not in url and "aweme/item" not in url:
+            return
+        if int(getattr(response, "status", 0) or 0) != 200:
+            return
+        data = await response.json()
+    except Exception:
+        return
+    aweme = aweme_from_detail_payload(data, item_id)
+    if aweme:
+        sink.append(aweme)
+
+
+async def fetch_douyin_aweme(item_id: str) -> Optional[Dict[str, Any]]:
+    """Open the video page in Chrome so Douyin's signed `fetch()` returns aweme_detail.
+
+    Unsigned httpx calls to `/aweme/v1/web/aweme/detail/` are blocked by Argus
+    (`Uifid Not Found`). The page interceptor adds the same tokens the catalog
+    list already relies on.
+    """
+    vid = str(item_id or "").strip()
+    if not vid.isdigit() or len(vid) < 15:
+        return None
+    try:
+        from playwright.async_api import async_playwright
+    except Exception as exc:
+        logger.info("playwright unavailable for Douyin video: %s", exc)
+        return None
+
+    found: List[Dict[str, Any]] = []
+    pending: Set[asyncio.Task[Any]] = set()
+    try:
+        async with async_playwright() as playwright:
+            browser = await _launch_browser(playwright)
+            try:
+                context = await browser.new_context(
+                    locale="zh-CN",
+                    viewport={"width": 1280, "height": 900},
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                    ),
+                )
+                page = await context.new_page()
+                loop = asyncio.get_running_loop()
+
+                def _on_response(response: Any) -> None:
+                    task = loop.create_task(_ingest_detail_response(response, found, vid))
+                    pending.add(task)
+                    task.add_done_callback(pending.discard)
+
+                page.on("response", _on_response)
+                await page.goto(
+                    f"https://www.douyin.com/video/{vid}",
+                    wait_until="domcontentloaded",
+                    timeout=45000,
+                )
+                await page.wait_for_timeout(2200)
+                if not found:
+                    try:
+                        payload = await page.evaluate(_FETCH_DETAIL_JS, vid)
+                    except Exception as exc:
+                        logger.debug("Douyin in-page detail fetch skipped: %s", exc)
+                        payload = None
+                    if isinstance(payload, dict):
+                        aweme = aweme_from_detail_payload(payload.get("data"), vid)
+                        if aweme:
+                            found.append(aweme)
+                for _ in range(16):
+                    if found:
+                        break
+                    await page.wait_for_timeout(250)
+                if pending:
+                    await asyncio.wait(pending, timeout=5)
+            finally:
+                await browser.close()
+    except Exception:
+        logger.exception("Douyin browser video fetch failed for %s", vid)
+        return found[0] if found else None
+    if found:
+        logger.info("Douyin browser aweme id=%s", vid)
+        return found[0]
+    logger.info("Douyin browser aweme empty id=%s", vid)
+    return None
 
 
 async def _fetch_pages(page: Any, sec_user_id: str, max_videos: int) -> tuple[List[Dict[str, str]], List[str], List[str]]:

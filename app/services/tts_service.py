@@ -14,7 +14,7 @@ import shutil
 import tempfile
 from typing import Optional, Dict, Any, List, Callable
 
-from app.modules.tts.providers import get_tts_provider
+from app.modules.tts.providers import VieNeuTTSProvider, get_tts_provider
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,22 @@ DEFAULT_VOICES = {
     "it": {"female": "it-IT-ElsaNeural", "male": "it-IT-DiegoNeural"},
     "ar": {"female": "ar-SA-ZariyahNeural", "male": "ar-SA-HamedNeural"},
 }
+
+_VIENEU_MALE_NAMES = {
+    "phạm tuyên", "pham tuyen", "xuân vĩnh", "xuan vinh", "adam",
+    "quang sơn", "quang son", "thái sơn", "thai son", "thanh bình", "thanh binh",
+    "đức trí", "duc tri", "minh đức", "minh duc", "minh triết", "minh triet",
+}
+
+
+def edge_voice_for_vieneu(voice: Optional[str], lang: str = "vi") -> str:
+    """Map a VieNeu preset to an Edge-TTS Neural voice when ONNX cannot load."""
+    if (lang or "vi").lower() != "vi":
+        return DEFAULT_VOICES.get(lang, {}).get("female") or "en-US-AvaNeural"
+    name = (voice or "").split(":", 1)[-1].strip().lower()
+    if name in _VIENEU_MALE_NAMES:
+        return "vi-VN-NamMinhNeural"
+    return "vi-VN-HoaiMyNeural"
 
 
 def parse_srt_timestamp(timestamp_str: str) -> float:
@@ -679,13 +695,24 @@ class TTSService:
             )
 
         if target_engine in ("vieneu", "vieneu-tts"):
-            provider = get_tts_provider("vieneu")
-            return await provider.generate(
-                text=text,
-                lang=lang,
-                voice=selected_voice,
-                output_path=output_path,
-            )
+            if not VieNeuTTSProvider.runtime_available():
+                logger.warning("VieNeu/ONNX unavailable — falling back to Edge-TTS")
+                target_engine = "edge-tts"
+                selected_voice = edge_voice_for_vieneu(selected_voice, lang)
+            else:
+                try:
+                    provider = get_tts_provider("vieneu")
+                    return await provider.generate(
+                        text=text,
+                        lang=lang,
+                        voice=selected_voice,
+                        output_path=output_path,
+                    )
+                except Exception as e:
+                    VieNeuTTSProvider.mark_unavailable()
+                    logger.warning("VieNeu TTS failed (%s), falling back to Edge-TTS", e)
+                    target_engine = "edge-tts"
+                    selected_voice = edge_voice_for_vieneu(selected_voice, lang)
 
         if target_engine in ("kokoro", "kokoro-tts", "kokoro-82m"):
             try:
@@ -809,6 +836,10 @@ class TTSService:
         engine_name = (engine or self.default_engine or "edge-tts").lower()
         if (voice or "").lower().startswith("vieneu:"):
             engine_name = "vieneu"
+        if engine_name in ("vieneu", "vieneu-tts") and not VieNeuTTSProvider.runtime_available():
+            logger.warning("VieNeu/ONNX DLL lỗi — chuyển TTS sang Edge-TTS")
+            engine_name = "edge-tts"
+            voice = edge_voice_for_vieneu(voice, lang)
         preserve_natural_voice = engine_name in ("vieneu", "vieneu-tts")
         segments = [
             {
@@ -820,6 +851,9 @@ class TTSService:
             for seg in raw_segments
         ]
         segments = group_long_form_tts_segments(segments)
+        from app.services.vietsub_rules import stretch_cue_times_to_next_shot
+
+        segments = stretch_cue_times_to_next_shot(segments)
 
         if progress_callback:
             progress_callback(0, len(segments))
@@ -851,11 +885,13 @@ class TTSService:
                     )
                     return None
                 srt_dur = float(seg.get("duration") or 0.0)
+                start_at = float(seg.get("start_time") or 0.0)
                 if next_start is not None:
-                    shot_window = max(0.18, float(next_start) - float(seg["start_time"]) - 0.03)
+                    # Use the gap to the next take, not the (often crumbled) SRT span.
+                    shot_window = max(0.35, float(next_start) - start_at - 0.08)
                     pin_to_shot = True
                 else:
-                    shot_window = max(0.18, srt_dur)
+                    shot_window = max(0.35, srt_dur)
                     pin_to_shot = False
                 emotion = seg.get("emotion", "neutral")
                 rate_val = "+0%"
@@ -910,7 +946,9 @@ class TTSService:
                     raw_clip_path = trimmed_clip_path
 
                 audio_dur = get_audio_duration(raw_clip_path)
-                window = max(0.18, shot_window)
+                window = max(0.35, shot_window)
+                if (not pin_to_shot) and audio_dur > window:
+                    window = audio_dur
                 if lipsync_on:
                     from app.services.lipsync_service import fit_clip_to_window
                     ok = fit_clip_to_window(raw_clip_path, scaled_clip_path, window)
@@ -933,7 +971,11 @@ class TTSService:
                         else:
                             clamped_speed = 1.0
                     else:
-                        clamped_speed = max(0.85, min(1.50, speed_factor))
+                        # Do not slow a short take down to fill a long BGM gap.
+                        if speed_factor < 1.0:
+                            clamped_speed = 1.0
+                        else:
+                            clamped_speed = max(0.85, min(1.50, speed_factor))
                     if abs(clamped_speed - 1.0) > (0.01 if preserve_natural_voice else 0.05):
                         success = scale_audio_speed_ffmpeg(raw_clip_path, scaled_clip_path, clamped_speed)
                         clip_to_use = scaled_clip_path if success else raw_clip_path

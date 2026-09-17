@@ -8,26 +8,12 @@ export const isDesktop =
   typeof window !== 'undefined' &&
   (!!window.electronAPI?.isDesktop || window.location.protocol === 'file:');
 
-function isLoopbackHost() {
-  if (typeof window === 'undefined') return false;
-  const host = window.location.hostname;
-  return host === '127.0.0.1' || host === 'localhost';
-}
-
 export const getApiBase = () => {
   if (typeof window === 'undefined') return '/api/v1';
-  const port = String(window.location.port || '');
-  // Vite already proxies /api → :6000. Stay same-origin so Chromium does not
-  // treat 6001→6000 as a private-network fetch (Failed to fetch).
-  if (isLoopbackHost() && port === '6001') return '/api/v1';
-  const desktop = !!window.electronAPI?.isDesktop || window.location.protocol === 'file:';
-  const onBackend = isLoopbackHost() && port === '6000';
-  if (desktop && !onBackend) {
-    return `${DESKTOP_BACKEND_ORIGIN}/api/v1`;
-  }
   if (window.location.protocol === 'file:' || !window.location.host) {
     return `${DESKTOP_BACKEND_ORIGIN}/api/v1`;
   }
+  // Vite (:6001) and the packaged FastAPI origin are same-origin for /api.
   return '/api/v1';
 };
 

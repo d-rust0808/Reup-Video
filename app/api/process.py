@@ -450,8 +450,10 @@ async def submit_process_job(req: ProcessJobRequest, request: Request, backgroun
         reup_source_lang = req.reup.source_lang
     elif getattr(req, "source_lang", None):
         reup_source_lang = req.source_lang
-    if reup_source_lang in (None, "", "auto") and platform in ("douyin", "kuaishou", "xiaohongshu"):
-        reup_source_lang = "zh"
+    if reup_source_lang in (None, "", "auto"):
+        from app.services.vietsub_rules import infer_stt_source_lang
+
+        reup_source_lang = infer_stt_source_lang(input_file or "", platform) or "auto"
     reup_grain = 3.0
     if req.reup and getattr(req.reup, "film_grain", None) is not None:
         reup_grain = req.reup.film_grain

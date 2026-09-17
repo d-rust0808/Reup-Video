@@ -1,11 +1,20 @@
 from app.services.vietsub_rules import (
     build_agy_prompt,
+    infer_stt_source_lang,
     reflow_incomplete_sentences,
     regroup_words_to_sentences,
     resolve_vietsub_style,
+    review_label,
+    salvage_stt_cues,
     stt_hard_fail_reason,
+    stretch_cue_times_to_next_shot,
     vietnamese_fail_reason,
 )
+
+
+def test_engine_failed_is_not_labeled_stt_garbage():
+    assert review_label("engine_failed") == "Whisper không chạy được"
+    assert review_label("empty_audio") == "STT rác"
 
 
 def test_style_aliases_ignore_duration():
@@ -164,6 +173,34 @@ def test_reflow_keeps_finished_sentences_apart():
     assert [item["text"] for item in out] == [first, second]
 
 
+def test_infer_stt_lang_from_douyin_upload_filename():
+    from app.services.pyvideotrans_service import PyVideoTransService
+
+    assert infer_stt_source_lang("data/input/raw/7683114262881429474.mp4", "upload") == "zh"
+    assert infer_stt_source_lang("clip.mp4", "douyin") == "zh"
+    assert infer_stt_source_lang("holiday.mp4", "upload") is None
+    svc = PyVideoTransService()
+    assert svc._resolve_whisper_lang("auto", "7683114262881429474.mp4") == "zh"
+    assert svc._resolve_whisper_lang("en", "7683114262881429474.mp4") == "en"
+
+
+def test_salvage_collapses_whisper_loop_before_gate():
+    cues = [
+        {
+            "index": i,
+            "start_time": float(i),
+            "end_time": float(i) + 1.0,
+            "duration": 1.0,
+            "text": "今天跟闺蜜去看海赶海吃海鲜啦",
+        }
+        for i in range(8)
+    ]
+    assert stt_hard_fail_reason(cues) == "looped_phrases"
+    fixed = salvage_stt_cues(cues)
+    assert len(fixed) == 1
+    assert stt_hard_fail_reason(fixed) is None
+
+
 def test_stt_gate_blocks_looped_phrases():
     cues = [
         {
@@ -225,3 +262,25 @@ def test_vietnamese_gate_blocks_loops_and_short_words():
     assert vietnamese_fail_reason(mixed, 2) == "cjk_or_invalid"
     good = ["Lương tháng này về chưa?", "Cứ giao cho tôi."]
     assert vietnamese_fail_reason(good, 2) is None
+
+
+def test_stretch_cue_times_fills_gap_after_crumbled_whisper_stamps():
+    stretched = stretch_cue_times_to_next_shot([
+        {
+            "index": 1,
+            "start_time": 0.0,
+            "end_time": 0.613,
+            "duration": 0.613,
+            "text": "Sáng sớm vừa từ ngoài đồng hái về những trái ớt đỏ tươi",
+        },
+        {
+            "index": 2,
+            "start_time": 11.612,
+            "end_time": 12.295,
+            "duration": 0.683,
+            "text": "Những trái ớt dày thịt cùng củ gừng non",
+        },
+    ])
+    assert stretched[0]["end_time"] > 3.5
+    assert stretched[0]["end_time"] < stretched[1]["start_time"]
+    assert stretched[1]["end_time"] > 13.5

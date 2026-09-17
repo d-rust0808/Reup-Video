@@ -580,7 +580,7 @@ def test_hardsub_graph_uses_configured_vietsub_plate(tmp_path):
     assert "h=192" in vf
     assert "white@1" in vf
     assert "BorderStyle=1" in vf
-    assert "Alignment=8" in vf
+    assert ("Alignment=6" in vf or "Alignment=8" in vf)
     assert vf.index("drawbox=") < vf.index("subtitles=")
 
 
@@ -2454,3 +2454,33 @@ def test_tts_and_inpaint_callbacks_write_activity_logs(tmp_path):
         assert any("50%" in message for message in messages)
     finally:
         manager.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_custom_subtitle_y_and_timed_plate(tmp_path):
+    from app.services.caption_cover import srt_enable_expression, subtitle_force_style, subtitle_plate_drawbox
+    from app.services.reup_service import _subtitles_filter
+
+    srt = tmp_path / "timed.srt"
+    srt.write_text(
+        "1\n00:00:01,000 --> 00:00:03,000\nCau dau tien\n\n"
+        "2\n00:00:05,000 --> 00:00:07,500\nCau thu hai\n\n",
+        encoding="utf-8",
+    )
+    expr = srt_enable_expression(str(srt))
+    assert "between(t,1.000,3.000)" in expr
+    assert "between(t,5.000,7.500)" in expr
+
+    plate = subtitle_plate_drawbox(
+        "off", 0.46, 0.08, subtitle_y=0.81, video_w=266, video_h=474, srt_path=str(srt)
+    )
+    assert ":enable='between(t,1.000,3.000)+between(t,5.000,7.500)'" in plate
+
+    style = subtitle_force_style("off", subtitle_y=0.81, video_w=266, video_h=474)
+    assert "BorderStyle=1" in style
+    assert "Alignment=8" in style
+
+    sub_node = _subtitles_filter(str(srt), style, 266, 474)
+    assert "Alignment=6" in sub_node
+    assert "PlayResX=266" in sub_node
+    assert "PlayResY=474" in sub_node
+

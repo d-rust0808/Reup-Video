@@ -10,6 +10,17 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 
+# Graph OAuth / session death. Same user token usually invalidates every page token.
+_AUTH_SUBCODES = {458, 459, 460, 463, 464, 467, 492}
+_AUTH_MESSAGE_MARKERS = (
+    "error validating access token",
+    "session has been invalidated",
+    "invalid oauth access token",
+    "the session is invalid",
+    "user changed their password",
+)
+
+
 class FacebookAPIError(RuntimeError):
     def __init__(
         self,
@@ -25,6 +36,13 @@ class FacebookAPIError(RuntimeError):
         self.code = code
         self.subcode = subcode
         self.retryable = retryable
+
+    @property
+    def is_auth_error(self) -> bool:
+        if self.code == 190 or self.subcode in _AUTH_SUBCODES:
+            return True
+        text = str(self).lower()
+        return any(marker in text for marker in _AUTH_MESSAGE_MARKERS)
 
 
 def _iso_from_timestamp(value: Any) -> Optional[str]:

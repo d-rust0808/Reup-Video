@@ -375,7 +375,6 @@ export function OutputGallery() {
                 >
                   <video
                     src={getStreamUrl(streamId)}
-                    muted
                     playsInline
                     preload="metadata"
                     controls

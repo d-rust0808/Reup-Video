@@ -18,6 +18,10 @@ from fastapi.responses import HTMLResponse, Response, FileResponse
 from typing import Optional
 from fastapi.staticfiles import StaticFiles
 
+from app.core.native_dll_guard import init_native_runtime
+
+init_native_runtime()
+
 from app.config import settings
 from app.core.database import init_db
 from app.core.instance_lock import BackendInstanceLock

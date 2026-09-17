@@ -318,6 +318,7 @@ def build_reup_filtergraph(
             band_h=cover_h if cover == "image" else bottom,
             video_w=frame_w,
             video_h=frame_h,
+            srt_path=burn_srt_path,
         )
         if plate:
             vf_nodes.append(plate)
@@ -519,8 +520,14 @@ def _subtitles_filter(srt_path: str, style: str, video_w: int, video_h: int) -> 
     sub_path = _ffmpeg_subtitles_path(srt_path)
     width = max(2, int(video_w or 1920))
     height = max(2, int(video_h or 1080))
+    # libass force_style parses SSA v4 alignment (Top-center is 6, bottom-center is 2).
+    # Alignment=8 (ASS v4+ numpad top-center) is unrecognized in force_style and falls back
+    # to center (height/2), ignoring MarginV. Map Alignment=8 -> Alignment=6.
+    cleaned_style = (style or "").replace("Alignment=8", "Alignment=6")
+    if cleaned_style and "PlayResX" not in cleaned_style:
+        cleaned_style = f"PlayResX={width},PlayResY={height},{cleaned_style}"
     return (
-        f"subtitles='{sub_path}':original_size={width}x{height}:force_style='{style}'"
+        f"subtitles='{sub_path}':original_size={width}x{height}:force_style='{cleaned_style}'"
     )
 
 
@@ -962,6 +969,7 @@ def burn_vietnamese_hardsub(
         band_h=band if cover == "image" else bottom,
         video_w=frame_w,
         video_h=frame_h,
+        srt_path=work_srt,
     )
     style = subtitle_force_style(
         cover, band if cover == "image" else bottom,
@@ -1896,6 +1904,10 @@ class ReupService:
                 pyvideotrans = PyVideoTransService()
 
                 src_lang = cfg.source_lang or "auto"
+                if src_lang in ("", "auto"):
+                    from app.services.vietsub_rules import infer_stt_source_lang
+
+                    src_lang = infer_stt_source_lang(video_path, "") or src_lang
                 from app.services.vietsub_rules import resolve_vietsub_style, review_label
                 from app.services.xai_media_service import LANG_DEFAULT_VOICE
                 from app.services.tts_service import get_audio_duration
@@ -1934,7 +1946,9 @@ class ReupService:
                 quality_out["report"]["cue_count_in"] = cue_count
                 if is_unusable or not (isinstance(srt_path, str) and os.path.exists(srt_path)):
                     fail_reason = stt_res.get("stt_fail_reason") or (
-                        "empty_audio" if stt_status in ("empty", "fallback") else "looped_phrases"
+                        "engine_failed"
+                        if stt_status == "fallback"
+                        else ("empty_audio" if stt_status == "empty" else "looped_phrases")
                     )
                     quality_out["status"] = "NEEDS_REVIEW"
                     quality_out["report"]["stt_fail_reason"] = fail_reason
@@ -2023,13 +2037,30 @@ class ReupService:
                     vid_dur = get_audio_duration(video_path)
                     import asyncio
 
+                    tts_voice = cfg.tts_voice
+                    tts_engine = cfg.tts_engine
+                    if (
+                        str(tts_voice or "").lower().startswith("vieneu:")
+                        or str(tts_engine or "").lower().startswith("vieneu")
+                    ):
+                        from app.modules.tts.providers import VieNeuTTSProvider
+                        from app.services.tts_service import edge_voice_for_vieneu
+
+                        if not VieNeuTTSProvider.runtime_available():
+                            tts_voice = edge_voice_for_vieneu(tts_voice or "", cfg.target_lang)
+                            tts_engine = "edge-tts"
+                            report_stage(
+                                0.86,
+                                f"🎙️ VieNeu/ONNX DLL lỗi — chuyển sang Edge-TTS ({tts_voice})...",
+                            )
+
                     async def _run_tts():
                         return await tts_service.synthesize_synchronized_tts(
                             srt_path=translated_srt,
                             output_audio_path=tts_out_path,
-                            voice=cfg.tts_voice,
+                            voice=tts_voice,
                             lang=cfg.target_lang,
-                            engine=cfg.tts_engine,
+                            engine=tts_engine,
                             total_duration=vid_dur,
                             enable_lipsync=getattr(cfg, "enable_lipsync", True) and style == "dub",
                             timeline_speed=cfg.speed_factor,
@@ -2039,7 +2070,7 @@ class ReupService:
                     tts_result = None
                     with report_busy(
                         0.86,
-                        f"🎙️ Đang tổng hợp thuyết minh tiếng Việt ({cfg.tts_voice or 'vieneu'})...",
+                        f"🎙️ Đang tổng hợp thuyết minh tiếng Việt ({tts_voice or 'vieneu'})...",
                         "TTS đang đọc từng câu phụ đề",
                     ):
                         try:
@@ -2161,8 +2192,12 @@ class ReupService:
         target_srt_for_vad = translated_srt or srt_path
         if isinstance(target_srt_for_vad, str) and os.path.exists(target_srt_for_vad):
             try:
-                from app.services.tts_service import parse_srt_segments
-                segs = parse_srt_segments(target_srt_for_vad)
+                from app.services.tts_service import group_long_form_tts_segments, parse_srt_segments
+                from app.services.vietsub_rules import stretch_cue_times_to_next_shot
+
+                segs = stretch_cue_times_to_next_shot(
+                    group_long_form_tts_segments(parse_srt_segments(target_srt_for_vad))
+                )
                 for s in segs:
                     st_val = float(s.get("start_time", s.get("start", 0.0)) or 0.0)
                     en_val = float(s.get("end_time", s.get("end", 0.0)) or 0.0)

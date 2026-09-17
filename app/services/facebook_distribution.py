@@ -712,7 +712,7 @@ class FacebookDistributionWorker:
     def _record_error(self, row: Dict[str, Any], error: Exception) -> None:
         attempts = max(1, int(row.get("attempts") or 0))
         retryable = not isinstance(error, FacebookAPIError) or error.retryable
-        token_expired = isinstance(error, FacebookAPIError) and error.code == 190
+        token_expired = isinstance(error, FacebookAPIError) and error.is_auth_error
         delay = min(900, 15 * (2 ** min(attempts, 6)))
         status = "FAILED"
         next_attempt = _iso(_now() + timedelta(seconds=delay)) if retryable else None

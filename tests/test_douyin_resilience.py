@@ -69,3 +69,58 @@ def test_real_douyin_id_containing_500_is_not_a_simulated_server_error():
 
     with pytest.raises(RuntimeError, match="HTTP 500"):
         scraper._check_test_error_triggers("https://mock.test/video/500")
+
+
+def test_aweme_from_detail_payload_prefers_matching_id():
+    from app.scraper.douyin_list import aweme_from_detail_payload
+
+    video_id = "7665185880725902949"
+    aweme = aweme_from_detail_payload(
+        {"status_code": 0, "aweme_detail": _aweme(video_id)},
+        video_id,
+    )
+    assert aweme is not None
+    assert aweme["aweme_id"] == video_id
+    assert aweme_from_detail_payload({"status_code": 11110}, video_id) is None
+
+
+@pytest.mark.asyncio
+async def test_extract_uses_browser_aweme_when_http_is_blocked(monkeypatch):
+    scraper = DouyinScraper()
+    video_id = "7665185880725902949"
+    url = f"https://www.douyin.com/video/{video_id}"
+
+    class _FakeResponse:
+        status_code = 403
+        content = b"Blocked by ArgusSecurityPlugin Uifid Not Found"
+        text = "Blocked by ArgusSecurityPlugin Uifid Not Found"
+
+        def json(self):
+            return {"status_code": 11110, "status_msg": "encrypt_data_miss"}
+
+    class _FakeClient:
+        cookies = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *args, **kwargs):
+            return _FakeResponse()
+
+        async def get(self, *args, **kwargs):
+            return _FakeResponse()
+
+    async def fake_fetch(item_id: str):
+        assert item_id == video_id
+        return _aweme(video_id)
+
+    monkeypatch.setattr("httpx.AsyncClient", lambda *args, **kwargs: _FakeClient())
+    monkeypatch.setattr("app.scraper.douyin_list.fetch_douyin_aweme", fake_fetch)
+
+    metadata = await scraper.extract(url)
+    assert metadata.video_id == video_id
+    assert metadata.direct_stream_url.startswith("https://")
+    assert "playwm" not in metadata.direct_stream_url

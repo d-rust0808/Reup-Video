@@ -174,13 +174,27 @@ export function FacebookPublishingPanel({ activeChannel, onChanged }) {
               </p>
             </div>
             <span className={`px-2.5 py-1 rounded-full text-[10px] font-extrabold border ${
-              connected
+              settings?.status === 'EXPIRED'
+                ? 'bg-rose-400/15 text-rose-200 border-rose-300/30'
+                : connected
                 ? 'bg-emerald-400/15 text-emerald-200 border-emerald-300/30'
                 : 'bg-amber-300/10 text-amber-200 border-amber-200/20'
             }`}>
-              {connected ? `Đã kết nối · ${settings.page_count || 0} Page` : 'Chưa kết nối'}
+              {settings?.status === 'EXPIRED'
+                ? 'Token hết hạn — kết nối lại'
+                : connected
+                  ? `Đã kết nối · ${settings.page_count || 0} Page`
+                  : 'Chưa kết nối'}
             </span>
           </div>
+
+          {settings?.status === 'EXPIRED' && (
+            <div className="rounded-xl bg-rose-400/12 border border-rose-300/25 px-3 py-2 text-[11px] text-rose-100">
+              Session Facebook đã bị thu hồi (đổi mật khẩu hoặc Facebook reset token).
+              Dán user token mới bên dưới rồi kết nối lại — job reup vừa rồi không dính bản quyền.
+              {settings.last_error ? ` (${settings.last_error})` : ''}
+            </div>
+          )}
 
           {connected && settings.token_expires_at && (
             <div className="flex items-center justify-between gap-3 rounded-xl bg-white/8 border border-white/10 px-3 py-2 text-[11px] text-blue-100">

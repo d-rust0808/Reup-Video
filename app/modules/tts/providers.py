@@ -198,6 +198,36 @@ class VieNeuTTSProvider(BaseTTSProvider):
     _models = queue.LifoQueue()
     _pool_lock = threading.Lock()
     _model_count = 0
+    _runtime_ok: Optional[bool] = None
+
+    @classmethod
+    def mark_unavailable(cls) -> None:
+        cls._runtime_ok = False
+
+    @classmethod
+    def runtime_available(cls) -> bool:
+        """VieNeu needs a working onnxruntime; guard against poisoned import."""
+        if cls._runtime_ok is not None:
+            return cls._runtime_ok
+        ort = sys.modules.get("onnxruntime")
+        if ort is not None:
+            cls._runtime_ok = bool(getattr(ort, "SessionOptions", None))
+            return cls._runtime_ok
+        try:
+            from app.core.native_dll_guard import is_onnx_available
+
+            cls._runtime_ok = is_onnx_available()
+            return bool(cls._runtime_ok)
+        except Exception:
+            pass
+        try:
+            import onnxruntime as ort_mod  # noqa: F401
+
+            cls._runtime_ok = bool(getattr(ort_mod, "SessionOptions", None))
+        except Exception:
+            sys.modules.pop("onnxruntime", None)
+            cls._runtime_ok = False
+        return bool(cls._runtime_ok)
 
     @classmethod
     def _acquire_model(cls, model_factory):

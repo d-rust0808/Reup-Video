@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # ASS colours are &HAABBGGRR
 _WHITE = "&H00FFFFFF"
@@ -256,6 +256,13 @@ def subtitle_force_style(
         )
     style = COVER_PRESETS.get(kind)
     if not style:
+        if y > 0:
+            return (
+                f"FontName=DejaVu Sans,FontSize={font_size},Bold=1,Alignment={align},"
+                f"MarginV={margin_v},MarginL=36,MarginR=36,BorderStyle=1,"
+                f"Outline=3,Shadow=0,"
+                f"PrimaryColour={_WHITE},OutlineColour={_BLACK},BackColour=&H00000000"
+            )
         return (
             f"FontName=DejaVu Sans,FontSize={font_size},Bold=1,Alignment={align},"
             f"MarginV={margin_v},MarginL=36,MarginR=36,BorderStyle=3,Outline=4,Shadow=0,"
@@ -323,6 +330,62 @@ def resolve_cue_y(
     return 0.90
 
 
+def srt_enable_expression(srt_path: Optional[str], max_gap: float = 0.20) -> str:
+    """Generate FFmpeg timeline enable expression e.g. between(t,s1,e1)+between(t,s2,e2)...
+    Merges segments with gap <= max_gap to prevent flickering between consecutive sentences.
+    Hides the plate when no subtitles are active so no empty black box is left over."""
+    if not srt_path or not os.path.isfile(srt_path):
+        return ""
+    try:
+        from app.services.tts_service import parse_srt_segments
+        segs = parse_srt_segments(srt_path)
+    except Exception:
+        return ""
+    if not segs:
+        return ""
+    intervals: List[Tuple[float, float]] = []
+    for s in segs:
+        try:
+            st = float(s.get("start_time", 0.0))
+            et = float(s.get("end_time", 0.0))
+            if et > st:
+                intervals.append((st, et))
+        except (TypeError, ValueError):
+            continue
+    if not intervals:
+        return ""
+    intervals.sort(key=lambda x: x[0])
+    merged: List[Tuple[float, float]] = []
+    cur_s, cur_e = intervals[0]
+    for s, e in intervals[1:]:
+        if s <= cur_e + max_gap:
+            cur_e = max(cur_e, e)
+        else:
+            merged.append((cur_s, cur_e))
+            cur_s, cur_e = s, e
+    merged.append((cur_s, cur_e))
+
+    gap = max_gap
+    for _ in range(5):
+        if len(merged) <= 100:
+            break
+        gap += 0.5
+        new_merged: List[Tuple[float, float]] = []
+        cur_s, cur_e = merged[0]
+        for s, e in merged[1:]:
+            if s <= cur_e + gap:
+                cur_e = max(cur_e, e)
+            else:
+                new_merged.append((cur_s, cur_e))
+                cur_s, cur_e = s, e
+        new_merged.append((cur_s, cur_e))
+        merged = new_merged
+
+    if len(merged) > 120:
+        return ""
+    return "+".join(f"between(t,{s:.3f},{e:.3f})" for s, e in merged)
+
+
 def subtitle_plate_drawbox(
     cover: str,
     box_w: float,
@@ -331,6 +394,7 @@ def subtitle_plate_drawbox(
     band_h: float = 0.22,
     video_w: Optional[int] = None,
     video_h: Optional[int] = None,
+    srt_path: Optional[str] = None,
 ) -> str:
     """Independent Vietsub background so a short cue can still cover source hardsubs."""
     kind = normalize_caption_cover(cover)
@@ -345,6 +409,11 @@ def subtitle_plate_drawbox(
         subtitle_y, kind, band_h,
         int(video_w or 1920), int(video_h or 1080),
     )
+    enable_clause = ""
+    if srt_path:
+        expr = srt_enable_expression(srt_path)
+        if expr:
+            enable_clause = f":enable='{expr}'"
     if video_w and video_h:
         w_px = max(8, int(round(int(video_w) * bw)))
         h_px = max(8, int(round(int(video_h) * bh)))
@@ -354,11 +423,11 @@ def subtitle_plate_drawbox(
         y_px = int(round(int(video_h) * cy - h_px / 2))
         y_px = max(0, min(int(video_h) - h_px, y_px))
         return (
-            f"drawbox=x={x_px}:y={y_px}:w={w_px}:h={h_px}:t=fill:color={color}:replace={replace}"
+            f"drawbox=x={x_px}:y={y_px}:w={w_px}:h={h_px}:t=fill:color={color}:replace={replace}{enable_clause}"
         )
     return (
         f"drawbox=x='(iw-iw*{bw:.4f})/2':y='ih*{cy:.4f}-ih*{bh:.4f}/2'"
-        f":w='iw*{bw:.4f}':h='ih*{bh:.4f}':t=fill:color={color}:replace={replace}"
+        f":w='iw*{bw:.4f}':h='ih*{bh:.4f}':t=fill:color={color}:replace={replace}{enable_clause}"
     )
 
 

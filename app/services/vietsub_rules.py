@@ -107,6 +107,24 @@ def compact_source(text: str) -> str:
     return re.sub(r"\s+", "", text or "")
 
 
+_CN_SOURCE_ID_RE = re.compile(r"(?:^|[^\d])(\d{18,20})(?:[^\d]|$)")
+_CN_SOURCE_HINTS = ("douyin", "kuaishou", "xiaohongshu", "iesdouyin", "douyinvod")
+
+
+def infer_stt_source_lang(path: str = "", platform: str = "") -> Optional[str]:
+    """Guess zh for Douyin-family clips, including local uploads named by aweme id."""
+    plat = (platform or "").lower().strip()
+    if plat in ("douyin", "kuaishou", "xiaohongshu"):
+        return "zh"
+    blob = f"{path or ''} {plat}".lower()
+    if any(hint in blob for hint in _CN_SOURCE_HINTS):
+        return "zh"
+    name = os.path.basename(path or "")
+    if _CN_SOURCE_ID_RE.search(name) or re.fullmatch(r"\d{18,20}", os.path.splitext(name)[0] or ""):
+        return "zh"
+    return None
+
+
 def _word_token(item: Dict[str, Any]) -> Dict[str, Any]:
     token = re.sub(r"\s+", " ", str(item.get("text") or "").strip())
     start = float(item.get("start") or item.get("start_time") or 0.0)
@@ -176,7 +194,8 @@ def merge_particles_and_shorts(segments: Sequence[Dict[str, Any]]) -> List[Dict[
             float(copied.get("end_time") or 0.0) - float(copied.get("start_time") or 0.0),
         )
         is_particle = cjk_only in _DETACHED_CJK_PARTICLES
-        is_short_frag = bool(cjk_only) and duration <= SHORT_CUE_SEC
+        is_single_cjk = bool(cjk_only) and len(cjk_only) == 1 and len(compact) <= 2
+        is_short_frag = bool(cjk_only) and (duration <= SHORT_CUE_SEC or is_single_cjk)
         if merged:
             previous = merged[-1]
             gap = float(copied.get("start_time") or 0.0) - float(previous.get("end_time") or 0.0)
@@ -191,6 +210,7 @@ def merge_particles_and_shorts(segments: Sequence[Dict[str, Any]]) -> List[Dict[
                 and combined_duration <= MAX_DUR_SEC
                 and combined_chars <= MAX_SOURCE_CHARS
                 and (is_particle or is_short_frag)
+                and not (is_single_cjk and compact_source(previous_text) == compact)
             ):
                 separator = ""
                 if previous_text and not (contains_cjk(previous_text[-1:]) and contains_cjk(text[:1])):
@@ -519,6 +539,44 @@ def split_caption_chunks(
     return chunks or [raw]
 
 
+def stretch_cue_times_to_next_shot(
+    cues: Sequence[Dict[str, Any]],
+    *,
+    min_dur: float = 0.70,
+    max_fill: float = 14.0,
+    breath: float = 0.12,
+    vi_cps: float = 11.0,
+    cjk_cps: float = 4.0,
+) -> List[Dict[str, Any]]:
+    """Whisper.cpp often emits full sentences with 100ms timestamps.
+
+    Stretch each cue toward the next shot so TTS/mute windows match spoken length
+    instead of chopping the voice into inaudible blips.
+    """
+    out = [dict(cue) for cue in cues]
+    for index, cue in enumerate(out):
+        text = re.sub(r"\s+", "", str(cue.get("text") or ""))
+        if not text:
+            continue
+        start = float(cue.get("start_time") or cue.get("start") or 0.0)
+        end = float(cue.get("end_time") or cue.get("end") or (start + min_dur))
+        if end < start:
+            end = start
+        cps = cjk_cps if contains_cjk(text) else vi_cps
+        need = min(max_fill, max(min_dur, len(text) / max(cps, 1.0)))
+        if index + 1 < len(out):
+            nxt = float(out[index + 1].get("start_time") or out[index + 1].get("start") or (start + need))
+            limit = max(start + 0.18, nxt - breath)
+        else:
+            limit = start + need
+        new_end = min(start + need, limit)
+        if new_end > end + 0.12:
+            cue["start_time"] = start
+            cue["end_time"] = new_end
+            cue["duration"] = new_end - start
+    return out
+
+
 def split_cues_for_display(
     cues: Sequence[Dict[str, Any]],
     *,
@@ -596,6 +654,45 @@ def write_display_srt(src_path: str, dest_path: str) -> str:
     with open(dest_path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + ("\n" if lines else ""))
     return dest_path
+
+
+def collapse_repeated_cues(cues: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Merge consecutive near-duplicate Whisper hallucinations into one cue."""
+    out: List[Dict[str, Any]] = []
+    for raw in cues or []:
+        cue = dict(raw)
+        text = compact_source(str(cue.get("text") or ""))
+        if not text:
+            continue
+        if out:
+            prev = compact_source(str(out[-1].get("text") or ""))
+            if len(text) >= 4 and len(prev) >= 4 and (text == prev or text in prev or prev in text):
+                out[-1]["end_time"] = max(
+                    float(out[-1].get("end_time") or 0.0),
+                    float(cue.get("end_time") or 0.0),
+                )
+                out[-1]["duration"] = max(
+                    0.0,
+                    float(out[-1]["end_time"]) - float(out[-1].get("start_time") or 0.0),
+                )
+                continue
+        out.append(cue)
+    for index, item in enumerate(out, start=1):
+        item["index"] = index
+    return out
+
+
+def salvage_stt_cues(cues: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Repair looped / stray-character Whisper output before the hard-fail gate."""
+    work = [dict(cue) for cue in (cues or []) if str(cue.get("text") or "").strip()]
+    if not work:
+        return []
+    work = collapse_repeated_cues(work)
+    work = merge_particles_and_shorts(work)
+    work = collapse_repeated_cues(work)
+    for index, item in enumerate(work, start=1):
+        item["index"] = index
+    return work
 
 
 def _loop_ratio(texts: Sequence[str]) -> float:
@@ -723,6 +820,7 @@ def review_label(reason: Optional[str]) -> str:
         "too_many_single_cjk": "STT rác",
         "empty_audio": "STT rác",
         "agy_missing": "Chưa có agy",
+        "engine_failed": "Whisper không chạy được",
         "count_mismatch": "AGY không đạt",
         "cjk_or_invalid": "AGY không đạt",
         "empty": "AGY không đạt",

@@ -4,6 +4,15 @@ const http = require('http');
 const { spawn, spawnSync, execSync } = require('child_process');
 const fs = require('fs');
 
+// GTX 1050-class GPUs often never fire ready-to-show, so a hidden window stays invisible.
+if (process.platform === 'win32') {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+}
+// Chromium blocks port 6000 (X11). Without this, packaged Studio stays on a white
+// window: loadURL(http://127.0.0.1:6000/) → ERR_UNSAFE_PORT.
+app.commandLine.appendSwitch('explicitly-allowed-ports', '6000,18790');
+
 function isBrokenPipeError(err) {
   const code = err && err.code;
   return code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || code === 'ERR_STREAM_WRITE_AFTER_END';
@@ -119,7 +128,7 @@ app.commandLine.appendSwitch(
 const ROOT_DIR = isDev
   ? path.resolve(__dirname, '..', '..')
   : (fs.existsSync(path.join(process.resourcesPath, 'app')) ? process.resourcesPath : path.resolve(__dirname, '..', '..'));
-const BACKEND_PORT = 6000;
+const BACKEND_PORT = isDev ? 6000 : 18790;
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 const ELECTRON_MANAGES_BACKEND = !isDev;
 
@@ -610,14 +619,30 @@ function packagedIndexHtml() {
   return candidates.find((item) => fs.existsSync(item)) || null;
 }
 
-function loadStudioUi() {
+function safeLoad(promise) {
+  return Promise.resolve(promise).catch((err) => {
+    console.warn('[Electron] UI load error:', err && (err.message || err));
+  });
+}
+
+function loadStudioUi({ preferBackend = false } = {}) {
   if (!mainWindow || mainWindow.isDestroyed()) return Promise.resolve();
   if (isDev) {
     const devServerUrl = process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5273';
-    return mainWindow.loadURL(devServerUrl);
+    return safeLoad(mainWindow.loadURL(devServerUrl));
+  }
+  // Packaged FastAPI is on 18790 — Chromium treats 6000 as an unsafe X11 port.
+  if (preferBackend) {
+    console.log('[Electron] Loading Studio UI from', `${BACKEND_URL}/`);
+    return safeLoad(mainWindow.loadURL(`${BACKEND_URL}/`));
+  }
+  const indexHtml = packagedIndexHtml();
+  if (indexHtml) {
+    console.log('[Electron] Loading Studio UI from file', indexHtml);
+    return safeLoad(mainWindow.loadFile(indexHtml));
   }
   console.log('[Electron] Loading Studio UI from', `${BACKEND_URL}/`);
-  return mainWindow.loadURL(`${BACKEND_URL}/`);
+  return safeLoad(mainWindow.loadURL(`${BACKEND_URL}/`));
 }
 
 function createMainWindow() {
@@ -637,8 +662,9 @@ function createMainWindow() {
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     trafficLightPosition: { x: 16, y: 18 },
     autoHideMenuBar: true,
-    backgroundColor: '#0f172a',
-    show: false,
+    backgroundColor: '#f8fafc',
+    show: true,
+    paintWhenInitiallyHidden: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
@@ -648,9 +674,15 @@ function createMainWindow() {
     },
   });
 
-  mainWindow.once('ready-to-show', () => {
+  const revealWindow = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.center();
     mainWindow.show();
-  });
+    mainWindow.focus();
+  };
+  mainWindow.once('ready-to-show', revealWindow);
+  mainWindow.webContents.once('did-finish-load', revealWindow);
+  setTimeout(revealWindow, 1200);
 
   // Pipe renderer console logs to Node stdout for debugging
   mainWindow.webContents.on('console-message', (_event, _level, message) => {
@@ -662,31 +694,22 @@ function createMainWindow() {
   mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
     console.warn(`[Electron] Failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
     if (isQuitting) return;
+    if (errorCode === -312 || String(errorDescription || '').includes('UNSAFE_PORT')) {
+      const indexHtml = packagedIndexHtml();
+      if (indexHtml && mainWindow && !mainWindow.isDestroyed()) {
+        console.warn('[Electron] Unsafe port; falling back to local UI file');
+        safeLoad(mainWindow.loadFile(indexHtml));
+      }
+      return;
+    }
     setTimeout(() => {
       if (mainWindow && !mainWindow.isDestroyed()) {
-        loadStudioUi();
+        loadStudioUi({ preferBackend: true });
       }
     }, 1200);
   });
 
-  if (isDev) {
-    loadStudioUi();
-  } else {
-    mainWindow.loadURL(
-      'data:text/html;charset=utf-8,' +
-        encodeURIComponent(`<!DOCTYPE html>
-<html lang="vi"><head><meta charset="UTF-8"/><title>Reup-Video Studio</title>
-<style>
-body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-font-family:Inter,system-ui,sans-serif;background:#0f172a;color:#e2e8f0}
-.card{max-width:420px;padding:32px;border-radius:20px;background:#1e293b;text-align:center}
-h1{font-size:20px;margin:0 0 8px}p{color:#94a3b8;line-height:1.5}
-</style></head><body><div class="card">
-<h1>Đang khởi động</h1>
-<p>Đang mở backend FastAPI rồi vào Studio.</p>
-</div></body></html>`),
-    );
-  }
+  loadStudioUi();
 
   mainWindow.on('close', (e) => {
     if (!isQuitting && process.platform === 'darwin') {
@@ -828,7 +851,7 @@ function setupIpcHandlers() {
     const started = await startPythonBackend();
     const ready = started && (await waitForBackend());
     if (ready && mainWindow && !mainWindow.isDestroyed() && !isDev) {
-      await loadStudioUi();
+      await loadStudioUi({ preferBackend: true });
     }
     return ready;
   });
@@ -847,6 +870,25 @@ function setupIpcHandlers() {
 // --- APP LIFECYCLE ---
 
 app.whenReady().then(async () => {
+  try {
+    const logFile = path.join(app.getPath('userData'), 'electron.log');
+    const stream = fs.createWriteStream(logFile, { flags: 'a' });
+    stream.write(`\n--- [${new Date().toISOString()}] Electron ${app.getVersion()} packaged=${app.isPackaged} ---\n`);
+    const wrap = (fn, level) => (...args) => {
+      try {
+        stream.write(`[${level}] ${args.map((item) => (item && item.stack) || String(item)).join(' ')}\n`);
+      } catch {
+        // ignore log IO
+      }
+      fn(...args);
+    };
+    console.log = wrap(console.log.bind(console), 'log');
+    console.warn = wrap(console.warn.bind(console), 'warn');
+    console.error = wrap(console.error.bind(console), 'error');
+  } catch (err) {
+    console.warn('[Electron] Could not attach file logger:', err);
+  }
+
   Menu.setApplicationMenu(null);
   if (process.platform === 'darwin' && app.dock) {
     try {
@@ -875,7 +917,7 @@ app.whenReady().then(async () => {
 
   const backendReady = await startPythonBackend();
   if (backendReady && mainWindow && !mainWindow.isDestroyed() && !isDev) {
-    await loadStudioUi();
+    await loadStudioUi({ preferBackend: true });
   }
   if (!backendReady) {
     console.error('[Electron] Backend is unavailable; the UI remains open so the error can be surfaced and retried.');

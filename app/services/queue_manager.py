@@ -21,7 +21,11 @@ from concurrent.futures import ThreadPoolExecutor
 from app.models.job import JobAborted, JobStatus, WatermarkConfig, ReupConfig
 from app.core.database import get_db_connection, init_db, DEFAULT_DB_PATH
 from app.services.activity import heartbeat
-from app.services.facebook_copyright import CopyrightBlockedError, assert_source_copyright_clear
+from app.services.facebook_copyright import (
+    CopyrightBlockedError,
+    FacebookSessionExpiredError,
+    assert_source_copyright_clear,
+)
 from app.services.reup_service import process_reup_video
 
 logger = logging.getLogger(__name__)
@@ -1789,6 +1793,24 @@ class BatchQueueManager:
             self.append_job_log(job_id, "⛔ Đã hủy theo yêu cầu.", level="WARN", stage="CANCELLED")
             raise
 
+        except FacebookSessionExpiredError as e:
+            logger.warning("Job %s stopped: Facebook session expired: %s", job_id, e)
+            self.append_job_log(
+                job_id,
+                f"⛔ {e}",
+                level="ERROR",
+                stage="COPYRIGHT_CHECK",
+                progress=0.0,
+            )
+            self.update_job_status(
+                job_id,
+                "FAILED",
+                progress=0.0,
+                error_message=str(e),
+                message=str(e),
+            )
+            return self.get_job(job_id) or {}
+
         except CopyrightBlockedError as e:
             logger.warning("Job %s blocked by Facebook copyright check: %s", job_id, e)
             self.append_job_log(
@@ -1824,7 +1846,7 @@ class BatchQueueManager:
                 raise
             if "không xuất file dở" in str(e):
                 raise
-            if isinstance(e, CopyrightBlockedError):
+            if isinstance(e, (CopyrightBlockedError, FacebookSessionExpiredError)):
                 raise
             self.append_job_log(
                 job_id,
@@ -1890,7 +1912,7 @@ class BatchQueueManager:
             logger.error(f"Worker pipeline async execution error for job {job_id}: {e}")
             if isinstance(e, FileNotFoundError):
                 return
-            if isinstance(e, CopyrightBlockedError):
+            if isinstance(e, (CopyrightBlockedError, FacebookSessionExpiredError)):
                 return
             if "không xuất file dở" in str(e):
                 return
